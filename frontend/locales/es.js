@@ -3250,6 +3250,8 @@ window.__NIMBUS_LOCALES.es = {
   'ui.opt_tool_moved_summary': '{{n}} movidos por herramientas',
   'ui.opt_tool_incomplete': 'Revisión de herramientas incompleta: algunos pedidos se pusieron en cola sin una búsqueda completa.',
   'ui.opt_tool_need_planning_suffix': '({{n}} por herramientas)',
+  'toast.opt_copied': 'Copiado al portapapeles',
+  'modal.opt_tool_confirm_more': '(+{{count}} más)',
   'ui.opt_line_excluded': 'excluida',
   'ui.opt_line_excluded_title': 'Excluida globalmente de la optimización',
   'ui.opt_line_orders_one': '{{n}} pedido',

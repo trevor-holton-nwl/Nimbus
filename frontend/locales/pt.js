@@ -3249,6 +3249,8 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.opt_tool_moved_summary': '{{n}} movidos por ferramentas',
   'ui.opt_tool_incomplete': 'Verificação de ferramentas incompleta: alguns pedidos foram colocados na fila sem uma busca completa.',
   'ui.opt_tool_need_planning_suffix': '({{n}} por ferramentas)',
+  'toast.opt_copied': 'Copiado para a área de transferência',
+  'modal.opt_tool_confirm_more': '(+{{count}} a mais)',
   'ui.opt_line_excluded': 'excluída',
   'ui.opt_line_excluded_title': 'Excluída globalmente da otimização',
   'ui.opt_line_orders_one': '{{n}} pedido',

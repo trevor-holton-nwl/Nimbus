@@ -3250,6 +3250,8 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.opt_tool_moved_summary': '{{n}} déplacées pour l\'outillage',
   'ui.opt_tool_incomplete': 'Contrôle d\'outillage incomplet : certaines commandes ont été mises en attente sans recherche complète.',
   'ui.opt_tool_need_planning_suffix': '({{n}} pour l\'outillage)',
+  'toast.opt_copied': 'Copié dans le presse-papiers',
+  'modal.opt_tool_confirm_more': '(+{{count}} de plus)',
   'ui.opt_line_excluded': 'exclue',
   'ui.opt_line_excluded_title': 'Exclue globalement de l\'optimisation',
   'ui.opt_line_orders_one': '{{n}} commande',

@@ -3289,6 +3289,8 @@ window.__NIMBUS_LOCALES.de = {
   'ui.opt_tool_moved_summary': '{{n}} wegen Werkzeugen verschoben',
   'ui.opt_tool_incomplete': 'Werkzeugprüfung unvollständig: Einige Aufträge wurden ohne vollständige Suche eingereiht.',
   'ui.opt_tool_need_planning_suffix': '({{n}} wegen Werkzeugen)',
+  'toast.opt_copied': 'In die Zwischenablage kopiert',
+  'modal.opt_tool_confirm_more': '(+{{count}} weitere)',
   'ui.opt_line_excluded': 'ausgenommen',
   'ui.opt_line_excluded_title': 'Global von der Optimierung ausgenommen',
   'ui.opt_line_orders_one': '{{n}} Auftrag',

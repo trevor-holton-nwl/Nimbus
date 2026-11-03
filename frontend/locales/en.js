@@ -3492,6 +3492,8 @@ window.__NIMBUS_LOCALES.en = {
   'ui.opt_tool_moved_summary': '{{n}} moved for tooling',
   'ui.opt_tool_incomplete': 'Tool check incomplete: some orders were queued without a full search.',
   'ui.opt_tool_need_planning_suffix': '({{n}} for tooling)',
+  'toast.opt_copied': 'Copied to clipboard',
+  'modal.opt_tool_confirm_more': '(+{{count}} more)',
   'ui.opt_line_excluded': 'excluded',
   'ui.opt_line_excluded_title': 'Globally excluded from optimization',
   'ui.opt_line_orders_one': '{{n}} order',

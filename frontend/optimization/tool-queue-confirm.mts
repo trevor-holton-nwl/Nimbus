@@ -5,7 +5,8 @@
  * Alerts service and the preview can share it without an import cycle. `candidate.toolBlocked/toolMoved` are filled by
  * the optimizer's overflow pass; when absent (rule Off, or before that pass exists) nothing here ever shows.
  */
-import { Util, Modal } from '../platform/foundation.mjs';
+import { Util, Modal, ErrorLog } from '../platform/foundation.mjs';
+import { Store } from '../platform/store.mjs';
 import type { CandidateResult, SchedulePatch, ToolBlockedEntry } from './setup-scheduler.mjs';
 
 export const TOOL_QUEUE_LIST_CAP = 5;
@@ -40,19 +41,31 @@ export async function confirmToolQueue(
   if (!summary.queued.length) return true;
   const shown = summary.queuedIds.slice(0, TOOL_QUEUE_LIST_CAP).map(id => Util.escapeHtml(id)).join(', ');
   const more = summary.queuedIds.length > TOOL_QUEUE_LIST_CAP
-    ? ` ${Util.t('ui.opt_bg_more', { count: summary.queuedIds.length - TOOL_QUEUE_LIST_CAP })}` : '';
+    ? ` ${Util.t('modal.opt_tool_confirm_more', { count: summary.queuedIds.length - TOOL_QUEUE_LIST_CAP })}` : '';
+  const directQueued = summary.queued.length - summary.cascade;   // no "Of which tool: 0 queued" line when every one is a cascade
   return Modal.confirm({
     title: Util.t('modal.opt_tool_confirm_title'),
     message: summary.moved > 0 ? Util.t('modal.opt_tool_confirm_moved', { n: summary.moved }) : '',   // no "moved: 0" line
-    detail: `<p>${Util.escapeHtml(Util.t('modal.opt_tool_confirm_queued', { n: summary.queued.length - summary.cascade }))}</p>${summary.cascade > 0 ? `<p>${Util.escapeHtml(Util.t('modal.opt_tool_confirm_cascade', { n: summary.cascade }))}</p>` : ''}<p>${shown}${Util.escapeHtml(more)}</p>`,
+    detail: `${directQueued > 0 ? `<p>${Util.escapeHtml(Util.t('modal.opt_tool_confirm_queued', { n: directQueued }))}</p>` : ''}${summary.cascade > 0 ? `<p>${Util.escapeHtml(Util.t('modal.opt_tool_confirm_cascade', { n: summary.cascade }))}</p>` : ''}<p>${shown}${Util.escapeHtml(more)}</p>`,
     confirmLabel: Util.t('btn.opt_tool_confirm_apply'),
     tone: 'warn',
   });
 }
 
 /** "Raise inventory": Master Data > Tool Inventory filtered to the tool (same lazy import as the alert deep link). */
-export function raiseToolInventory(plant: string | null | undefined, tool: string): void {
+export async function raiseToolInventory(plant: string | null | undefined, tool: string): Promise<void> {
+  const target = String(plant ?? '');
+  // openForTool switches the selected plant: honour the unsaved-edits guard first (no await, so no delay, when the plant is unchanged).
+  if (target && target !== Store.selectedPlant) {
+    const { Persistence } = await import('../scheduling/persistence.mjs');   // lazy: keeps this leaf free of an import cycle
+    if (!(await Persistence.confirmPlantSwitch(target))) return;
+  }
   NIMBUS?.App?.goto?.('masterdata');
   NIMBUS?.App?.gotoMasterSub?.('tool-inventory');
-  void import('../master-data/tool-inventory.mjs').then(m => m.ToolInventory.openForTool(String(plant ?? ''), tool));
+  try {
+    const m = await import('../master-data/tool-inventory.mjs');
+    m.ToolInventory.openForTool(target, tool);
+  } catch (err) {
+    ErrorLog.warn('optimizer', `Could not open Tool Inventory: ${err instanceof Error ? err.message : String(err)}`, err);
+  }
 }

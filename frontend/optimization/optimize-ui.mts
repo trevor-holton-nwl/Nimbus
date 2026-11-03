@@ -37,6 +37,15 @@ import type { NimbusMasterData, NimbusTask, OptimizerMode, SplitOrderPolicy, Set
 // -- Local type declarations (CQ-1 Phase 6 Task 7 conversion; scoped to
 //    OptimizeDialog/OptimizerPreview) ----------------------------------------
 
+/** The optional Confidence hooks the What-If adapter pokes (the module lives in nimbus-intelligence.js and is only
+ *  partly typed on the NIMBUS global). Every member is optional: boot or test wiring may not have installed them. */
+interface ConfidenceSeam {
+  _invalidatePending?(clearSuppressed?: boolean): void;
+  _suppressNextAlertRefresh?(): void;
+  _scheduleStartupRecompute?(delay?: number): void;
+}
+const confidenceSeam = (): ConfidenceSeam | undefined => NIMBUS?.Confidence as ConfidenceSeam | undefined;
+
 /** Store.pref('optimizerDefaults') shape — the user's last-used optimizer
  *  settings, seeded back into the dialog on open(). Store.pref() itself
  *  returns `unknown` (an open per-user prefs bag), so this is read via an `as`
@@ -608,7 +617,7 @@ export const OptimizeDialog = (() => {
     // time window, and option toggles. Falls back to the historical defaults
     // (horizon preset / changeover / toolbar checkbox state) otherwise.
     let _od: OptimizerDefaults | null = null;
-    try { _od = Store.pref('optimizerDefaults') as OptimizerDefaults | null; } catch {}
+    try { _od = Store.pref('optimizerDefaults') as OptimizerDefaults | null; } catch { /* no saved defaults: the historical ones apply */ }
     // Sync option checkboxes from the Gantt toolbar's existing chk- elements.
     // P2: dropped the dead `chk-respect-fixed` read here — no such element
     // exists in index.html (confirmed via grep), so it was always null and
@@ -769,7 +778,7 @@ export const OptimizeDialog = (() => {
         // In Backlog the box is forced on for the run: save what the planner chose, not the forced value.
         respectCalendar: mode === 'backlog' ? (_calendarBeforeBacklog ?? scEl?.checked ?? true) : (scEl?.checked ?? true),
       });
-    } catch {}
+    } catch (err) { ErrorLog.warn('optimizer', `Could not save optimizer defaults: ${err instanceof Error ? err.message : String(err)}`); }
 
     // Immediate visual feedback so the click feels responsive.
     const runBtn = document.getElementById('opt-run-btn') as HTMLButtonElement | null;
@@ -1674,7 +1683,7 @@ export const OptimizerPreview = {
           runSeq,
           // Publish Plan A's state before the alternates compute (the modal
           // stays spinner-only; the single render still waits for the alts).
-          onPrimary: partial => { OptimizerPreview._installPreviewResult(partial); },
+          onPrimary: partial => { if (OptimizerPreview._runSeq === runSeq) OptimizerPreview._installPreviewResult(partial); },
         }));
         const result = computed instanceof Promise ? await computed : computed;
         // Race safety: bail silently unless this preview is still the one the
@@ -2467,24 +2476,38 @@ export const OptimizerPreview = {
       button.addEventListener('click', () => { void OptimizerPreview._raiseInventory(button.dataset.optToolRaise ?? ''); });
     });
     body.querySelector<HTMLButtonElement>('[data-opt-tool-export]')?.addEventListener('click', () => {
-      const blob = new Blob(['\uFEFF' + OptimizerPreview.toolBlockedCsv(toolBlocked, labelOf, linesById)], { type: 'text/csv;charset=utf-8' });
-      const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url;
-      link.download = `tool-blocked-${OptimizerPreview._plant || 'preview'}.csv`; link.click(); URL.revokeObjectURL(url);
+      OptimizerPreview._downloadCsv(`tool-blocked-${OptimizerPreview._plant || 'preview'}.csv`, OptimizerPreview.toolBlockedCsv(toolBlocked, labelOf, linesById));
     });
     const missingCsv = () => OptimizerPreview.missingPairsCsv(OptimizerPreview._explanation?.missingPairs || []);
     body.querySelector<HTMLButtonElement>('[data-opt-copy-missing]')?.addEventListener('click', () => {
-      navigator.clipboard?.writeText(missingCsv()).catch(() => Toast.show(Util.t('toast.clipboard_denied'), 'error'));
+      if (!navigator.clipboard?.writeText) { Toast.show(Util.t('toast.clipboard_denied'), 'error'); return; }
+      navigator.clipboard.writeText(missingCsv())
+        .then(() => Toast.show(Util.t('toast.opt_copied'), 'success'))
+        .catch(() => Toast.show(Util.t('toast.clipboard_denied'), 'error'));
     });
     body.querySelector<HTMLButtonElement>('[data-opt-export-missing]')?.addEventListener('click', () => {
-      const blob = new Blob([missingCsv()], { type: 'text/csv;charset=utf-8' });
-      const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url;
-      link.download = `missing-setups-${OptimizerPreview._plant || 'preview'}.csv`; link.click(); URL.revokeObjectURL(url);
+      OptimizerPreview._downloadCsv(`missing-setups-${OptimizerPreview._plant || 'preview'}.csv`, missingCsv());
     });
     body.querySelector<HTMLButtonElement>('[data-opt-review-missing]')?.addEventListener('click', async () => {
-      const setupAdmin = (globalThis as unknown as { NIMBUS?: { SetupAdmin?: { reviewMissingPairs?: (plant: string | null, pairs: PreviewExplanation['missingPairs']) => Promise<boolean> } } }).NIMBUS?.SetupAdmin;
-      if (await setupAdmin?.reviewMissingPairs?.(OptimizerPreview._plant, OptimizerPreview._explanation?.missingPairs || [])) OptimizerPreview.discard();
+      try {
+        const setupAdmin = (globalThis as unknown as { NIMBUS?: { SetupAdmin?: { reviewMissingPairs?: (plant: string | null, pairs: PreviewExplanation['missingPairs']) => Promise<boolean> } } }).NIMBUS?.SetupAdmin;
+        if (await setupAdmin?.reviewMissingPairs?.(OptimizerPreview._plant, OptimizerPreview._explanation?.missingPairs || [])) OptimizerPreview.discard();
+      } catch (err) {
+        ErrorLog.error('optimizer', `Review missing setups failed: ${err instanceof Error ? err.message : String(err)}`, err);
+      }
     });
     OptimizerPreview._syncApplyButton();
+  },
+
+  /** Download text as a UTF-8 CSV (with BOM, so Excel reads accents). The object URL is released after the click is handled. */
+  _downloadCsv(filename: string, text: string): void {
+    const blob = new Blob(['\uFEFF' + text], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
   },
 
   async apply(): Promise<void> {
@@ -2578,7 +2601,7 @@ export const OptimizerPreview = {
       OptimizerPreview._clear();
       Modal.close('modal-opt-preview');
     }
-    raiseToolInventory(plant, tool);
+    await raiseToolInventory(plant, tool);
     if (previewOpen) Toast.show(Util.t('toast.opt_tool_raise_closed'), 'info', 7000);
   },
 
@@ -2614,6 +2637,7 @@ export const OptimizerPreview = {
     const toolSummary = toolQueueSummary(candidate, kept);
     // No await when there is nothing to confirm: the commit stays synchronous exactly as before.
     if (toolSummary.queued.length) {
+      OptimizerPreview._applying = true;   // set before the await so a second Apply gesture cannot start a second commit
       // The confirm is async and a planner can still edit tasks behind it: remember what the kept patches' orders looked
       // like, and refuse to commit if any of them changed (or vanished) before the answer arrived.
       const before = taskBaseline(kept.map(patch => Store.tasks[String(patch.id)]).filter((task): task is NimbusTask => !!task));
@@ -2625,6 +2649,8 @@ export const OptimizerPreview = {
         OptimizerPreview._showPreviewAfterCancel();
         return false;
       }
+      // The preview can be discarded or replaced by a newer run while the confirm is open.
+      if (OptimizerPreview._candidate !== candidate) { OptimizerPreview._applying = false; return false; }
       const drifted = kept.some(patch => {
         const id = String(patch.id);
         const live = Store.tasks[id];
@@ -2640,6 +2666,8 @@ export const OptimizerPreview = {
       }
     }
     OptimizerPreview._applying = true;
+    Engine.applySchedulePatches(kept);
+    // Audit after the commit, so a failed apply never logs a run that did not happen.
     if (auditDetails && plant) {
       Util.fetchTraced(`${Config.API_BASE}/audit/log`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'X-User': Session.actor() },
@@ -2657,10 +2685,11 @@ export const OptimizerPreview = {
             tooling_rule: OptimizerPreview._toolFingerprint ? (JSON.parse(OptimizerPreview._toolFingerprint) as { r: string }).r : 'off',
             tool_blocked: toolSummary.queued.length,
             tool_moved: toolSummary.moved,
+            applied_count: kept.length,
             ...(auditDetails.searchBudgetMs !== undefined ? { search_budget_ms: auditDetails.searchBudgetMs, exhaustive: auditDetails.exhaustive === true } : {}),
           },
         }),
-      }).catch(() => {});
+      }).catch(err => ErrorLog.warn('optimizer', `Audit log failed: ${err instanceof Error ? err.message : String(err)}`));
     }
     if (mode === 'backlog' && OptimizerPreview._backlogResult && OptimizerPreview._backlogAudit) {
       const audit = OptimizerPreview._backlogAudit;
@@ -2674,7 +2703,7 @@ export const OptimizerPreview = {
             from: audit.from?.toISOString() ?? null, to: audit.to?.toISOString() ?? null,
             plant_timezone: audit.timezone, captured_run_at: audit.runAt?.toISOString() ?? null,
             backlog_found: diagnostics.backlogFound, moved: diagnostics.moved, firmed_moved: diagnostics.firmedMoved,
-            frozen_moved: diagnostics.frozenMoved,
+            frozen_moved: diagnostics.frozenMoved, applied_count: kept.length,
             invalid_runtime: diagnostics.invalidRuntimeIds.length, missing_start: diagnostics.missingStartIds.length,
             overlong: diagnostics.overlongIds.length, largest_delay_minutes: diagnostics.largestDelayMinutes,
             boundary_conflicts: diagnostics.boundaryConflicts.length,
@@ -2682,9 +2711,8 @@ export const OptimizerPreview = {
             split_order_policy: Engine.splitOrderPolicyFor(audit.plant),
           },
         }),
-      }).catch(() => {});
+      }).catch(err => ErrorLog.warn('optimizer', `Audit log failed: ${err instanceof Error ? err.message : String(err)}`));
     }
-    Engine.applySchedulePatches(kept);
     if (skipped.ids.length) {
       if (skipped.reason === 'running') {
         Toast.show(Util.t('toast.opt_apply_running_skipped', { count: skipped.ids.length }), 'warn', 7000);
@@ -3303,7 +3331,7 @@ export const SandboxAdapter = {
     // mutating Store. The Confidence module also observes this event directly;
     // this optional seam keeps the adapter safe when boot/test wiring orders
     // the cross-module listeners differently.
-    (NIMBUS!.Confidence as { _invalidatePending?(clearSuppressed?: boolean): void } | undefined)?._invalidatePending?.(true);
+    confidenceSeam()?._invalidatePending?.(true);
     // So a discarded what-if session leaves no trace in the confidence tracker,
     // same as a discarded optimizer preview (see OptimizerPreview._confSnapshot).
     // Captured here (not in Sandbox.enter()) at the same logical moment as before —
@@ -3357,10 +3385,7 @@ export const SandboxAdapter = {
         // still true, so task replacement events can arm Confidence's debounce.
         // Cancel that pending work before restoring the detached baseline; the
         // restored score/history must remain authoritative after the 400ms wait.
-        (NIMBUS!.Confidence as {
-          _invalidatePending?(clearSuppressed?: boolean): void;
-          _suppressNextAlertRefresh?(): void;
-        } | undefined)?._invalidatePending?.();
+        confidenceSeam()?._invalidatePending?.();
         Store.setLastOptimize(
           SandboxAdapter._lastOptimizeSnapshot ? new Date(SandboxAdapter._lastOptimizeSnapshot) : null,
           'sandbox',
@@ -3387,13 +3412,8 @@ export const SandboxAdapter = {
       // this is the one existing post-discard recompute, and it must see the
       // restored dismissal set above.
       SandboxAdapter._clearSideEffectSnapshot();
-      (NIMBUS!.Confidence as {
-        _suppressNextAlertRefresh?(): void;
-        _scheduleStartupRecompute?(delay?: number): void;
-      } | undefined)?._suppressNextAlertRefresh?.();
-      (NIMBUS!.Confidence as {
-        _scheduleStartupRecompute?(delay?: number): void;
-      } | undefined)?._scheduleStartupRecompute?.();
+      confidenceSeam()?._suppressNextAlertRefresh?.();
+      confidenceSeam()?._scheduleStartupRecompute?.();
       Alerts.scheduleRecompute();
       Toast.show(Util.t('toast.scenario_discarded'), 'info');
     }
@@ -3483,7 +3503,7 @@ export const SandboxAdapter = {
       }
     }
     SandboxAdapter._linePlantSnapshot = null;
-    (NIMBUS!.Confidence as { _invalidatePending?(clearSuppressed?: boolean): void } | undefined)?._invalidatePending?.(true);
+    confidenceSeam()?._invalidatePending?.(true);
     Alerts.scheduleRecompute();
     Toast.show(Util.t('toast.scenario_discarded'), 'info');
   },
