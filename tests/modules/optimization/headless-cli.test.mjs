@@ -108,3 +108,32 @@ test('the Node entry reads stdin, sets TZ from the plant when unset and prints o
   assert.ok(result.patches.length > 0);
   assert.match(out.stderr.split('\n')[0], /"step":"snapshot"/, 'log lines stream to stderr as JSON');
 });
+
+// P0-21: the job runner must always answer with JSON, never die with a stack trace and no result.
+test('P0-21: a throw anywhere in run or apply comes back as an internal_error answer, not an exception', async () => {
+  const broken = { ...wireWithUnplaced(), tasks: null };
+  const run = await runOptimizer({ plant: PLANT, wire: broken, params });
+  assert.equal(run.ok, false);
+  assert.equal(run.status, 'internal_error');
+  assert.ok(run.error && run.blockers.includes('internal_error'));
+  const apply = await planApplyFromState({ plant: PLANT, runWire: wireWithUnplaced(), liveWire: wireWithUnplaced(), state: 'not a tagged state', params, jobId: 1 });
+  assert.equal(apply.ok, false);
+  assert.equal(apply.refusal, 'internal_error');
+  assert.equal(apply.body, null);
+});
+
+test('P0-21: the Node entry refuses an unknown --phase (exit 2) instead of silently running', () => {
+  const script = fileURLToPath(new URL('../../../frontend/optimization/headless-cli.mjs', import.meta.url));
+  const out = spawnSync(process.execPath, [script, '--phase', 'aply', '--input', '-'], { input: JSON.stringify(input()), encoding: 'utf8' });
+  assert.equal(out.status, 2, out.stderr);
+  assert.match(out.stderr, /unknown phase/i);
+  assert.equal(out.stdout, '', 'no result is printed for a phase that did not run');
+});
+
+test('P0-21: the Node entry answers a corrupt apply input with JSON and exit 0', () => {
+  const script = fileURLToPath(new URL('../../../frontend/optimization/headless-cli.mjs', import.meta.url));
+  const bad = { plant: PLANT, runWire: wireWithUnplaced(), liveWire: wireWithUnplaced(), state: '{', params, jobId: 3 };
+  const out = spawnSync(process.execPath, [script, '--phase', 'apply', '--input', '-'], { input: JSON.stringify(bad), encoding: 'utf8' });
+  assert.equal(out.status, 0, out.stderr);
+  assert.equal(JSON.parse(out.stdout).refusal, 'internal_error');
+});

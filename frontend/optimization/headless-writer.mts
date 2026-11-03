@@ -253,8 +253,10 @@ export function planApply(args: {
       changed = true;
     }
     if (!changed) break;
-    if (pass === maxPasses - 1) return refuse('validation_did_not_settle');
     kept = patches.filter(patch => !dropped.has(String(patch.id)));
+    // The cap consumed the whole kept set (every remaining patch collided): nothing is left to settle, so the answer is
+    // "apply nothing", not a refusal. A non-empty set still changing at the cap stays refused (documented).
+    if (pass === maxPasses - 1 && kept.length) return refuse('validation_did_not_settle');
   }
   kept = patches.filter(patch => !dropped.has(String(patch.id)));
   // Nothing dropped: the whole candidate is checked as the preview's Apply checks it. After a drop the dispositions

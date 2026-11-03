@@ -785,3 +785,108 @@ test('Tool Inventory: compute-core-stale is thrown ONLY for a Hard plant with a 
     }
   } finally { globalThis.NimbusComputeCore = real; }
 });
+
+// P0-15: an invalid horizon is a candidate with `status: 'invalid_horizon'` and no validation seam. The worker answers it
+// as a normal response (it used to throw "no validation metadata") and the client resolves it as-is, so the dialog can
+// name the real reason; the sync path returns the same candidate.
+test('P0-15: a past-window request answers status invalid_horizon without validation or a throw, and the client resolves it', async () => {
+  const request = {
+    runId: 'invalid-horizon', mode: 'duedate',
+    snapshot: { ...structuredClone(snapshot), selectedPlant: 'P',
+      tasks: [{ id: 't1', PLANT: 'P', MACHINE: 'L1', RUN_TIME: 1, planning_status: 'scheduled',
+        start_date: new Date(2035, 7, 7, 8), end_date: new Date(2035, 7, 7, 9) }],
+      masterData: { plants: [{ plant: 'P', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }], lines: [{ plant: 'P', machine: 'L1' }] },
+      setupSnapshot: { plant: 'P', plant_active: false, definition: null, plant_rows: [], machine_rows: [], machine_states: [], overrides: [] } },
+    request: { mode: 'duedate', plant: 'P', respectCalendar: false,
+      planningStart: new Date(2035, 7, 6, 8, 0, 0), runNow: new Date(2035, 7, 6, 8, 0, 0),
+      endDate: new Date(2035, 7, 1, 0, 0, 0) },
+  };
+  const response = buildOptimizerWorkerResponse(structuredClone(request), realClock);
+  assert.equal(response.candidate.status, 'invalid_horizon');
+  assert.equal(response.validation, undefined);
+  assert.equal(response.error, undefined);
+  assert.match(response.candidate.explanation[0].message, /horizon/);
+  const sync = evaluateOptimizerWorkerRequest(structuredClone(request), realClock);
+  assert.equal(sync.status, 'invalid_horizon');
+  assert.equal(sync.explanation[0].code, response.candidate.explanation[0].code);
+
+  let worker;
+  const promise = runOptimizerPreview(request, {
+    workerFactory: () => { worker = { onmessage: null, onerror: null, postMessage() {}, terminate() {} }; return worker; },
+  });
+  worker.onmessage({ data: response });
+  const resolved = await promise;
+  assert.equal(resolved.status, 'invalid_horizon');
+  assert.equal(resolved.validationContext, undefined);
+});
+
+// P0-17: worker client failure paths.
+function fakeWorker() {
+  return { onmessage: null, onerror: null, onmessageerror: null, terminated: false, posted: [],
+    postMessage(m) { this.posted.push(m); }, terminate() { this.terminated = true; } };
+}
+const clientRequest = (runId, evalRequest = {}) => ({ runId, mode: 'spt', snapshot, request: { mode: 'spt', respectCalendar: false, ...evalRequest } });
+
+test('P0-17: an undeserialisable worker message (onmessageerror) rejects and releases the worker', async () => {
+  const worker = fakeWorker();
+  const promise = runOptimizerPreview(clientRequest('msg-err'), { workerFactory: () => worker });
+  assert.equal(typeof worker.onmessageerror, 'function', 'the client listens for onmessageerror');
+  worker.onmessageerror({});
+  await assert.rejects(promise, /could not be read|message/i);
+  assert.equal(worker.terminated, true);
+});
+
+test('P0-17: an error response with an empty message still rejects, and keeps the worker stack', async () => {
+  const worker = fakeWorker();
+  const promise = runOptimizerPreview(clientRequest('empty-err'), { workerFactory: () => worker });
+  worker.onmessage({ data: { runId: 'empty-err', error: '', stack: 'Error: boom\n    at worker.js:1:1' } });
+  await assert.rejects(promise, (error) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.stack, /worker\.js:1:1/, 'the worker stack is preserved');
+    return true;
+  });
+  assert.equal(worker.terminated, true);
+});
+
+test('P0-17: an invalid deadline duration throws before any worker is spawned (no leak)', () => {
+  let spawned = 0;
+  assert.throws(() => runOptimizerPreview({ ...clientRequest('bad-deadline'), deadlineDurationMs: Number.POSITIVE_INFINITY }, {
+    workerFactory: () => { spawned++; return fakeWorker(); },
+  }), /invalid deadline/);
+  assert.equal(spawned, 0, 'the worker is created only after the request is built');
+});
+
+test('P0-17: a throwing worker factory falls back to the sync evaluator for Normal and rejects for Exhaustive', async () => {
+  const { ErrorLog } = await import('../../../frontend/platform/foundation.mjs');
+  const priorWarn = ErrorLog.warn;
+  ErrorLog.warn = () => {};
+  try {
+    let syncCalls = 0;
+    const normal = await runOptimizerPreview(clientRequest('factory-normal'), {
+      workerFactory: () => { throw new Error('Worker construction blocked'); },
+      syncEvaluator: () => { syncCalls++; return candidate('sync-after-factory-throw'); },
+    });
+    assert.equal(normal.id, 'sync-after-factory-throw');
+    assert.equal(syncCalls, 1);
+    await assert.rejects(runOptimizerPreview(clientRequest('factory-long', { exhaustive: true, searchBudgetMs: SETUP_AWARE_EXHAUSTIVE_BUDGET_MS }), {
+      workerFactory: () => { throw new Error('Worker construction blocked'); },
+      syncEvaluator: () => { syncCalls++; return candidate('must-not-run'); },
+    }), /blocked|worker/i);
+    assert.equal(syncCalls, 1, 'an exhaustive run never lands on the main thread');
+  } finally {
+    ErrorLog.warn = priorWarn;
+  }
+});
+
+test('P0-17: the worker and the sync fallback evaluate the same request shape (mode carried once)', async () => {
+  const seen = [];
+  const worker = fakeWorker();
+  const req = { runId: 'shape', mode: 'changeover', snapshot, request: { mode: 'spt', respectCalendar: false } };
+  const promise = runOptimizerPreview(req, {
+    workerFactory: () => worker,
+    syncEvaluator: (_s, r) => { seen.push(r); return candidate('sync'); },
+  });
+  worker.onmessage({ data: { runId: 'shape', error: 'compute-core-stale' } });
+  await promise;
+  assert.equal(seen[0].mode, 'changeover', 'the sync fallback uses the same mode the worker would');
+});

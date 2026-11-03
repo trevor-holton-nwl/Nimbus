@@ -3,7 +3,7 @@
 // ambient NimbusComputeCore object in every browser realm.
 import { evaluateSchedule } from './engine.mjs';
 import type { CandidateResult } from './setup-scheduler.mjs';
-import { serializeOptimizerValidation } from './optimizer-worker-contract.mjs';
+import { evalRequestOf, serializeOptimizerValidation } from './optimizer-worker-contract.mjs';
 import type { OptimizerWorkerRequest, OptimizerWorkerResponse } from './optimizer-worker-contract.mjs';
 export type { OptimizerWorkerRequest, OptimizerWorkerResponse } from './optimizer-worker-contract.mjs';
 
@@ -27,7 +27,7 @@ export function evaluateOptimizerWorkerRequest(
   clock: () => number = () => performance.now(),
 ): CandidateResult {
   const localized = localizeOptimizerDeadline(request, clock);
-  return evaluateSchedule(localized.snapshot, { ...localized.request, mode: localized.mode });
+  return evaluateSchedule(localized.snapshot, evalRequestOf(localized));
 }
 
 export function buildOptimizerWorkerResponse(
@@ -36,8 +36,11 @@ export function buildOptimizerWorkerResponse(
 ): OptimizerWorkerResponse {
   const result = evaluateOptimizerWorkerRequest(request, clock);
   const validation = serializeOptimizerValidation(result);
-  if (!validation) throw new Error('Optimizer worker produced no validation metadata.');
   const { validationContext: _validationContext, ...candidate } = result;
+  // An `invalid_horizon` candidate is a caller error with no schedule proposal, so it has no validation seam by design:
+  // answer it as a normal response and let the dialog name the reason, instead of throwing "no validation metadata".
+  if (!validation && result.status === 'invalid_horizon') return { runId: request.runId, candidate };
+  if (!validation) throw new Error('Optimizer worker produced no validation metadata.');
   return { runId: request.runId, candidate, validation };
 }
 

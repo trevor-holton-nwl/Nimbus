@@ -11,6 +11,7 @@ import { Timeline } from '../../../frontend/scheduling/gantt.mjs';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Util, ErrorLog, Toast, Modal } from '../../../frontend/platform/foundation.mjs';
 import { Alerts, Compute, Utilization } from '../../../frontend/insights/services.mjs';
+import { Session } from '../../../frontend/security/session.mjs';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { Engine } from '../../../frontend/optimization/engine.mjs';
@@ -899,6 +900,27 @@ test('computePreview is state-free until present(result, { open: false }) instal
     assert.equal(OptimizerPreview._candidate, result.candidate);
     assert.equal(OptimizerPreview._finalists, result.finalists);
     assert.equal(fx.writes.length, writesBefore, 'open: false installs state without rendering the body');
+  } finally {
+    fx.restore();
+  }
+});
+
+// P0-18: the verdict row printed a hardcoded "Pruned." for every alternate; the per-alternate reason was computed and dropped.
+test('P0-18: the plan-comparison verdict row shows each alternate own reason, escaped, and falls back to "Pruned."', async () => {
+  const fx = openSingleRevealFixture('SR', singleRevealTasks);
+  try {
+    OptimizerPreview.showLoading('spt', 'SR');
+    OptimizerPreview.runWithPreview('spt', { plant: 'SR', respectCalendar: false, now: new Date('2026-08-03T08:00:00') });
+    for (let i = 0; i < 200 && fx.root.classList.contains('opt-pv-loading'); i++) await wait(10);
+    const finalists = OptimizerPreview._finalists;
+    assert.ok(finalists && finalists.length > 1, 'the fixture produced alternates');
+    finalists[1].whyNot = 'Saves 2 changeovers <b>but</b> costs 1 late order.';
+    if (finalists[2]) finalists[2].whyNot = null;
+    OptimizerPreview._render();
+    const html = fx.body.innerHTML;
+    assert.ok(html.includes('Saves 2 changeovers &lt;b&gt;but&lt;/b&gt; costs 1 late order.'), 'the alternate own reason, escaped');
+    if (finalists[2]) assert.ok(html.includes(`<strong>${Util.t('ui.opt_pv_plan_pruned')}</strong>`), 'no reason: the generic label');
+    assert.ok(!html.includes(`<strong>${Util.t('ui.opt_pv_plan_pruned')}</strong></td><td><strong>Saves`), 'the reason replaces the label, it is not appended');
   } finally {
     fx.restore();
   }
@@ -2527,6 +2549,176 @@ test('Gap C: an unhydrated plant calendar asks first; Cancel starts neither the 
     assert.equal(calls.confirms[0].tone, 'warn');
     assert.equal(calls.bg + calls.fg, 0, 'declining runs nothing');
   }));
+
+// P0-13: run() hides the dialog before its pre-run confirms; a Cancel must bring it back with its state, not leave
+// the planner with nothing (and the next open() reseeding scope/lines/window).
+test('P0-13: cancelling the calendar confirm re-shows the Optimize dialog instead of discarding it', () =>
+  withCalendarGate('failed', false, async (calls, chk) => {
+    const modal = globalThis.document.getElementById('modal-optimize');
+    const inner = makeSandboxElement('opt-modal-inner');
+    modal.querySelector = sel => (sel === '.opt-modal' ? inner : null);
+    OptimizeDialog.open();
+    assert.equal(modal.hidden, false);
+    chk.checked = false;
+    await OptimizeDialog.run();
+    await wait(20);
+    assert.equal(calls.confirms.length, 1);
+    assert.equal(modal.hidden, false, 'Cancel leaves the dialog open');
+    assert.equal(inner.classList.contains('visible'), true, 'and visible (not faded out)');
+    assert.equal(calls.bg + calls.fg, 0);
+  }));
+
+// P0-14: no stuck spinner on early returns or exceptions.
+test('P0-14: an exception in the pre-run steps restores the Run button, drops the spinner and logs', () =>
+  withCalendarGate('failed', false, async (calls, chk) => {
+    const runBtn = globalThis.document.getElementById('opt-run-btn');
+    runBtn.innerHTML = 'RUN';
+    runBtn.disabled = false;
+    Modal.confirm = async () => { throw new Error('confirm exploded'); };
+    const priorHide = OptimizerPreview.hideLoading;
+    const priorErr = ErrorLog.error;
+    let hides = 0;
+    const logged = [];
+    OptimizerPreview.hideLoading = () => { hides++; };
+    ErrorLog.error = (...a) => { logged.push(a); };
+    try {
+      chk.checked = false;
+      await OptimizeDialog.run();   // must resolve, not reject
+      assert.equal(runBtn.innerHTML, 'RUN', 'the Run button is restored');
+      assert.equal(runBtn.disabled, false);
+      assert.ok(hides >= 1, 'the spinner is taken down');
+      assert.equal(logged.length, 1);
+      assert.match(String(logged[0][1]), /Optimize run failed/);
+      assert.equal(calls.fg + calls.bg, 0);
+    } finally {
+      OptimizerPreview.hideLoading = priorHide;
+      ErrorLog.error = priorErr;
+    }
+  }));
+
+test('P0-14: runWithPreview with an empty Store takes the spinner down without aborting the previous run or bumping the token', () => {
+  const fx = openBackgroundFixture();
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorHide = OptimizerPreview.hideLoading;
+  const priorToast = Toast.show;
+  try {
+    Store.setTasks([], 'unit-test');
+    let hides = 0;
+    OptimizerPreview.hideLoading = () => { hides++; };
+    Toast.show = () => {};
+    let aborted = false;
+    OptimizerPreview._workerAbortController = { abort() { aborted = true; } };
+    const seq = OptimizerPreview._runSeq;
+    OptimizerPreview.runWithPreview('spt', { plant: 'SR' });
+    assert.equal(hides, 1, 'the spinner is dropped');
+    assert.equal(aborted, false, 'the previous run is left alone');
+    assert.equal(OptimizerPreview._runSeq, seq, 'the run token is not bumped');
+  } finally {
+    OptimizerPreview.hideLoading = priorHide;
+    Toast.show = priorToast;
+    OptimizerPreview._workerAbortController = null;
+    Store.setTasks(priorTasks, 'unit-test');
+    fx.restore();
+  }
+});
+
+// P0-15: a window that ends before it starts names its real reason; it is not an empty plan or "no validation metadata".
+test('P0-15: a reversed window shows the invalid-horizon reason in the failure card and never installs a plan', async () => {
+  const fx = openSingleRevealFixture('SR', singleRevealTasks);
+  try {
+    OptimizerPreview.showLoading('spt', 'SR');
+    OptimizerPreview.runWithPreview('spt', { plant: 'SR', respectCalendar: false, now: new Date('2026-08-03T08:00:00'),
+      startDate: new Date('2026-08-03T08:00:00'), endDate: new Date('2026-08-01T08:00:00') });
+    for (let i = 0; i < 200 && fx.root.classList.contains('opt-pv-loading'); i++) await wait(10);
+    assert.ok(!fx.root.classList.contains('opt-pv-loading'));
+    assert.match(fx.body.innerHTML, /horizon must end after/);
+    assert.equal(OptimizerPreview._previewDiagnostics?.[0]?.code, 'candidate-evaluation-failed');
+  } finally {
+    fx.restore();
+  }
+});
+
+test('P0-15: Run refuses a From at or after To before closing the dialog', () =>
+  withCalendarGate('hydrated', true, async (calls) => {
+    const modal = globalThis.document.getElementById('modal-optimize');
+    const pickers = {};
+    globalThis.flatpickr = (sel) => (pickers[sel] = { selectedDates: [], set() {}, setDate() {}, destroy() {} });
+    OptimizeDialog.setTimeMode(false);
+    OptimizeDialog.setTimeMode(true);   // rebuilds the pickers through the stub above
+    const toasts = [];
+    const priorToast = Toast.show;
+    Toast.show = (msg) => { toasts.push(String(msg)); };
+    try {
+      pickers['#opt-from-cal'].selectedDates = [new Date('2026-09-10T08:00:00')];
+      OptimizeDialog.commitFrom();
+      pickers['#opt-to-cal'].selectedDates = [new Date('2026-09-01T08:00:00')];
+      OptimizeDialog.commitTo();
+      await OptimizeDialog.run();
+      await wait(20);
+      assert.equal(calls.fg + calls.bg, 0, 'nothing runs');
+      assert.equal(modal.hidden, false, 'the dialog stays open');
+      assert.ok(toasts.some(t => /After the From|after the From|opt_window_invalid/i.test(t)), 'the planner is told why: ' + JSON.stringify(toasts));
+    } finally {
+      Toast.show = priorToast;
+      OptimizeDialog.setTimeMode(false);
+    }
+  }));
+
+// P0-19: Remove Backlog forces Respect calendar on for its own run; that must not overwrite the planner's saved choice.
+test('P0-19: Remove Backlog restores the planner Respect-calendar choice when another strategy is picked, and never saves the forced value', () =>
+  withCalendarGate('hydrated', true, async (calls) => {
+    const cal = makeSandboxElement('opt-chk-calendar');
+    const baseGet = globalThis.document.getElementById;
+    globalThis.document.getElementById = id => (id === 'opt-chk-calendar' ? cal : baseGet(id));
+    const priorSet = Session.setPref;
+    const saved = [];
+    Session.setPref = (key, value) => { saved.push({ key, value }); };
+    try {
+      OptimizeDialog.open();
+      cal.checked = false;
+      OptimizeDialog.selectMode('backlog');
+      assert.equal(cal.checked, true, 'Backlog forces calendar on for its run');
+      assert.equal(cal.disabled, true);
+      await OptimizeDialog.run();
+      await wait(20);
+      const persisted = saved.find(entry => entry.key === 'optimizerDefaults');
+      assert.equal(persisted.value.respectCalendar, false, 'the saved value is the planner choice, not the forced one');
+      OptimizeDialog.selectMode('spt');
+      assert.equal(cal.checked, false, 'leaving Backlog restores the planner choice');
+      assert.equal(cal.disabled, false);
+      // A choice made while on another strategy is kept across a Backlog round trip.
+      cal.checked = true;
+      OptimizeDialog.selectMode('backlog');
+      OptimizeDialog.selectMode('duedate');
+      assert.equal(cal.checked, true);
+    } finally {
+      Session.setPref = priorSet;
+      globalThis.document.getElementById = baseGet;
+    }
+  }));
+
+// P0-19: a quick close() then open() must not be hidden by the first close's 230 ms fade timer.
+test('P0-19: a close() fade timer does not hide a dialog that was reopened inside the fade', async () => {
+  const fx = openBackgroundFixture();
+  const priorRaf = globalThis.requestAnimationFrame;
+  const priorMaster = Store.masterData;
+  try {
+    globalThis.requestAnimationFrame = () => 1;
+    globalThis.flatpickr = () => new Proxy({ selectedDates: [] }, { get: (target, key) => (key in target ? target[key] : () => {}) });
+    const modal = makeSandboxElement('modal-optimize');
+    const baseGet = globalThis.document.getElementById;
+    globalThis.document.getElementById = id => (id === 'modal-optimize' ? modal : baseGet(id));
+    OptimizeDialog.open();
+    OptimizeDialog.close();          // schedules the 230 ms hide
+    OptimizeDialog.open();           // reopened inside the fade
+    await wait(300);
+    assert.equal(modal.hidden, false, 'the stale fade timer must not hide the reopened dialog');
+  } finally {
+    delete globalThis.flatpickr;
+    globalThis.requestAnimationFrame = priorRaf;
+    fx.restore();
+  }
+});
 
 test('Gap C: a pending calendar also asks, and "Run anyway" proceeds in both the background and foreground paths', () =>
   withCalendarGate('pending', true, async (calls, chk) => {

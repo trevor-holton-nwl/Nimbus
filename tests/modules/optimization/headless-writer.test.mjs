@@ -36,3 +36,20 @@ test('a dropped patch takes its distribution family with it', async () => {
   assert.equal(reasons[a.id], 'row_version_changed');
   assert.equal(reasons[b.id], 'family');
 });
+
+// P0-21: when the pass cap consumes the whole kept set, the answer is "apply nothing", not a refusal.
+test('P0-21: a one-patch candidate whose only patch collides settles as ok with zero rows', async () => {
+  const { encodeTagged, decodeTagged } = await import('../../../frontend/optimization/headless-codec.mjs');
+  const run = await runOptimizer({ plant: PLANT, wire: wireWithUnplaced(), params });
+  const target = run.patches.find(item => item.start_date && lineOf(wireWithUnplaced(), item.id));
+  const state = decodeTagged(run.state);
+  state.candidate.patches = state.candidate.patches.filter(patch => String(patch.id) === target.id);
+  assert.equal(state.candidate.patches.length, 1);
+  const live = wireWithUnplaced();
+  live.tasks.data.push(taskRow('NEW-1', { MACHINE: lineOf(live, target.id), start_date: target.start_date, end_date: target.end_date, row_version: 1 }));
+  const plan = await planApplyFromState({ plant: PLANT, runWire: wireWithUnplaced(), liveWire: live, state: encodeTagged(state), params, jobId: 5 });
+  assert.ok(plan.dropped.some(d => d.id === target.id), JSON.stringify(plan));
+  assert.equal(plan.ok, true, JSON.stringify(plan.refusal ?? plan.findings));
+  assert.deepEqual(plan.apply, []);
+  assert.equal(plan.body, null);
+});

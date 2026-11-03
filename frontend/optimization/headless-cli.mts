@@ -26,7 +26,7 @@ import type { SerializedOptimizerValidation } from './optimizer-worker-contract.
 interface NodeProcess {
   argv: string[];
   env: Record<string, string | undefined>;
-  stdout: { write(text: string): void };
+  stdout: { write(text: string, callback?: () => void): void };
   stderr: { write(text: string): void };
   stdin: AsyncIterable<Uint8Array>;
   exit(code: number): never;
@@ -185,9 +185,22 @@ function failure(status: string, error: string, log: LogEntry[]): RunResult {
   return { ok: false, status, patches: [], summary: null, findings: [], validation: null, blockers: [status], log, state: null, error };
 }
 
-/** Phase `run`: build the snapshot, derive display starts, evaluate, map the result. */
+/** Phase `run`. Any throw outside the evaluator (a malformed bundle, a snapshot or derive failure) is answered as an
+ *  `internal_error` result, so the Jobs runner always gets a JSON answer instead of a dead process. */
 export async function runOptimizer(input: RunInput, sink: LogSink = () => undefined): Promise<RunResult> {
   const log: LogEntry[] = [];
+  try {
+    return await runOptimizerImpl(input, sink, log);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const entry: LogEntry = { at: new Date().toISOString(), level: 'error', step: 'run', msg: `unexpected failure: ${message}` };
+    log.push(entry);
+    sink(entry);
+    return failure('internal_error', message, log);
+  }
+}
+
+async function runOptimizerImpl(input: RunInput, sink: LogSink, log: LogEntry[]): Promise<RunResult> {
   const emit = (level: LogEntry['level'], step: string, msg: string, extra: { ms?: number; data?: Record<string, unknown> } = {}): void => {
     const entry: LogEntry = { at: new Date().toISOString(), level, step, msg, ...extra };
     log.push(entry);
@@ -354,6 +367,19 @@ export interface ApplyResult {
 /** Phase `apply`: compare version tokens, rebuild the LIVE snapshot, drop what changed, re-validate the rest. */
 export async function planApplyFromState(input: ApplyInput, sink: LogSink = () => undefined): Promise<ApplyResult> {
   const log: LogEntry[] = [];
+  try {
+    return await planApplyImpl(input, sink, log);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const entry: LogEntry = { at: new Date().toISOString(), level: 'error', step: 'apply', msg: `unexpected failure: ${message}`, data: { error: message } };
+    log.push(entry);
+    sink(entry);
+    return { ok: false, refusal: 'internal_error', apply: [], dropped: [], findings: [], body: null,
+      versions: { calendar_changed: false, tool_inventory_changed: false }, log };
+  }
+}
+
+async function planApplyImpl(input: ApplyInput, sink: LogSink, log: LogEntry[]): Promise<ApplyResult> {
   const emit = (level: LogEntry['level'], step: string, msg: string, data?: Record<string, unknown>): void => {
     const entry: LogEntry = { at: new Date().toISOString(), level, step, msg, ...(data ? { data } : {}) };
     log.push(entry);
@@ -430,23 +456,34 @@ async function readInput(path: string): Promise<string> {
   return readFileSync(path, 'utf8');
 }
 
-async function main(argv: string[]): Promise<void> {
+/** Exit only after stdout has flushed: a multi-MB result written to a pipe must not be cut by `process.exit`. */
+function exitAfterFlush(code: number): void {
+  process.stdout.write('', () => process.exit(code));
+}
+
+async function main(argv: string[]): Promise<number> {
   const arg = (name: string): string | undefined => { const i = argv.indexOf(`--${name}`); return i >= 0 ? argv[i + 1] : undefined; };
   if (argv.includes('--help')) {
     process.stdout.write('usage: headless-cli --phase run|apply [--input file|-]   (JSON in, one JSON result on stdout)\n');
-    return;
+    return 0;
   }
   const phase = arg('phase') ?? 'run';
+  // A typo must not silently run the other phase (an `aply` would start a full optimizer run).
+  if (phase !== 'run' && phase !== 'apply') {
+    process.stderr.write(`unknown phase: ${phase} (expected run or apply)\n`);
+    return 2;
+  }
   const input = JSON.parse(await readInput(arg('input') ?? '-')) as RunInput & ApplyInput;
   const sink: LogSink = entry => process.stderr.write(`${JSON.stringify(entry)}\n`);
   const result = phase === 'apply' ? await planApplyFromState(input, sink) : await runOptimizer(input, sink);
   process.stdout.write(`${JSON.stringify(result)}\n`);
+  return 0;
 }
 
 // Run only when this file is the process entry (importing it from a test must stay inert).
 if (typeof process !== 'undefined' && /headless-cli\.m?js$/.test(process.argv[1] ?? '')) {
-  main(process.argv.slice(2)).then(() => process.exit(0), error => {
+  main(process.argv.slice(2)).then(exitAfterFlush, error => {
     process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
-    process.exit(1);
+    exitAfterFlush(1);
   });
 }

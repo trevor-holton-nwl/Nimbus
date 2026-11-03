@@ -319,12 +319,26 @@ export const OptimizeDialog = (() => {
     hint.textContent = Util.t('tip.backlog_mode') + (grew ? ' ' + Util.t('ui.opt_backlog_runtime_grew', { count: grew }) : '');
   }
 
+  /** The planner's own Respect-calendar choice while Remove Backlog holds the box forced on (null = not in Backlog).
+   *  Backlog needs the calendar for its run, but that must neither be saved as the planner's default nor outlive
+   *  the mode: leaving Backlog puts the remembered choice back. */
+  let _calendarBeforeBacklog: boolean | null = null;
+
   function _applyModeOptions() {
     const backlog = _mode === 'backlog';
     const firmed = document.getElementById('opt-chk-firmed') as HTMLInputElement | null;
     const calendar = document.getElementById('opt-chk-calendar') as HTMLInputElement | null;
     if (firmed) firmed.disabled = backlog;
-    if (calendar) { calendar.checked = backlog || calendar.checked; calendar.disabled = backlog; }
+    if (calendar) {
+      if (backlog) {
+        if (_calendarBeforeBacklog === null) _calendarBeforeBacklog = calendar.checked;
+        calendar.checked = true;
+      } else if (_calendarBeforeBacklog !== null) {
+        calendar.checked = _calendarBeforeBacklog;
+        _calendarBeforeBacklog = null;
+      }
+      calendar.disabled = backlog;
+    }
     const firmedLabel = document.getElementById('opt-firmed-label');
     const calendarLabel = document.getElementById('opt-calendar-label');
     if (firmedLabel) firmedLabel.title = backlog ? 'Firmed orders move when reached and remain firmed.' : Util.t('ui.opt_respect_firmed_hint');
@@ -585,6 +599,7 @@ export const OptimizeDialog = (() => {
     }
     const el = document.getElementById('modal-optimize');
     if (!el) return;
+    if (_closeTimer) { clearTimeout(_closeTimer); _closeTimer = null; }
     el.hidden = false;
     _startDirty = false;
     _endDirty = false;
@@ -602,6 +617,7 @@ export const OptimizeDialog = (() => {
     const rcEl = document.getElementById('chk-respect-calendar') as HTMLInputElement | null;
     const ofEl = document.getElementById('opt-chk-firmed') as HTMLInputElement | null;
     const ocEl = document.getElementById('opt-chk-calendar') as HTMLInputElement | null;
+    _calendarBeforeBacklog = null;   // the boxes are re-seeded below; any forced-on state from a past session is gone
     if (rcEl && ocEl) ocEl.checked = rcEl.checked;
     // Saved defaults override the toolbar mirror when present. Older saved
     // presets used the pre-rename `respectFixed` key — fall back to it.
@@ -670,9 +686,12 @@ export const OptimizeDialog = (() => {
     }, 'OptimizeDialog');
   }
 
+  let _closeTimer: ReturnType<typeof setTimeout> | null = null;
+
   function close(immediate = false) {
     const el = document.getElementById('modal-optimize');
     if (!el) return;
+    if (immediate && _closeTimer) { clearTimeout(_closeTimer); _closeTimer = null; }
     const inner = el.querySelector('.opt-modal');
     inner?.classList.remove('visible');
     if (immediate) {
@@ -682,22 +701,45 @@ export const OptimizeDialog = (() => {
       el.hidden = true;
       return;
     }
-    setTimeout(() => { el.hidden = true; }, 230);
+    // Kept so open() can cancel it: a reopen inside the fade must not be hidden by this timer.
+    if (_closeTimer) clearTimeout(_closeTimer);
+    _closeTimer = setTimeout(() => { _closeTimer = null; el.hidden = true; }, 230);
   }
 
-  async function run() {
+  /** Undo close(true) when a pre-run confirm is cancelled: the dialog comes back with every choice intact (scope, lines,
+   *  preset, custom window) instead of being discarded and reseeded by the next open(). */
+  function _reshow() {
+    const el = document.getElementById('modal-optimize');
+    if (!el) return;
+    el.hidden = false;
+    requestAnimationFrame(() => el.querySelector('.opt-modal')?.classList.add('visible'));
+  }
+
+  async function _runImpl() {
     const bgRun = OptimizerPreview._backgroundRun;
     if (bgRun) {
       Toast.show(Util.t('toast.opt_bg_running', { plant: bgRun.plant }), 'warn');
       return;
     }
+    // Snapshot the dialog state NOW: run() awaits (rank-map fetch, up to three confirms, the tool inventory) and the
+    // dialog's own handlers keep mutating these after close(true), so a later read could see another run's choices.
+    const mode = _mode;
+    const scope = _scope;
+    const selectedLines = Array.from(_selectedLines);
+    const winStart = _start;
+    const winEnd = _end;
     const plant = _plant;
     if (!plant) {
       Toast.show(Util.t('toast.select_plant_to_opt'), 'warn');
       return;
     }
-    if (_scope === 'lines' && _selectedLines.size === 0) {
+    if (scope === 'lines' && selectedLines.length === 0) {
       Toast.show(Util.t('toast.select_lines_to_opt'), 'warn');
+      return;
+    }
+    // A From at or after To is refused here, before the dialog closes, rather than as an engine failure afterwards.
+    if (winStart && winEnd && winEnd.getTime() <= winStart.getTime()) {
+      Toast.show(Util.t('toast.opt_window_invalid'), 'warn');
       return;
     }
     // Senior review U21 (OQ52): a plant with no valid timezone has no clock, so the optimizer refuses to place on it,
@@ -706,20 +748,26 @@ export const OptimizeDialog = (() => {
       Toast.show(Util.t('toast.optimize_plant_no_timezone', { plant }), 'error', 9000);
       return;
     }
+    // Nothing to optimise: say so before the spinner goes up (runWithPreview keeps its own guard for other callers).
+    if (!Store.tasksArr.length) {
+      Toast.show(Util.t('toast.no_tasks_to_optimise'), 'error');
+      return;
+    }
     const sfEl = document.getElementById('opt-chk-firmed') as HTMLInputElement | null;
     const scEl = document.getElementById('opt-chk-calendar') as HTMLInputElement | null;
     const bgEl = document.getElementById('opt-chk-background') as HTMLInputElement | null;
     // Exhaustive runs in the background: no preview spinner, the planner keeps working.
-    const exhaustive = bgEl?.checked === true && _mode !== 'backlog';
+    const exhaustive = bgEl?.checked === true && mode !== 'backlog';
 
     // Remember the chosen strategy/window/options as this user's optimizer
     // defaults so the dialog pre-fills the same way next time (feature: optimizer
     // defaults). Self-service pref — persisted via the debounced PATCH.
     try {
       Session.setPref('optimizerDefaults', {
-        mode: _mode, preset: _preset,
+        mode, preset: _preset,
         respectFirmed:   sfEl?.checked ?? true,
-        respectCalendar: scEl?.checked ?? true,
+        // In Backlog the box is forced on for the run: save what the planner chose, not the forced value.
+        respectCalendar: mode === 'backlog' ? (_calendarBeforeBacklog ?? scEl?.checked ?? true) : (scEl?.checked ?? true),
       });
     } catch {}
 
@@ -740,7 +788,7 @@ export const OptimizeDialog = (() => {
     // freshness fetch below and the config-modal close transition. Otherwise
     // the user stares at a blurry frozen page for ~1–2s with no visible
     // response to their click.
-    if (!exhaustive) OptimizerPreview.showLoading(_mode, plant);
+    if (!exhaustive) OptimizerPreview.showLoading(mode, plant);
     // Hide the config modal RIGHT NOW (no 230ms fade). Its backdrop sits at
     // z-index 3000 with blur(12px) and would cover the preview spinner
     // (z=2000) for the entire await + fade duration. Hiding immediately is
@@ -768,7 +816,7 @@ export const OptimizeDialog = (() => {
     // real safety net, so ranks are never silently skipped.
     let wheelUsed = false;
     let unrankedFields: string[] = [];
-    if (_mode !== 'backlog') {
+    if (mode !== 'backlog') {
       if (Persistence._rankMapsPlant !== plant) {
         const _rankMapFetchT0 = performance.now();
         // Bound this await so a slow/hung fetch cannot stall the Run click
@@ -802,12 +850,12 @@ export const OptimizeDialog = (() => {
     // a failed REFETCH wiped the cache while _rankMapsPlant still matched:
     // ranksFresh was true, the old colorWheel probe found nothing, and the run
     // went ahead unranked and unannounced.
-    if (unrankedFields.length && (_mode === 'changeover' || _mode === 'duedate')) {
+    if (unrankedFields.length && (mode === 'changeover' || mode === 'duedate')) {
       const names = unrankedFields.map(k => Util.t(`constraint.${k}`)).join(', ');
       const ok = await Modal.confirm({
         title: Util.t('modal.no_priority_ranks_confirm_msg', { plant, fields: names }),
       });
-      if (!ok) { if (!exhaustive) OptimizerPreview.hideLoading(); restoreRunBtn(); return; }
+      if (!ok) { if (!exhaustive) OptimizerPreview.hideLoading(); restoreRunBtn(); _reshow(); return; }
     }
 
     // Gap C (2026-10-23): Optimize reads Store.plants/calendars, which fall back to the localStorage copy when the
@@ -822,32 +870,41 @@ export const OptimizeDialog = (() => {
         confirmLabel: Util.t('btn.opt_run_anyway'),
         tone: 'warn',
       });
-      if (!proceed) { if (!exhaustive) OptimizerPreview.hideLoading(); restoreRunBtn(); return; }
+      if (!proceed) { if (!exhaustive) OptimizerPreview.hideLoading(); restoreRunBtn(); _reshow(); return; }
     }
 
     // Tool Inventory (rule Hard only; Remove Backlog ignores the rule): the run must read loaded, current counts.
-    if (_mode !== 'backlog' && !(await ensureToolInventoryForRun(plant))) {
+    if (mode !== 'backlog' && !(await ensureToolInventoryForRun(plant))) {
+      if (!exhaustive) OptimizerPreview.hideLoading();
+      restoreRunBtn();
+      _reshow();
+      return;
+    }
+
+    // The plant can change while the confirms above were open (the dialog closes on a header plant change, but a run
+    // already past close(true) does not): never run against a plant the planner has left.
+    if (Store.selectedPlant !== plant) {
       if (!exhaustive) OptimizerPreview.hideLoading();
       restoreRunBtn();
       return;
     }
 
-    const linesScope = (_scope === 'lines' && _selectedLines.size) ? Array.from(_selectedLines) : null;
+    const linesScope = (scope === 'lines' && selectedLines.length) ? selectedLines : null;
     const optsForEngine: OptimizerRunOptions = {
       plant,
       lines:           linesScope,
-      startDate:       _start ?? (() => { const d = Store.plantNow(plant) ?? Store.serverNow(); d.setSeconds(0, 0); return d; })(),
-      endDate:         _end   ?? new Date((Store.plantNow(plant) ?? Store.serverNow()).getTime() + 28 * Config.MS_DAY),
+      startDate:       winStart ?? (() => { const d = Store.plantNow(plant) ?? Store.serverNow(); d.setSeconds(0, 0); return d; })(),
+      endDate:         winEnd   ?? new Date((Store.plantNow(plant) ?? Store.serverNow()).getTime() + 28 * Config.MS_DAY),
       respectFirmed:   sfEl?.checked ?? true,
-      respectCalendar: _mode === 'backlog' ? true : (scEl?.checked ?? true),
+      respectCalendar: mode === 'backlog' ? true : (scEl?.checked ?? true),
       runAt:           Store.serverNow(),
       searchBudgetMs:  exhaustive ? SETUP_AWARE_EXHAUSTIVE_BUDGET_MS : SETUP_AWARE_NORMAL_BUDGET_MS,
       exhaustive,
-      auditDetails: _mode === 'backlog' ? undefined : {
-        mode: _mode,
+      auditDetails: mode === 'backlog' ? undefined : {
+        mode,
         wheelUsed,
         taskCount: Store.tasksArr.length,
-        scope: _scope,
+        scope,
         lines: linesScope || null,
         activePriorityFields: Engine.activeConstraintKeys(plant),
         unrankedPriorityFields: unrankedFields,
@@ -859,7 +916,7 @@ export const OptimizeDialog = (() => {
 
     if (exhaustive) {
       restoreRunBtn();
-      void OptimizerPreview.runInBackground(_mode, optsForEngine);
+      void OptimizerPreview.runInBackground(mode, optsForEngine);
       return;
     }
 
@@ -871,9 +928,27 @@ export const OptimizeDialog = (() => {
     // Route through OptimizerPreview (C4) — wraps Engine.runAndApply with
     // a pre/post KPI comparison and an apply/discard step.
     requestAnimationFrame(() => setTimeout(() => {
-      OptimizerPreview.runWithPreview(_mode, optsForEngine);
+      OptimizerPreview.runWithPreview(mode, optsForEngine);
     }, 0));
 
+  }
+
+  /** Entry point of the Run button. Any exception in the pre-run steps (rank-map fetch, confirms, tool inventory) must
+   *  not leave the spinner up and the button stuck on "Optimizing": restore both and log. */
+  async function run() {
+    const runBtn = document.getElementById('opt-run-btn') as HTMLButtonElement | null;
+    const origRunHTML = runBtn ? runBtn.innerHTML : null;
+    try {
+      await _runImpl();
+    } catch (err) {
+      OptimizerPreview.hideLoading();
+      if (runBtn) {
+        runBtn.disabled = !_plant;
+        if (origRunHTML !== null) runBtn.innerHTML = origRunHTML;
+      }
+      _reshow();
+      ErrorLog.error('optimize', 'Optimize run failed before the preview started', err);
+    }
   }
 
   function openFromPicker() {
@@ -1542,14 +1617,16 @@ export const OptimizerPreview = {
   runWithPreview(mode: OptimizerMode = 'changeover', opts: OptimizerRunOptions = {}) {
     // Phase 2 (Pkg D): monotonic run token, captured by the deferred Plan B
     // callback below so it can detect a superseding run and bail silently.
+    // The guards come first: an early return must not abort the previous run or bump the token, and it must take down
+    // the spinner OptimizeDialog.run() already raised.
+    if (!Store.tasksArr.length) { OptimizerPreview.hideLoading(); Toast.show(Util.t('toast.no_tasks_to_optimise'), 'error'); return; }
+    const plant = opts.plant ?? Store.selectedPlant;
+    if (!plant) { OptimizerPreview.hideLoading(); Toast.show(Util.t('toast.select_plant_before_opt'), 'warn'); return; }
     OptimizerPreview._workerAbortController?.abort();
     const workerAbortController = typeof AbortController === 'function' ? new AbortController() : null;
     OptimizerPreview._workerAbortController = workerAbortController;
     const runSeq = ++OptimizerPreview._runSeq;
     OptimizerPreview._previewDiagnostics = [];
-    if (!Store.tasksArr.length) { Toast.show(Util.t('toast.no_tasks_to_optimise'), 'error'); return; }
-    const plant = opts.plant ?? Store.selectedPlant;
-    if (!plant) { Toast.show(Util.t('toast.select_plant_before_opt'), 'warn'); return; }
 
     // OptimizeDialog.run() already called showLoading(); only open it here if
     // the dialog is not up, so the body is never rewritten a second time.
@@ -1713,6 +1790,10 @@ export const OptimizerPreview = {
     });
     const candidate = (primaryEvaluation instanceof Promise ? yield primaryEvaluation : primaryEvaluation) as CandidateResult;
     PerfMonitor.record('Optimize.evaluate.primary', performance.now() - _evalPrimaryT0);
+    // A reversed or unparseable window yields no proposal at all: say why instead of rendering an empty plan.
+    if (candidate.status === 'invalid_horizon') {
+      throw new Error(candidate.explanation[0]?.message || Util.t('toast.opt_window_invalid'));
+    }
 
     // Post-KPIs are calculated from detached patched task values.
     const _applyPatchesT0a = performance.now();
@@ -2039,7 +2120,7 @@ export const OptimizerPreview = {
         ).join('');
         const verdictCells = finalists.map((f, i) => i === 0
           ? `<td class="opt-pv-plan-applied-cell"><strong>${Util.escapeHtml(Util.t('ui.opt_pv_plan_chosen'))}</strong></td>`
-          : `<td><strong>${Util.escapeHtml(Util.t('ui.opt_pv_plan_pruned'))}</strong></td>`
+          : `<td><strong>${Util.escapeHtml(f.whyNot || Util.t('ui.opt_pv_plan_pruned'))}</strong></td>`
         ).join('');
         planTableHtml = `<div class="opt-pv-plan-wrap"><table class="opt-pv-plan-table">
           <thead><tr><th></th><th><div>${Util.escapeHtml(Util.t('ui.opt_pv_plan_col_current'))}</div><div class="opt-pv-plan-col-sub">${Util.escapeHtml(Util.t('ui.opt_pv_plan_col_current_sub'))}</div></th>${headCells}</tr></thead>
