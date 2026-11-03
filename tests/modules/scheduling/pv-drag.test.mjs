@@ -44,7 +44,7 @@ function harness({ plant, routing = true, items }) {
   globalThis.window = globalThis.window || {};
   globalThis.window.__NIMBUS_LOCALES = { en: {
     'toast.pv_switched': '{{order}} now uses {{pv}} on {{machine}}.',
-    'toast.multi_drag_line_locked': 'multi-drag cannot change line',
+    'toast.multi_drag_lines_kept': 'lines kept, times only',
     'toast.no_routing_at_workcenter': '{{order}} has no routing at {{machine}}.',
     'toast.commit_failed': 'commit failed',
     'toast.pv_drop_stale': 'stale {{order}}',
@@ -245,7 +245,7 @@ test('chooser pick -> overtime confirm -> vis item reset mid-modal: the commit s
 /* ---- multi-drag line lock ------------------------------------------------------------------------------------ */
 
 for (const routing of [true, false]) {
-  test(`multi-drag that moves the dragged item to another row is rejected whole with ONE toast per gesture (${routing ? 'routing' : 'non-routing'} plant); time-only multi-drag still works`, () => {
+  test(`multi-drag that moves the dragged item to another row keeps every line (times only) with ONE toast per gesture (${routing ? 'routing' : 'non-routing'} plant); time-only multi-drag still works`, () => {
     const plant = routing ? 'P-PVD-MULTI-R' : 'P-PVD-MULTI-N';
     const items = {
       a: { start: T0, end: T1, group: 'L2' },   // dragged to another row
@@ -258,16 +258,30 @@ for (const routing of [true, false]) {
         { id: 'b', PRODUCTION_ORDER: 'B-1', PLANT: plant, MACHINE: 'L1', RUN_TIME: 2, start_date: T0, end_date: T1 },
       ], 'test');
       Selection.set(['a', 'b']);
-      Interaction._multiLockToast = null;
+      Interaction._multiLockToast = null; Interaction._multiDropHandled = null;
       Interaction._onDataSetUpdate({ items: ['a', 'b'] });
       assert.equal(Store.tasks.a.MACHINE, 'L1');
       assert.equal(Store.tasks.b.MACHINE, 'L1');
       assert.equal(rec.patchCalls.length, 0);
-      assert.equal(rec.toasts.filter(t => /cannot change line/.test(t.msg)).length, 1, 'one toast for the whole gesture');
+      assert.equal(rec.toasts.filter(t => /lines kept/.test(t.msg)).length, 1, 'one toast for the whole gesture');
       assert.ok(rec.rebuilds >= 1);
 
+      // A row change WITH a time shift commits the times and keeps the lines.
+      Interaction._multiLockToast = null; Interaction._multiDropHandled = null;
+      const shifted = new Date(T1.getTime() + 7200000);
+      items.a = { start: new Date(T0.getTime() + 7200000), end: shifted, group: 'L2' };
+      rec.toasts.length = 0;
+      Runtime.eligible = () => true;
+      Interaction._onDataSetUpdate({ items: ['a'] });
+      assert.equal(Store.tasks.a.MACHINE, 'L1', 'the dragged order keeps its line');
+      assert.equal(Store.tasks.b.MACHINE, 'L1');
+      assert.equal(Store.tasks.a.end_date.getTime(), shifted.getTime());
+      assert.equal(Store.tasks.b.end_date.getTime(), shifted.getTime());
+      assert.equal(rec.toasts.filter(t => /lines kept/.test(t.msg)).length, 1);
+      Store.updateMany([{ id: 'a', changes: { start_date: T0, end_date: T1 } }, { id: 'b', changes: { start_date: T0, end_date: T1 } }], 'test');
+
       // Time-only multi-drag (same row, 1h later) commits.
-      Interaction._multiLockToast = null;
+      Interaction._multiLockToast = null; Interaction._multiDropHandled = null;
       const later = new Date(T1.getTime() + 3600000);
       items.a = { start: new Date(T0.getTime() + 3600000), end: later, group: 'L1' };
       rec.toasts.length = 0;
@@ -277,7 +291,7 @@ for (const routing of [true, false]) {
       assert.equal(Store.tasks.b.end_date.getTime(), later.getTime(), 'the companion shifted by the same delta');
       assert.equal(Store.tasks.a.MACHINE, 'L1');
       assert.equal(rec.toasts.length, 0);
-    } finally { Interaction._multiLockToast = null; restore(); }
+    } finally { Interaction._multiLockToast = null; Interaction._multiDropHandled = null; restore(); }
   });
 }
 
