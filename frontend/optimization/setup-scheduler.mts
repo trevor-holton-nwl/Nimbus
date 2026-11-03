@@ -357,7 +357,14 @@ export function placeWithSetup(request: Readonly<PlaceWithSetupRequest>): Placem
     return capacityFailure();
   }
 
+  // P1-5: slot capacity can never exceed the suffix sum of interval minutes
+  // less the setup, and that bound only shrinks as `first` grows, so once it
+  // cannot hold the runtime no later `first` can either.
+  const suffixMinutes: number[] = new Array(intervals.length + 1);
+  suffixMinutes[intervals.length] = 0;
+  for (let index = intervals.length - 1; index >= 0; index -= 1) suffixMinutes[index] = suffixMinutes[index + 1] + intervals[index].minutes;
   for (let first = 0; first < intervals.length; first += 1) {
+    if (suffixMinutes[first] - setup.minutes < runtimeMinutes) break;
     const firstInterval = intervals[first];
     const firstProductiveStart = new Date(firstInterval.start.getTime() + setup.minutes * 60 * 1000);
     const firstCapacity = Math.floor((firstInterval.end.getTime() - firstProductiveStart.getTime()) / (60 * 1000));
