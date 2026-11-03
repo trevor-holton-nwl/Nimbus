@@ -448,7 +448,7 @@ function _optimizeItems(ctx: Ctx, alerts: NimbusAlert[]): LeverageItem[] {
         const sch = Number(row.scheduled) || 0;
         headroom += cap - sch;
         const over = sch - cap;
-        if (core.isOverloaded(sch, cap)) { overloadDays++; overHours += over; }
+        if (core.isOverloaded(sch, cap, Number(row.capacity) || 0)) { overloadDays++; overHours += over; }
         else if (cap > 0 && Math.abs(over) <= core.OVERLOAD_TOLERANCE_H) fullDays++;
         if (-over > core.OVERLOAD_TOLERANCE_H) freeHours += -over;   // a day within the tolerance is full, not free
       }

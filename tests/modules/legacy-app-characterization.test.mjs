@@ -159,6 +159,12 @@ test('NIMBUS namespace exposes the legacy planner commands used by index.html', 
   assert.ok(typeof nimbus.Sandbox.enter === 'function', 'Sandbox.enter must be callable');
 });
 
+test('NIMBUS namespace exposes SetupAdmin (optimize-ui reads NIMBUS.SetupAdmin for "Fill setup matrix")', () => {
+  assert.ok(nimbus.SetupAdmin && typeof nimbus.SetupAdmin === 'object', 'NIMBUS.SetupAdmin must be exported from the app.js namespace');
+  assert.equal(typeof nimbus.SetupAdmin.canReviewMissingPairs, 'function');
+  assert.equal(typeof nimbus.SetupAdmin.reviewMissingPairs, 'function');
+});
+
 test('#31 API-key bootstrap checks ok, cache-busts, and retries with backoff instead of failing silently after one blip', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] }); // virtual clock: the 1s backoff is ticked, not slept
   const urls = [];

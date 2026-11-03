@@ -37,6 +37,9 @@ declare global {
     /** Optional localized form; the drawer prefers Util.t(msgKey, msgVars) when present. */
     msgKey?: string;
     msgVars?: Record<string, string | number>;
+    /** Dates embedded in `msg` / `msgVars` in the core's fixed default format: `text` is that default text, `ms` the instant.
+     *  Util.alertMessage swaps `text` for the viewer's date/time format. Absent when the alert embeds no date. */
+    msgDates?: { text: string; ms: number }[];
     taskId?: string;
     /** The other order in a pairwise alert (overlap, tool-conflict). Prefer this over parsing `id`. */
     peerId?: string;
@@ -306,12 +309,10 @@ declare global {
   interface NimbusComputeCoreApi {
     // constants
     CONFIDENCE_WEIGHTS: Readonly<NimbusConfidenceWeights>;
-    MS_DAY: number;
-    MS_HOUR: number;
     OVERLOAD_THRESHOLD: number;
     OVERLOAD_TOLERANCE_H: number;
     WARN_THRESHOLD: number;
-    isOverloaded(scheduledH: number, effCapH: number): boolean;
+    isOverloaded(scheduledH: number, effCapH: number, capH?: number): boolean;
     SHOW_NEAR_CAPACITY_ALERTS: boolean;
     DEFAULT_SHIFT: [number, number];
     WEEKEND_OFF: boolean;
@@ -340,18 +341,12 @@ declare global {
     dayKey(d: unknown): string;
     startOfDay(d: unknown): Date | null;
     separationBucketKey(d: unknown, scope: 'none' | 'hour' | 'day' | 'week'): string | null;
-    runHours(task: NimbusTask): number;
     scheduleIntervals(task: NimbusTask): Array<{ sequence: number; start: Date; end: Date }>;
-    setupIntervals(setup?: NimbusSetupObservation): NimbusSetupInterval[];
-    mergedOverlapHours(win: [Date | number, Date | number] | null, intervals: Array<{ s: Date | number; e: Date | number }>): number;
     fmtDTReadable(d: unknown): string;
     toLocalSeconds(d: unknown): string;
-    toLocalInput(d: unknown): string;
 
     // calendar engine
     getPlantForLine(line: string, lineSettings: Record<string, NimbusLineSetting>, masterData: NimbusMasterData): string | null;
-    ensureCalendar(line: string, calendars: Record<string, NimbusCalendarEntry>, allDay?: boolean): void;
-    ensurePlant(name: string | null, plants: Record<string, NimbusPlantCalendarEntry>): void;
     /** Weekly hours in force on a date key ('YYYY-MM-DD'): the earliest-starting period covering it, else the default (same reference). */
     activeWorkHours(defaultWorkHours: NimbusWorkHours, periods: NimbusPlantPeriod[] | undefined | null, dateKey: string): NimbusWorkHours;
     /** The plant's weekly hours on a calendar date (period-aware); an undefined entry gives undefined. */
@@ -398,7 +393,17 @@ declare global {
 
     // top-level compute
     computeAlerts(payload: ComputeAlertsPayload): { alerts: NimbusAlert[]; elapsed: number };
+    /** The alert rules in push order ('overlap', 'toolConflict', 'distributionSeparation', 'capacity', 'blackout', ...). */
+    alertRuleNames: string[];
+    /** Run ONE rule on a payload and return its alerts (un-dismissed): the seam the rule unit tests use. Throws on an unknown name. */
+    runAlertRule(name: string, payload: ComputeAlertsPayload): NimbusAlert[];
     computeUtilization(payload: ComputeUtilizationPayload): { matrix: NimbusUtilizationMatrix };
+    /** One alerts pass per variant on a shared base, each with that variant's hypothetical setup observation
+     *  (the leverage what-if replay). Returns alerts only; calendars/plants are shallow-copied per call. */
+    computeLeverageBatch(
+      base: ComputeAlertsPayload & { startMs?: number; days?: number; lines?: string[] },
+      variants: ReadonlyArray<{ key: string; setup: NimbusSetupObservation }>
+    ): Array<{ key: string; alerts: NimbusAlert[] }>;
 
     // confidence scoring (shared by the badge and the Alert Monitor)
     /** Days-out multiplier: <=3 days 1.5, <=7 days 1.25, else 1.0. */
