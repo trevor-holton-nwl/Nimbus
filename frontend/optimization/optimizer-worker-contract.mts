@@ -52,6 +52,8 @@ export interface OptimizerWorkerResponse {
   validation?: SerializedOptimizerValidation;
   error?: string;
   stack?: string;
+  /** Worker-side evaluation time in ms (handler-added measurement, not part of the candidate). */
+  evalMs?: number;
 }
 
 /** Build a clone-safe validation descriptor from the function-bearing search

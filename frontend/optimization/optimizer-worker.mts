@@ -53,7 +53,10 @@ export function installOptimizerWorkerHandler(
   target.onmessage = async ({ data }): Promise<void> => {
     try {
       await corePromise;
-      target.postMessage(buildOptimizerWorkerResponse(data));
+      const evalT0 = performance.now();
+      const response = buildOptimizerWorkerResponse(data);
+      // evalMs lets the client separate boot + clone overhead from search time (PerfMonitor Optimize.workerBoot).
+      target.postMessage({ ...response, evalMs: performance.now() - evalT0 });
     } catch (error) {
       const failure = error instanceof Error ? error : new Error(String(error));
       target.postMessage({ runId: data.runId, error: failure.message, stack: failure.stack });

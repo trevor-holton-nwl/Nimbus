@@ -3,7 +3,7 @@
 // tooling, and non-UI integrations) keep the synchronous Engine evaluator.
 import type { CandidateResult, EvaluationRequest, ScheduleSnapshot } from './setup-scheduler.mjs';
 import { evaluateSchedule, rehydrateOptimizerCandidate, SETUP_AWARE_NORMAL_BUDGET_MS } from './engine.mjs';
-import { Config, ErrorLog, Util } from '../platform/foundation.mjs';
+import { Config, ErrorLog, PerfMonitor, Util } from '../platform/foundation.mjs';
 import { evalRequestOf } from './optimizer-worker-contract.mjs';
 import type { OptimizerWorkerRequest, OptimizerWorkerResponse } from './optimizer-worker-contract.mjs';
 export type { OptimizerWorkerRequest, OptimizerWorkerResponse } from './optimizer-worker-contract.mjs';
@@ -103,6 +103,7 @@ export function runOptimizerPreview(
     return evaluator(request.snapshot, evalRequestOf(request));
   }
   const liveWorker = worker;
+  const spawnedAt = performance.now();
 
   return new Promise<CandidateResult>((resolve, reject) => {
     let settled = false;
@@ -122,6 +123,7 @@ export function runOptimizerPreview(
     const onAbort = (): void => finish(() => reject(abortError()));
     liveWorker.onmessage = ({ data }): void => {
       if (!data || data.runId !== request.runId) return;
+      if (typeof data.evalMs === 'number') PerfMonitor.record('Optimize.workerBoot', performance.now() - spawnedAt - data.evalMs);
       if ('error' in data && data.error !== undefined) {   // an empty message is still a failure
         if (String(data.error).includes(COMPUTE_CORE_STALE) && isLongRunRequest(request)) {
           // No main-thread fallback for an exhaustive run (see isLongRunRequest): fail with a clear, actionable error.

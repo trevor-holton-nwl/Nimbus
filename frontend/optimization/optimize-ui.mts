@@ -1966,6 +1966,7 @@ export const OptimizerPreview = {
     OptimizerPreview._render();
     OptimizerPreview._endLoadingState();
     previewRoot?.querySelector<HTMLElement>('.modal-head button')?.focus();
+    PerfMonitor.record('Optimize.firstPaint', performance.now() - result.startedAt);
   },
 
   /** Install every field of a (possibly primary-only) result and start the
