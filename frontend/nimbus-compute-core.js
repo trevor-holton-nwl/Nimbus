@@ -40,6 +40,7 @@
   // ── Config constants (mirror of app.js Config) ──────────────────────────────
   const MS_DAY                     = 24 * 60 * 60 * 1000;   // 1 day in ms (was a bare 86400000 literal)
   const MS_HOUR                    = 60 * 60 * 1000;
+  const MS_MIN                     = 60 * 1000;
   const OVERLOAD_THRESHOLD         = 1.0;
   const WARN_THRESHOLD             = 0.8;
   // Slack on the overload rule, in hours: 0.05 h = 3 min, the one-decimal resolution the alert message prints.
@@ -49,6 +50,12 @@
   const SHOW_NEAR_CAPACITY_ALERTS  = false;
   const DEFAULT_SHIFT              = [7, 19];
   const WEEKEND_OFF                = true;
+  const UNKNOWN_LINE               = 'Unknown';   // the bucket an order with no MACHINE belongs to
+  const DUE_LOOKBACK_DAYS          = 30;          // dueDateInstant: how far back a closed due date looks for an open day
+  const MAX_HOLDERS_SHOWN          = 3;           // tool-conflict message: holders named before "+N"
+
+  // The line an order sits on; an order with no MACHINE reads as UNKNOWN_LINE everywhere in this module.
+  const lineOf = t => t?.MACHINE || UNKNOWN_LINE;
 
   // The overload rule: scheduled hours beat effective capacity by more than the tolerance. Pure.
   // `capH` (the line's full capacity that day, before its buffer) is optional. When given and positive, a FULLY
@@ -247,23 +254,39 @@
   // The explicit child collection is the productive schedule.  A parent with
   // fewer than two valid children remains a legacy continuous order, so we do
   // not accidentally turn one old bar into a persisted segment representation.
-  function scheduleIntervals(task) {
+  // The parsed form, in epoch ms: [{sequence, s, e}]. Memoized per compute pass (_ivCache, keyed on the task object):
+  // one alerts pass reads each order's intervals from several rules, and parsing strings is the cost. Only NUMBERS are
+  // cached; scheduleIntervals hands every caller fresh Date instances (alerts keep `time: interval.start`).
+  let _ivCache = null;
+  function _intervalNums(task) {
+    if (_ivCache) {
+      const hit = _ivCache.get(task);
+      if (hit) return hit;
+    }
     const explicit = Array.isArray(task?.scheduleSegments) ? task.scheduleSegments : [];
     const segments = explicit
       .map((segment, index) => {
         const start = parseDate(segment?.startDate ?? segment?.start_date);
         const end = parseDate(segment?.endDate ?? segment?.end_date);
         return start && end && end > start
-          ? { sequence: Number(segment?.sequence) || index + 1, start: new Date(+start), end: new Date(+end) }
+          ? { sequence: Number(segment?.sequence) || index + 1, s: +start, e: +end }
           : null;
       })
       .filter(Boolean)
-      .sort((a, b) => a.start - b.start || a.sequence - b.sequence);
-    if (segments.length >= 2) return segments;
+      .sort((a, b) => a.s - b.s || a.sequence - b.sequence);
+    let nums;
+    if (segments.length >= 2) nums = segments;
+    else {
+      const start = parseDate(task?.start_date);
+      const end = parseDate(task?.end_date);
+      nums = start && end && end > start ? [{ sequence: 1, s: +start, e: +end }] : [];
+    }
+    if (_ivCache) _ivCache.set(task, nums);
+    return nums;
+  }
 
-    const start = parseDate(task?.start_date);
-    const end = parseDate(task?.end_date);
-    return start && end && end > start ? [{ sequence: 1, start: new Date(+start), end: new Date(+end) }] : [];
+  function scheduleIntervals(task) {
+    return _intervalNums(task).map(n => ({ sequence: n.sequence, start: new Date(n.s), end: new Date(n.e) }));
   }
 
   // Setup truth is resolved before it reaches the compute core.  The core only
@@ -294,6 +317,19 @@
     return TOOL_PLACEHOLDERS.has(s) ? null : s;
   }
 
+  // The distinct normalized tool ids in a list of raw values (blank / placeholder values dropped), in first-seen order.
+  function _toolIdSet(raw) {
+    const ids = new Set();
+    for (const v of raw) {
+      const id = normalizeToolId(v);
+      if (id) ids.add(id);
+    }
+    return ids;
+  }
+
+  // Copies a capacity record offers: a finite non-negative count, else ONE copy (a missing record is one physical tool).
+  const _availableOf = cap => (cap && Number.isFinite(cap.available) ? Math.max(0, cap.available) : 1);
+
   // The distinct tool ids an order carries. PRT_01 and PRT_02 share one id pool per plant, so the same id
   // in both columns is ONE copy.
   function taskToolIds(task) {
@@ -307,7 +343,7 @@
 
   // Alert and optimizer resolve an order's plant the same way: the order's own PLANT first, else its line's.
   function taskToolPlant(task, plantOf) {
-    return task?.PLANT || (plantOf ? plantOf(task?.MACHINE || 'Unknown') : null) || null;
+    return task?.PLANT || (plantOf ? plantOf(lineOf(task)) : null) || null;
   }
 
   // When an order occupies its tool: the ENVELOPE from the first segment's start to the last segment's end
@@ -328,7 +364,7 @@
     const end = parseDate(task?.end_date);
     const runMin = runHours(task) * 60;
     if (!end || runMin <= 0) return null;
-    return { start: new Date(+end - runMin * 60000), end: new Date(+end) };
+    return { start: new Date(+end - runMin * MS_MIN), end: new Date(+end) };
   }
 
   const _toolKey = (plant, tool) => `${plant == null ? '' : plant}\u0000${tool}`;
@@ -371,12 +407,8 @@
       if (!Number.isFinite(s) || !Number.isFinite(e)) continue;
       if (nowMs != null) { if (e <= nowMs) continue; if (s < nowMs) s = nowMs; }
       if (e <= s) continue;
-      const ids = new Set();
-      for (const raw of Array.isArray(it.tools) ? it.tools : [it.tool]) {
-        const id = normalizeToolId(raw);
-        if (id) ids.add(id);
-      }
-      const line = it.line || 'Unknown', id = String(it.id);
+      const ids = _toolIdSet(Array.isArray(it.tools) ? it.tools : [it.tool]);
+      const line = it.line || UNKNOWN_LINE, id = String(it.id);
       for (const tool of ids) {
         const key = _toolKey(it.plant, tool);
         let g = groups.get(key);
@@ -403,7 +435,7 @@
     for (const key of keys) {
       const g = groups.get(key);
       const cap = capacityFor ? capacityFor(g.plant, g.tool) : null;
-      const available = cap && Number.isFinite(cap.available) ? Math.max(0, cap.available) : 1;
+      const available = _availableOf(cap);
       const hasRow = !!(cap && cap.hasRow);
       if (available >= _distinctLines(g.rows)) continue;
       const events = [];
@@ -476,11 +508,8 @@
     if (!index || !index.groups) return index;
     const sid = String(id);
     if (oldInterval) {
-      const ids = new Set();
-      for (const raw of Array.isArray(oldInterval.tools) ? oldInterval.tools : [oldInterval.tool]) {
-        const t = normalizeToolId(raw); if (t) ids.add(t);
-      }
-      const line = oldInterval.line || 'Unknown', s = _num(oldInterval.start), e = _num(oldInterval.end);
+      const ids = _toolIdSet(Array.isArray(oldInterval.tools) ? oldInterval.tools : [oldInterval.tool]);
+      const line = oldInterval.line || UNKNOWN_LINE, s = _num(oldInterval.start), e = _num(oldInterval.end);
       for (const tool of ids) {
         const key = _toolKey(oldInterval.plant, tool);
         const g = index.groups.get(key);
@@ -506,11 +535,10 @@
     const lo = _num(from), hi = _num(to);
     if (!(hi > lo)) return [];
     const blocked = [];
-    const ids = new Set();
-    for (const raw of tools || []) { const id = normalizeToolId(raw); if (id) ids.add(id); }
+    const ids = _toolIdSet(tools || []);
     for (const tool of Array.from(ids).sort()) {
       const cap = index?.capacityFor ? index.capacityFor(plant, tool) : null;
-      const available = cap && Number.isFinite(cap.available) ? Math.max(0, cap.available) : 1;
+      const available = _availableOf(cap);
       if (available <= 0) return [];
       const g = index?.groups?.get(_toolKey(plant, tool));
       if (!g) continue;
@@ -594,14 +622,6 @@
     const p = n => String(n).padStart(2, '0');
     return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}`
          + `T${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}`;
-  }
-
-  function toLocalInput(d) {
-    const date = parseDate(d);
-    if (!date) return '';
-    const p = n => String(n).padStart(2, '0');
-    return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}`
-         + `T${p(date.getHours())}:${p(date.getMinutes())}`;
   }
 
   // ── Calendar helpers (data-driven, no Store/module references) ───────────────
@@ -748,22 +768,29 @@
     return out;
   }
 
-  // Per-compute-call workWindow memoization cache (set before each top-level call).
+  // Per-compute-call workWindow memoization cache (set before each top-level call): line -> (local calendar
+  // date number y*10000+m*100+d -> window | null). A window depends only on the line and the calendar date, so the
+  // key needs no Date or string built per call.
   let _wwCache = null;
 
   function workWindow(line, date, calendars, plants, lineSettings, masterData) {
-    let key;
+    let perLine = null, dnum;
     if (_wwCache) {
-      const d = new Date(date); d.setHours(0, 0, 0, 0);
-      key = line + '|' + d.getTime();
-      if (_wwCache.has(key)) return _wwCache.get(key);
+      const d = date instanceof Date ? date : new Date(date);
+      dnum = d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+      perLine = _wwCache.get(line);
+      if (!perLine) _wwCache.set(line, perLine = new Map());
+      else {
+        const hit = perLine.get(dnum);
+        if (hit !== undefined) return hit;
+      }
     }
 
     const plant = getPlantForLine(line, lineSettings, masterData);
     ensureCalendar(line, calendars, !!plant);
     const lineWin = _dayWindow(calendars[line].workHours, date);
     if (!lineWin) {
-      if (_wwCache) _wwCache.set(key, null);
+      if (perLine) perLine.set(dnum, null);
       return null;
     }
 
@@ -772,13 +799,13 @@
       ensurePlant(plant, plants);
       const plantWin = _dayWindow(plantWorkHoursOn(plants[plant], date), date);
       if (!plantWin) {
-        if (_wwCache) _wwCache.set(key, null);
+        if (perLine) perLine.set(dnum, null);
         return null;
       }
       const s = new Date(Math.max(lineWin[0], plantWin[0]));
       const e = new Date(Math.min(lineWin[1], plantWin[1]));
       if (s >= e) {
-        if (_wwCache) _wwCache.set(key, null);
+        if (perLine) perLine.set(dnum, null);
         return null;
       }
       result = [s, e];
@@ -786,7 +813,7 @@
       result = lineWin;
     }
 
-    if (_wwCache) _wwCache.set(key, result);
+    if (perLine) perLine.set(dnum, result);
     return result;
   }
 
@@ -810,7 +837,7 @@
         let cursor = startOfDay(new Date(+interval.start));   // startOfDay mutates a Date argument
         while (cursor < interval.end) {
           const next = nextCalendarDay(cursor);
-          add(dayKey(cursor), (Math.min(+interval.end, +next) - Math.max(+interval.start, +cursor)) / 60000);
+          add(dayKey(cursor), (Math.min(+interval.end, +next) - Math.max(+interval.start, +cursor)) / MS_MIN);
           cursor = next;
         }
       }
@@ -823,7 +850,7 @@
     // is the bar [end - run_time, end] (U29), so it is visible to the matrix and the briefing before the derive.
     if (!start) {
       if (!end || runMin <= 0) return out;
-      start = new Date(+end - runMin * 60000);
+      start = new Date(+end - runMin * MS_MIN);
     }
     if (!end) { add(dayKey(start), runMin); return out; }
     if (end <= start || runMin <= 0) return out;
@@ -831,10 +858,10 @@
     let working = 0, wall = 0;
     for (let cursor = startOfDay(new Date(+start)); cursor <= end; cursor = nextCalendarDay(cursor)) {
       const next = nextCalendarDay(cursor);
-      const wallMin = Math.max(0, (Math.min(+end, +next) - Math.max(+start, +cursor)) / 60000);
+      const wallMin = Math.max(0, (Math.min(+end, +next) - Math.max(+start, +cursor)) / MS_MIN);
       const win = dayWindowFor ? dayWindowFor(cursor) : null;
       const workMin = win && win.open && win.close
-        ? Math.max(0, (Math.min(+end, +win.close) - Math.max(+start, +win.open)) / 60000) : 0;
+        ? Math.max(0, (Math.min(+end, +win.close) - Math.max(+start, +win.open)) / MS_MIN) : 0;
       days.push({ key: dayKey(cursor), wallMin, workMin });
       working += workMin; wall += wallMin;
     }
@@ -856,7 +883,7 @@
     if (!(raw instanceof Date) || isNaN(raw)) return raw;
     if (raw.getHours() !== 0 || raw.getMinutes() !== 0 || raw.getSeconds() !== 0 || raw.getMilliseconds() !== 0) return raw;
     const endOfDay = d => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 0);
-    for (let back = 0; back <= 30; back++) {
+    for (let back = 0; back <= DUE_LOOKBACK_DAYS; back++) {
       const day = new Date(raw.getFullYear(), raw.getMonth(), raw.getDate() - back);
       const win = dayWindowFor(day);
       if (!win || !win.close) continue;
@@ -965,15 +992,14 @@
 
     _wwCache = new Map();
     _plantMemo = new Map();
+    _ivCache = new Map();
     _taskPlantFallback = _buildTaskPlantFallback(tasks);
     const plantOf = line => getPlantForLine(line, lineSettings, masterData);
     // The line's working window on a calendar date as {open, close} (the shape dueDateInstant and
     // workingMinutesByDay read), or null when closed. A line with NO calendar row sent in the payload has no
     // window at all (Util.dueInstant reads it the same way), so the late rule agrees with the Store-side KPIs.
-    const inScopeLine = line => !onlyLines || onlyLines.has(line || 'Unknown');
-    const calendarLines = new Set(Object.keys(calendars || {}));
-    const dayWindowForLine = (line, requireRow = false) => date => {
-      if (requireRow && !calendarLines.has(line)) return null;
+    const inScope = line => !onlyLines || onlyLines.has(line || UNKNOWN_LINE);
+    const dayWindowForLine = line => date => {
       const win = workWindow(line, date, calendars, plants, lineSettings, masterData);
       return win ? { open: win[0], close: win[1] } : null;
     };
@@ -993,7 +1019,7 @@
     const fallbackToday = startOfDay(new Date());
     const todayByPlant = new Map();
     const todayStartFor = task => {
-      const plant = task?.PLANT || plantOf(task?.MACHINE || 'Unknown');
+      const plant = task?.PLANT || plantOf(lineOf(task));
       const at = plant != null && now ? now[plant] : null;
       if (!at) return fallbackToday;
       let day = todayByPlant.get(plant);
@@ -1006,12 +1032,12 @@
     const fallbackTime = plant => (plant != null ? parseDate(now?.[plant]) : null) || new Date();
     // task.start_date / end_date are proper Dates (structured-clone preserves them).
     let activeTasks = tasks.filter(t => !t.end_date || t.end_date >= todayStartFor(t));
-    if (onlyLines) activeTasks = activeTasks.filter(t => onlyLines.has(t.MACHINE || 'Unknown'));
+    if (onlyLines) activeTasks = activeTasks.filter(t => onlyLines.has(lineOf(t)));
 
     /* 1. OVERLAPS */
     const byLine = {};
     for (const t of activeTasks) {
-      const line = t.MACHINE || 'Unknown';
+      const line = lineOf(t);
       for (const interval of scheduleIntervals(t)) {
         (byLine[line] ||= []).push({ task: t, start: interval.start, end: interval.end });
       }
@@ -1065,14 +1091,12 @@
       if (!tools.length) continue;
       const occ = toolOccupancyInterval(t);
       if (!occ) continue;
-      toolItems.push({ id: t.id, line: t.MACHINE || 'Unknown', plant: taskToolPlant(t, plantOf), tools, start: occ.start, end: occ.end });
+      toolItems.push({ id: t.id, line: lineOf(t), plant: taskToolPlant(t, plantOf), tools, start: occ.start, end: occ.end });
     }
     const toolAlertIds = new Set();
-    const MAX_HOLDERS_SHOWN = 3;
     for (const c of findToolOverages({ items: toolItems, capacityFor: (plant, tool) => availableCopies(toolCapacity, plant, tool) })) {
       if (onlyLines && !onlyLines.has(c.pusherLine)) continue;
-      const holderIds = [];
-      for (const h of c.holders) if (!holderIds.includes(h.id)) holderIds.push(h.id);
+      const holderIds = c.holders.map(h => h.id);   // findToolOverages already de-duplicates holders by order id
       const shown = c.holders.slice(0, MAX_HOLDERS_SHOWN).map(h => `${orderNumberForId(h.id)} (${h.line})`);
       const holdersText = shown.join(', ') + (c.holders.length > MAX_HOLDERS_SHOWN ? ` +${c.holders.length - MAX_HOLDERS_SHOWN}` : '');
       const vars = { tool: c.tool, available: c.available, inUse: c.inUse, holders: holdersText };
@@ -1114,7 +1138,7 @@
     for (const t of tasks) {
       if (!t.PARENT_ORDER) continue;
       if (t.planning_status === 'needs_planning') continue;
-      const plant = t.PLANT || plantOf(t.MACHINE || 'Unknown');
+      const plant = t.PLANT || plantOf(lineOf(t));
       const material = t.MATERIAL_NUMBER ?? '';
       const key = JSON.stringify([plant, t.PARENT_ORDER, material]);
       let g = distGroups.get(key);
@@ -1125,7 +1149,7 @@
       if (g.tasks.length < 2) continue;
       let maxSeparation = null;
       for (const t of g.tasks) {
-        const wc = machineToWorkcenter.get(t.MACHINE || 'Unknown');
+        const wc = machineToWorkcenter.get(lineOf(t));
         const policy = wc ? workcenterPolicy.get(wc) : null;
         if (policy?.max_separation) { maxSeparation = policy.max_separation; break; }
       }
@@ -1136,7 +1160,7 @@
       if (buckets.size <= 1) continue;
       const sortedDated = dated.slice().sort((a, b) => a.end_date.getTime() - b.end_date.getTime());
       const earliest = sortedDated[0];
-      const earliestLine = earliest.MACHINE || 'Unknown';
+      const earliestLine = lineOf(earliest);
       // Mirrors the tool-conflict rule's own onlyLines gate above: the peer pool
       // is horizon/plant-wide, but an incremental recompute only emits the alert
       // when the line it attaches to (the earliest sibling's) is in scope.
@@ -1156,7 +1180,7 @@
     // One attribution rule (workingMinutesByDay): the same days and hours the utilization matrix and the cell
     // briefing use, so the overload alert can never contradict the heatmap for one order.
     for (const t of activeTasks) {
-      const line = t.MACHINE || 'Unknown';
+      const line = lineOf(t);
       const windowFor = dayWindowForLine(line);
       for (const [day, minutes] of Object.entries(workingMinutesByDay(t, windowFor))) {
         const row = (byLineDay[`${line}|${day}`] ||= { line, day, hours: 0, tasks: [] });
@@ -1254,7 +1278,7 @@
       else _blackoutGlobalPlant.push({ s: b.s, e: b.e });
     }
     for (const t of activeTasks) {
-      const line  = t.MACHINE || 'Unknown';
+      const line  = lineOf(t);
       const plant = plantOf(line);
       let conflict = false;
       let conflictTime = t.start_date;
@@ -1310,7 +1334,7 @@
 
     /* 4. FIRMED-BUT-ON-CLOSED-DAY */
     for (const t of activeTasks) {
-      const line = t.MACHINE || 'Unknown';
+      const line = lineOf(t);
       const badInterval = scheduleIntervals(t).find(interval =>
         !workWindow(line, interval.start, calendars, plants, lineSettings, masterData));
       if (badInterval) {
@@ -1324,13 +1348,14 @@
 
     /* 5. FIRMED-OUT-OF-HOURS */
     for (const t of activeTasks) {
-      const line = t.MACHINE || 'Unknown';
+      const line = lineOf(t);
       const parts = [];
       const msgDates = [];   // the default-format dates embedded in `parts`, so the main thread can re-format them (B27)
       let alertTime = t.start_date;
       for (const interval of scheduleIntervals(t)) {
         const winS = workWindow(line, interval.start, calendars, plants, lineSettings, masterData);
-        const winE = workWindow(line, interval.end,   calendars, plants, lineSettings, masterData);
+        // The LAST OCCUPIED instant (end - 1 ms): a bar ending exactly at midnight belongs to the day it ran on, not the next day's window.
+        const winE = workWindow(line, new Date(+interval.end - 1), calendars, plants, lineSettings, masterData);
         if (winS && interval.start < winS[0]) {
           msgDates.push(msgDateRef(winS[0]));
           parts.push(`starts before ${line} opens (${msgDates[msgDates.length - 1].text})`);
@@ -1357,11 +1382,11 @@
     // after its prior envelope moves into the past, until an aggregate repair
     // succeeds (while respecting an incremental line scope when supplied).
     const mismatchTasks = onlyLines
-      ? tasks.filter(t => onlyLines.has(t.MACHINE || 'Unknown'))
+      ? tasks.filter(t => onlyLines.has(lineOf(t)))
       : tasks;
     for (const t of mismatchTasks) {
       if (!t.runtime_schedule_mismatch) continue;
-      const line = t.MACHINE || 'Unknown';
+      const line = lineOf(t);
       alerts.push({
         id: `runtime-mismatch-${t.id}`, sev: 'err', type: 'runtime-schedule-mismatch',
         msg: `The start of order "${orderNumber(t)}" may be out of date: its run time changed after the schedule was saved.`,
@@ -1382,7 +1407,7 @@
     // Is a placed finish beyond the plant's push-forward ceiling? A due on a 24:00 close is the exclusive next-day
     // 00:00: the due DAY is the one before it (R-I6). Shared by the late alert and the reversal_forward severity (D9b).
     const beyondPushCap = (t, end, due) => {
-      const cap = pushCapDays(t.PLANT || plantOf(t.MACHINE || 'Unknown'));
+      const cap = pushCapDays(t.PLANT || plantOf(lineOf(t)));
       if (cap === null || !end || !due) return false;
       const ceiling = new Date(+due - 1); ceiling.setHours(0, 0, 0, 0); ceiling.setDate(ceiling.getDate() + cap + 1);
       return end > ceiling;
@@ -1391,9 +1416,9 @@
       if (t.planning_status === 'needs_planning') continue;
       const end = parseDate(t.end_date), rawDue = parseDate(t.original_end_date);
       if (!end || !rawDue) continue;
-      const line = t.MACHINE || 'Unknown';
+      const line = lineOf(t);
       // D14: a line with no row of its own reads the default window, so a date-only due resolves instead of staying silent.
-      const due = dueDateInstant(rawDue, dayWindowForLine(line, false));
+      const due = dueDateInstant(rawDue, dayWindowForLine(line));
       if (!(end > due)) continue;
       const hours = (end - due) / MS_HOUR;
       const cap = pushCapDays(t.PLANT || plantOf(line));
@@ -1415,7 +1440,7 @@
     for (const t of activeTasks) {
       const marker = t.placement_exception;
       if (marker !== 'overtime' && marker !== 'overlong') continue;
-      const line = t.MACHINE || 'Unknown';
+      const line = lineOf(t);
       const vars = { order: orderNumber(t), line };
       alerts.push({
         id: `placement-exception-${t.id}`, sev: 'warn',   // D20 (VM14): approved by the planner; visible, not blocking
@@ -1444,7 +1469,7 @@
       if (cur === undefined || line < cur) plantFirstLine.set(plant, line);
     };
     for (const t of tasks) {
-      if (t.derivationIssue?.code === 'plant_no_timezone') noteFirstLine(t.PLANT || plantOf(t.MACHINE || 'Unknown'), t.MACHINE || 'Unknown');
+      if (t.derivationIssue?.code === 'plant_no_timezone') noteFirstLine(t.PLANT || plantOf(lineOf(t)), lineOf(t));
     }
     const blockedSet = new Set(Array.isArray(blockedPlants) ? blockedPlants : []);
     for (const plant of blockedSet) {
@@ -1455,7 +1480,7 @@
     const emittedPlants = new Set();
     const emitPlantNoTimezone = plant => {
       const line = plantFirstLine.get(plant);
-      if (plant == null || line === undefined || emittedPlants.has(plant) || !inScopeLine(line)) return;
+      if (plant == null || line === undefined || emittedPlants.has(plant) || !inScope(line)) return;
       emittedPlants.add(plant);
       alerts.push({
         id: `plant-no-timezone-${plant}`, sev: 'err', type: 'plant_no_timezone',
@@ -1467,11 +1492,11 @@
     for (const t of tasks) {
       const issue = t.derivationIssue;
       if (!issue || !issue.code) continue;
-      const line = t.MACHINE || 'Unknown';
+      const line = lineOf(t);
       const plant = t.PLANT || plantOf(line);
       const code = issue.code;
       if (code === 'plant_no_timezone') { emitPlantNoTimezone(plant); continue; }
-      if (!inScopeLine(line)) continue;
+      if (!inScope(line)) continue;
       // D14: line_no_calendar is no longer emitted (a line without its own row reads the default window).
       const order = orderNumber(t);
       const vars = { order, line, from: readable(issue.from), to: readable(issue.to) };
@@ -1482,7 +1507,7 @@
           msg = `Order "${order}" could not hold its finish and now ends earlier, at ${vars.to} (was ${vars.from}).`; break;
         case 'reversal_forward': {
           const detail = issue.detail;
-          if (beyondPushCap(t, parseDate(t.end_date), dueDateInstant(parseDate(t.original_end_date), dayWindowForLine(line, false)))) sev = 'err';
+          if (beyondPushCap(t, parseDate(t.end_date), dueDateInstant(parseDate(t.original_end_date), dayWindowForLine(line)))) sev = 'err';
           if (detail === 'run_time_grew' || detail === 'due_date_past' || detail === 'cutover') key = `alert.reversal_forward_${detail}`;
           msg = detail === 'run_time_grew'
             ? `Order "${order}" was placed forward from now because its run time grew and its start would fall in the past.`
@@ -1519,12 +1544,12 @@
     // task; the message is the resolver's own already-i18n'd text
     // (planning_reason.message) — never re-translated or re-worded here.
     const runtimeUnknownTasks = onlyLines
-      ? tasks.filter(t => onlyLines.has(t.MACHINE || 'Unknown'))
+      ? tasks.filter(t => onlyLines.has(lineOf(t)))
       : tasks;
     for (const t of runtimeUnknownTasks) {
       const reason = t.planning_reason;
       if (t.planning_status !== 'needs_planning' || !reason || reason.code !== 'runtime_unknown') continue;
-      const line = t.MACHINE || 'Unknown';
+      const line = lineOf(t);
       alerts.push({
         id: `runtime-unknown-${t.id}`, sev: 'err', type: 'runtime-unknown',
         msg: reason.message || `Order "${orderNumber(t)}" runtime could not be resolved (step: ${reason.step}).`,
@@ -1538,11 +1563,11 @@
     // schedules the order normally (run_time_basis.lot_size_warning), it's
     // never a hold and never affects placement.
     const lotSizeTasks = onlyLines
-      ? tasks.filter(t => onlyLines.has(t.MACHINE || 'Unknown'))
+      ? tasks.filter(t => onlyLines.has(lineOf(t)))
       : tasks;
     for (const t of lotSizeTasks) {
       if (!t.run_time_basis || !t.run_time_basis.lot_size_warning) continue;
-      const line = t.MACHINE || 'Unknown';
+      const line = lineOf(t);
       alerts.push({
         id: `pv-lot-size-${t.id}`, sev: 'warn', type: 'pv-lot-size',
         msg: `Order "${orderNumber(t)}" quantity is outside the resolved production version's lot-size range.`,
@@ -1575,9 +1600,8 @@
       return `${formatSetupState(pairKey.slice(0, splitIdx + 1))} → ${formatSetupState(pairKey.slice(splitIdx + 3))}`;
     };
     const setupSeen = new Set();
-    const inScope = line => !onlyLines || onlyLines.has(line || 'Unknown');
     const setupKey = (type, entry, pairKey = '') => [
-      type, entry.scope || entry.line || 'Unknown', pairKey || entry.pairKey || '',
+      type, entry.scope || entry.line || UNKNOWN_LINE, pairKey || entry.pairKey || '',
       entry.predecessorOrderId ?? 'initial', entry.successorOrderId ?? '',
     ].join('|');
     for (const interval of setupIntervals(setup)) {
@@ -1621,11 +1645,11 @@
       // A missing matrix transition is a pair/scope problem, not one alert per
       // order occurrence. Other diagnostics remain occurrence-specific.
       const key = diagnostic.type === 'setup-uncovered'
-        ? [diagnostic.type, diagnostic.scope || diagnostic.line || 'Unknown', diagnostic.pairKey || 'unknown'].join('|')
+        ? [diagnostic.type, diagnostic.scope || diagnostic.line || UNKNOWN_LINE, diagnostic.pairKey || 'unknown'].join('|')
         : setupKey(diagnostic.type, diagnostic);
       if (setupSeen.has(key)) continue;
       setupSeen.add(key);
-      const time = parseDate(diagnostic.time) || fallbackTime(plantOf(diagnostic.line || 'Unknown'));
+      const time = parseDate(diagnostic.time) || fallbackTime(plantOf(diagnostic.line || UNKNOWN_LINE));
       const pair = diagnostic.pairKey ? ` for ${formatSetupPairKey(diagnostic.pairKey)}` : '';
       const defaultMsg = SETUP_DIAGNOSTIC_DEFAULT_MSG[diagnostic.type];
       const sev = SETUP_DIAGNOSTIC_SEVERITY[diagnostic.type] || 'err';
@@ -1642,12 +1666,13 @@
     return { alerts: kept, elapsed: performance.now() - t0 };
   }
 
-  // The per-call memos (_wwCache, _plantMemo, _taskPlantFallback) are module-level and exported helpers read them
+  // The per-call memos (_wwCache, _plantMemo, _ivCache, _taskPlantFallback) are module-level and exported helpers read them
   // whenever they are non-null, so a rule that throws must not leave them set: the next caller outside a compute
   // call would read a stale plant / working-window answer. try/finally clears them on every exit.
   function _clearComputeMemos() {
     _wwCache = null;
     _plantMemo = null;
+    _ivCache = null;
     _taskPlantFallback = null;
   }
   function computeAlerts(args) {
@@ -1659,21 +1684,42 @@
   // task IDs (the caller resolves them to objects). Pass `lines` to pin the exact line
   // set (app.js's plant-scoped set); omit it to derive from tasks ∪ Object.keys(calendars).
 
+  // The [start, end] envelope (epoch ms) of the order's work as workingMinutesByDay reads it, for the matrix's horizon
+  // pre-filter: a split order's pieces, else the single bar; a finish-only row is [end - run time, end]; a start with no
+  // finish is the point at its start (the whole run time goes on the start day). Null when it cannot be told.
+  function _taskSpanMs(task) {
+    const nums = _intervalNums(task);
+    if (nums.length >= 2) {
+      let s = nums[0].s, e = nums[0].e;
+      for (const n of nums) { if (n.s < s) s = n.s; if (n.e > e) e = n.e; }
+      return { s, e };
+    }
+    const start = parseDate(task?.start_date), end = parseDate(task?.end_date);
+    const runMin = runHours(task) * 60;
+    if (!start && (!end || runMin <= 0)) return null;
+    const s = start ? +start : +end - runMin * MS_MIN;
+    return { s, e: end ? +end : s };
+  }
+
   function _computeUtilizationBody({ tasks, lineSettings, calendars, plants, blocks, plantBlocks, masterData, startMs, days, lines: explicitLines, setup }) {
     const start = startOfDay(new Date(startMs));
     _wwCache = new Map();
     _plantMemo = new Map();
+    _ivCache = new Map();
     _taskPlantFallback = _buildTaskPlantFallback(tasks);
 
     let lines;
     if (Array.isArray(explicitLines)) {
       lines = new Set(explicitLines);
     } else {
-      lines = new Set(tasks.map(t => t.MACHINE || 'Unknown'));
+      lines = new Set(tasks.map(t => lineOf(t)));
       Object.keys(calendars).forEach(l => lines.add(l));
     }
 
     const blockIdx = _indexCapacityBlocks(blocks, plantBlocks);
+    const horizonStartMs = +start;
+    const horizonEnd = new Date(start); horizonEnd.setDate(start.getDate() + days);
+    const horizonEndMs = +horizonEnd;   // NaN for an unusable `days`: no task is then pre-filtered
     const matrix = {};
     for (const line of lines) {
       matrix[line] = {};
@@ -1694,7 +1740,11 @@
     // One attribution rule (workingMinutesByDay), shared with the overload alert and the cell briefing.
     for (const t of tasks) {
       if (!t.start_date && !t.end_date) continue;   // VM12: a finish-only row is the bar [end - run time, end]
-      const line = t.MACHINE || 'Unknown';
+      // Horizon pre-filter: an order whose whole span lies outside the matrix puts nothing in it. An OVERLAP test, never
+      // a clip: a bar that merely touches the horizon is attributed whole (its run time spreads over every day it spans).
+      const span = _taskSpanMs(t);
+      if (span && (span.e < horizonStartMs || span.s >= horizonEndMs)) continue;
+      const line = lineOf(t);
       const lineRows = matrix[line];
       if (!lineRows) continue;
       const windowFor = date => {
@@ -1776,7 +1826,7 @@
   // Days-out from the horizon start -> multiplier (imminent = more costly).
   function timeWeight(time, horizonStart) {
     if (!time) return 1.0;
-    const d = (time - horizonStart) / 86400000;
+    const d = (time - horizonStart) / MS_DAY;
     return d <= 3 ? CONFIDENCE_WEIGHTS.tw3 : d <= 7 ? CONFIDENCE_WEIGHTS.tw7 : 1.0;
   }
 
@@ -1810,7 +1860,7 @@
   }
 
   function scoreConfidence({ alerts, horizonStart, horizonMinutes, machines }) {
-    const horizonEnd = new Date(horizonStart.getTime() + horizonMinutes * 60000);
+    const horizonEnd = new Date(horizonStart.getTime() + horizonMinutes * MS_MIN);
     const m = _machinesOrDefault(machines);
     let rawErrPoints = 0, rawWarnPoints = 0;
     (alerts || []).forEach(a => {
@@ -1835,16 +1885,16 @@
   return {
     // constants
     CONFIDENCE_WEIGHTS,
-    MS_DAY, MS_HOUR, OVERLOAD_THRESHOLD, OVERLOAD_TOLERANCE_H, WARN_THRESHOLD, SHOW_NEAR_CAPACITY_ALERTS, DEFAULT_SHIFT, WEEKEND_OFF,
+    OVERLOAD_THRESHOLD, OVERLOAD_TOLERANCE_H, WARN_THRESHOLD, SHOW_NEAR_CAPACITY_ALERTS, DEFAULT_SHIFT, WEEKEND_OFF,
     isOverloaded,
     // date/time helpers
-    parseDate, dayKey, startOfDay, separationBucketKey, runHours, scheduleIntervals, setupIntervals, mergedOverlapHours, fmtDTReadable, toLocalSeconds, toLocalInput,
+    parseDate, dayKey, startOfDay, separationBucketKey, scheduleIntervals, fmtDTReadable, toLocalSeconds,
     // tool inventory (shared by the alert rule and the optimizer)
     TOOL_PLACEHOLDERS, normalizeToolId, taskToolIds, taskToolPlant, toolOccupancyInterval, buildToolCapacity, availableCopies,
     findToolOverages, toolConflictAlertId, buildToolIndex, toolIndexUpdate, toolHeadroom,
     // calendar engine
     activeWorkHours, plantWorkHoursOn, periodBoundaryKeys, validatePlantPeriods, unionWeeklyHours,
-    getPlantForLine, ensureCalendar, ensurePlant, _dayWindow, _nextCalendarDay: nextCalendarDay, prevCalendarDay, plantWallClockFromInstant, plantInstantFromWallClock, workWindow, dueDateInstant, workingMinutesByDay,
+    getPlantForLine, _dayWindow, _nextCalendarDay: nextCalendarDay, prevCalendarDay, plantWallClockFromInstant, plantInstantFromWallClock, workWindow, dueDateInstant, workingMinutesByDay,
     _indexCapacityBlocks, dailyCapacityHours, effectiveFromCapacity,
     // top-level compute
     computeAlerts, computeUtilization, computeLeverageBatch,

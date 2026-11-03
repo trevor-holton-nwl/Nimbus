@@ -1740,3 +1740,52 @@ test('B27: firmed-out-of-hours and derivation alerts ship msgDates (default text
   // An alert that embeds no date carries no msgDates.
   assert.equal(issueAlerts([issueTask('rz', { code: 'run_time_zero' })]).find(a => a.type === 'run_time_zero').msgDates, undefined);
 });
+
+// B8: the end-of-window check reads the LAST OCCUPIED instant, so a bar ending exactly at midnight is judged by the
+// window of the day it ran on (not the next day's), and a bar closing exactly on the window close stays clean.
+test('B8: a bar ending exactly at midnight is judged against the window of the day it ran on', () => {
+  const alertsFor = (t) => Core.computeAlerts(alertBase([t], { now: { P: D(14, 6) } })).alerts
+    .filter(a => a.type === 'firmed-out-of-hours');
+  // Window 08:00-18:00. Thu 10:00 -> Fri 00:00 runs 6 h past the close: flagged "ends after L closes".
+  const past = alertsFor({ id: 'm', MACHINE: 'L', PLANT: 'P', ORDER: 'M', RUN_TIME: 14, start_date: D(15, 10), end_date: D(16, 0) });
+  assert.equal(past.length, 1);
+  assert.match(past[0].msg, /ends after L closes/);
+  // Ending exactly on the close is on time.
+  assert.deepEqual(alertsFor({ id: 'c', MACHINE: 'L', PLANT: 'P', ORDER: 'C', RUN_TIME: 8, start_date: D(15, 10), end_date: D(15, 18) }), []);
+});
+
+// B18: parsed numbers are memoized per pass, but every caller still gets fresh Date instances.
+test('B18: scheduleIntervals returns fresh Dates each call, inside and outside a compute pass', () => {
+  const t = { id: 'x', start_date: '2026-10-15T08:00:00', end_date: '2026-10-15T10:00:00' };
+  const a = Core.scheduleIntervals(t), b = Core.scheduleIntervals(t);
+  assert.notEqual(a[0].start, b[0].start);
+  assert.equal(+a[0].start, +b[0].start);
+  a[0].start.setHours(0);   // a caller mutating its copy must not leak into the next read
+  assert.equal(Core.scheduleIntervals(t)[0].start.getHours(), 8);
+  const { alerts } = Core.computeAlerts(alertBase([
+    { id: 'p', MACHINE: 'L', PLANT: 'P', ORDER: 'P', RUN_TIME: 4, start_date: D(15, 8), end_date: D(15, 12) },
+    { id: 'q', MACHINE: 'L', PLANT: 'P', ORDER: 'Q', RUN_TIME: 4, start_date: D(15, 10), end_date: D(15, 14) },
+  ]));
+  const ovl = alerts.find(x => x.type === 'overlap');
+  assert.equal(+ovl.time, +D(15, 10));
+});
+
+// B16: the utilization horizon pre-filter is an overlap test, never a clip.
+test('B16: orders outside the matrix horizon are skipped; one touching it is attributed whole', () => {
+  const run = (tasks) => Core.computeUtilization({
+    tasks, lineSettings: { L: { plant: 'P' } }, calendars: { L: { workHours: allDays([0, 24]) } }, plants: {}, blocks: [], plantBlocks: [],
+    masterData: { lines: [{ machine: 'L', plant: 'P' }] }, startMs: +D(14), days: 2, lines: ['L'],
+  }).matrix.L;
+  const before = { id: 'b', MACHINE: 'L', RUN_TIME: 2, start_date: D(10, 8), end_date: D(10, 10) };
+  const after = { id: 'a', MACHINE: 'L', RUN_TIME: 2, start_date: D(20, 8), end_date: D(20, 10) };
+  const startOnly = { id: 's', MACHINE: 'L', RUN_TIME: 3, start_date: D(15, 9) };
+  const farStartOnly = { id: 'f', MACHINE: 'L', RUN_TIME: 3, start_date: D(30, 9) };
+  // A 48 h bar from Tue 12:00 to Thu 12:00 with a 24 h run: half its time falls on each day, but only 14th/15th are in the 2-day matrix
+  // (Wed 14th, Thu 15th); the share is computed over the WHOLE bar, so it is not clipped to the horizon.
+  const spanning = { id: 'sp', MACHINE: 'L', RUN_TIME: 48, start_date: D(13, 0), end_date: D(16, 0) };
+  const m = run([before, after, startOnly, farStartOnly, spanning]);
+  assert.deepEqual(Object.keys(m), ['2026-10-14', '2026-10-15']);
+  assert.equal(m['2026-10-15'].scheduled, 16 + 3, 'whole-bar share: 48 h over 3 days = 16 h/day, plus the start-only order');
+  assert.equal(m['2026-10-14'].scheduled, 16);
+  assert.deepEqual(m['2026-10-15'].tasks.sort(), ['s', 'sp']);
+});
