@@ -1710,6 +1710,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.opt_bg_more': '(+{{count}} weitere)',
   'ui.opt_bg_switch_plant': 'Zu Werk {{plant}} wechseln',
   'toast.opt_bg_no_worker': 'Die Ausführung im Hintergrund benötigt einen Browser, der Hintergrund-Worker unterstützt.',
+  'toast.opt_bg_stale_core': 'Der Hintergrundlauf konnte nicht gestartet werden, weil dieser Browser eine veraltete Kopie des Optimierers enthält. Laden Sie die Seite neu (Strg+F5) und starten Sie ihn erneut.',
   'ui.opt_pv_apply_fits': 'Anwenden, was noch passt',
   'ui.opt_bg_leave_warning': 'Eine Hintergrundoptimierung läuft noch. Wenn Sie diese Seite verlassen, geht sie verloren.',
   'ui.setup_review_filter_all':           'All',                                                       // MISSING TRANSLATION

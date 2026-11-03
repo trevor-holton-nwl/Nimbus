@@ -365,10 +365,12 @@ export const LaborPlanning = (() => {
 
     const monday = _isoWeekToMonday(periodKey);
     const openSlots: Array<{ line: string; date: Date; dayKey: string }> = [];
+    // Parse the blackout blocks once for the whole (line x day) loop instead of once per cell.
+    const capIdx = Calendar._indexCapacityBlocks();
     lines.forEach((line) => {
       for (let d = 0; d < 7; d++) {
         const date = new Date(monday); date.setDate(monday.getDate() + d);
-        if (Calendar.effectiveCapacityHours(line, date) > 0)
+        if (Calendar.effectiveCapacityHours(line, date, capIdx) > 0)
           openSlots.push({ line, date, dayKey: Util.dayKey(date) });
       }
     });
@@ -710,10 +712,18 @@ export const LaborPlanning = (() => {
     // Memoize calendar capacity per (line|dayKey) for this render pass — the same
     // line/date pair is otherwise recomputed across every row build.
     const _capMemo: Map<string, number> = new Map();
+    // The block index is built once per render pass (lazily, so a pass that never asks pays nothing). The
+    // acknowledgement patcher below reuses this closure after the render, but the Store blocks it reads are the
+    // same ones this pass saw (a blackout change re-renders the pane).
+    let _capIdx: ReturnType<typeof Calendar._indexCapacityBlocks> | undefined;
     const _capFor = (line: string, date: Date, dayKey: string): number => {
       const k = line + '|' + dayKey;
       let v = _capMemo.get(k);
-      if (v === undefined) { v = Calendar.effectiveCapacityHours(line, date); _capMemo.set(k, v); }
+      if (v === undefined) {
+        _capIdx ??= Calendar._indexCapacityBlocks();
+        v = Calendar.effectiveCapacityHours(line, date, _capIdx);
+        _capMemo.set(k, v);
+      }
       return v;
     };
     const lineRows = allLinesMeta.map((lm) => {

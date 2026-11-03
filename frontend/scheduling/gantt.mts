@@ -28,7 +28,7 @@ import { dayStepKeys, dayStepActive, dayStepNext, dayStepLabel } from '../platfo
 import { OverflowMenu } from '../platform/overflow-menu.mjs';
 import { Selection } from './selection.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
-import { Utilization, Alerts } from '../insights/services.mjs';
+import { Utilization, Alerts, Compute } from '../insights/services.mjs';
 import { AlertProfileMatches, categoryColorSignature } from '../insights/alert-profile-matches.mjs';
 import { CALENDAR_ALERT_TYPES, ALERT_CATEGORY_ORDER } from '../insights/alert-profiles.mjs';
 import { Engine, deriveSetupObservation } from '../optimization/engine.mjs';
@@ -4048,6 +4048,41 @@ export const Hierarchy = {
 
   _renderPending: false,
 
+  // The 7-day matrix the chip/count read, with the key it was built for. With the worker up, render() never
+  // computes it synchronously: it reads the shared cache, else shows the last matrix of the same plant and window
+  // while computeMatrixAsync resolves, then repaints (the Dashboard fills the same cache entry, so a miss is rare).
+  _matrix:        null as HierarchyUtilMatrix | null,
+  _matrixKey:     null as { plant: string; startMs: number; dataRev: number } | null,
+  _matrixPending: null as string | null,
+
+  /** The matrix for the chosen window, or null while there is nothing usable yet (the chips then show a dash). */
+  _utilMatrixFor(clock: Date): HierarchyUtilMatrix | null {
+    const plant = Store.selectedPlant;
+    // No worker (tests, a dead worker, no Worker API) or no plant: the synchronous cached path, exactly as before.
+    if (!plant || !Compute.available()) return Utilization.computeMatrix(clock, 7);
+    const startMs = Util.startOfDay(clock)!.getTime();
+    const dataRev = Store.dataRev();
+    const hit = Utilization._cacheEntries().find(e => e.plant === plant && e.startMs === startMs && e.days >= 7 && e.dataRev === dataRev);
+    if (hit) {
+      Hierarchy._matrix = hit.matrix; Hierarchy._matrixKey = { plant, startMs, dataRev };
+      return hit.matrix;
+    }
+    const key = Hierarchy._matrixKey;
+    if (key && key.plant === plant && key.startMs === startMs && key.dataRev === dataRev && Hierarchy._matrix) return Hierarchy._matrix;
+    const pendingKey = `${plant}|${startMs}|${dataRev}`;
+    if (Hierarchy._matrixPending !== pendingKey) {
+      Hierarchy._matrixPending = pendingKey;
+      Utilization.computeMatrixAsync(new Date(startMs), 7).then((m) => {
+        if (Hierarchy._matrixPending === pendingKey) Hierarchy._matrixPending = null;
+        if (Store.selectedPlant !== plant) return;   // a plant switch while the worker ran: drop it
+        Hierarchy._matrix = m; Hierarchy._matrixKey = { plant, startMs, dataRev };
+        Hierarchy._scheduleRender();
+      }).catch(() => { if (Hierarchy._matrixPending === pendingKey) Hierarchy._matrixPending = null; });
+    }
+    // Stale but same plant and window beats a blank chip while the fresh one is computed.
+    return (key && key.plant === plant && key.startMs === startMs) ? Hierarchy._matrix : null;
+  },
+
   _scheduleRender(): void {
     if (Hierarchy._renderPending) return;
     Hierarchy._renderPending = true;
@@ -4170,7 +4205,7 @@ export const Hierarchy = {
     const _dayKeys = dayStepKeys(_clock);
     const _dayKey = dayStepActive(_dayKeys, Hierarchy._dayKey);
     Hierarchy._renderStepper(_dayKeys, _dayKey);
-    const _utilDay: HierarchyUtilMatrix = Utilization.computeMatrix(_clock, 7);
+    const _utilDay: HierarchyUtilMatrix = Hierarchy._utilMatrixFor(_clock) ?? {};
 
     Hierarchy._lineItems = visibleNames.map((name): HierarchyLineItem => {
       const ci    = Timeline._colorIndex(name);

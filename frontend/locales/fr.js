@@ -1711,6 +1711,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.opt_bg_more': '(+{{count}} autres)',
   'ui.opt_bg_switch_plant': 'Passer à l’usine {{plant}}',
   'toast.opt_bg_no_worker': 'L’exécution en arrière-plan nécessite un navigateur prenant en charge les workers en arrière-plan.',
+  'toast.opt_bg_stale_core': 'L’exécution en arrière-plan n’a pas pu démarrer, car ce navigateur conserve une copie obsolète de l’optimiseur. Rechargez la page (Ctrl+F5) et relancez-la.',
   'ui.opt_pv_apply_fits': 'Appliquer ce qui reste possible',
   'ui.opt_bg_leave_warning': 'Une optimisation en arrière-plan est toujours en cours. Quitter cette page la fera perdre.',
   'ui.setup_review_filter_all':           'All',                                                       // MISSING TRANSLATION

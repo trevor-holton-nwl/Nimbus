@@ -2,8 +2,8 @@
 // acceleration path: callers without Worker support (tests, server-side
 // tooling, and non-UI integrations) keep the synchronous Engine evaluator.
 import type { CandidateResult, EvaluationRequest, ScheduleSnapshot } from './setup-scheduler.mjs';
-import { evaluateSchedule, rehydrateOptimizerCandidate } from './engine.mjs';
-import { Config, ErrorLog } from '../platform/foundation.mjs';
+import { evaluateSchedule, rehydrateOptimizerCandidate, SETUP_AWARE_NORMAL_BUDGET_MS } from './engine.mjs';
+import { Config, ErrorLog, Util } from '../platform/foundation.mjs';
 import type { OptimizerWorkerRequest, OptimizerWorkerResponse } from './optimizer-worker-contract.mjs';
 export type { OptimizerWorkerRequest, OptimizerWorkerResponse } from './optimizer-worker-contract.mjs';
 
@@ -43,6 +43,20 @@ function workerRequestWithRemainingDeadline(request: OptimizerWorkerRequest): Op
 /** Thrown by the detached scheduler when dated plant periods exist but the realm's compute core predates them. */
 const COMPUTE_CORE_STALE = 'compute-core-stale';
 let _staleCoreWarned = false;
+
+/** An exhaustive / background request: it carries `exhaustive` or a budget above the Normal one (up to 180 s). Run
+ *  synchronously on the main thread it would freeze the page for that long and ignore the AbortSignal, so a stale
+ *  worker core must fail such a run instead of falling back (the foreground Normal run keeps the fallback). */
+function isLongRunRequest(request: OptimizerWorkerRequest): boolean {
+  const r = request.request;
+  return r?.exhaustive === true || Number(r?.searchBudgetMs) > SETUP_AWARE_NORMAL_BUDGET_MS;
+}
+
+function staleCoreError(): Error {
+  const error = new Error(Util.t('toast.opt_bg_stale_core'));
+  error.name = 'OptimizerCoreStale';
+  return error;
+}
 
 function abortError(): Error {
   const error = new Error('Optimizer preview was cancelled.');
@@ -96,6 +110,12 @@ export function runOptimizerPreview(
     worker.onmessage = ({ data }): void => {
       if (!data || data.runId !== request.runId) return;
       if (data.error) {
+        if (String(data.error).includes(COMPUTE_CORE_STALE) && isLongRunRequest(request)) {
+          // No main-thread fallback for an exhaustive run (see isLongRunRequest): fail with a clear, actionable error.
+          ErrorLog.warn('optimizer', 'Optimizer worker has a stale compute core; the background run was refused.');
+          finish(() => reject(staleCoreError()));
+          return;
+        }
         if (String(data.error).includes(COMPUTE_CORE_STALE)) {
           // The worker realm loaded a cached compute core without the dated-period helpers. The main thread
           // has the current core, so evaluate there instead of failing the preview (logged once per session).
