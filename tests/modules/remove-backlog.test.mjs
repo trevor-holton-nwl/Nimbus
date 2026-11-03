@@ -2,7 +2,7 @@ import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { Calendar } from '../../frontend/calendar/calendar-engine.mjs';
-import { Engine } from '../../frontend/optimization/engine.mjs';
+import { Engine, snapshotSchedule } from '../../frontend/optimization/engine.mjs';
 import { Store } from '../../frontend/platform/store.mjs';
 import { allowedPlanningWindow, validateCandidateForApply } from '../../frontend/optimization/setup-scheduler.mjs';
 
@@ -363,4 +363,119 @@ test('Tool Inventory: Remove Backlog is exempt from the tool rule (Hard + loaded
   // The same candidate judged WITHOUT the exemption (what a normal run does) sees the overlap with the other line.
   const strict = { ...candidate, toolPass: { complete: true, elapsedMs: 0 }, validationContext: { snapshot, bounds: { ...bounds, ignoreToolRule: false } } };
   assert.ok(tool(validateCandidateForApply(strict, snapshot)).length >= 1, 'without the flag the same placement is a tool finding');
+});
+
+// ---- PR3: Remove Backlog in a store-less (worker-like) realm, diagnostics accuracy, perf helpers ----
+
+function clearLiveStore() {
+  Store.setMasterData(null, 'test');
+  Store.setSelectedPlant(null, 'test');
+  Store.setFrozenHorizonEnd(null, 'test');
+  Store.setTasks([], 'test');
+}
+
+function normPatches(result) {
+  return result.patches.map(p => ({ id: p.id, changes: JSON.parse(JSON.stringify(p.changes)) }));
+}
+
+test('P0-3: a detached run with an empty live Store counts frozenMoved from the snapshot and matches the live-Store run', () => {
+  seed({ hours: allDays(0, 24), tasks: [
+    task('trigger-overdue', '2026-08-12T06:00', 3),
+    task('frozen-inside-window', '2026-08-12T09:00', 1),
+  ] });
+  Store.setFrozenHorizonEnd(at('2026-08-15T00:00'), 'test');
+  const live = Engine.removeBacklog(opts());
+  const snapshot = snapshotSchedule(plant);
+  clearLiveStore();
+  const detached = Engine.evaluateSchedule('backlog', opts(), snapshot);
+  assert.equal(live.diagnostics.frozenMoved, 2);
+  assert.equal(detached.backlogResult.diagnostics.frozenMoved, 2,
+    'the snapshot frozen end is used, not the empty live Store');
+  assert.deepEqual(normPatches(detached), normPatches(live));
+});
+
+test('P0-3: detached run across a DST fall-back reads the plant zone from the snapshot and matches the live run', () => {
+  seed({ hours: allDays(0, 24), tasks: [task('dst-overdue', '2026-11-01T00:30', 4)] });
+  const o = opts({ startDate: at('2026-11-01T00:00'), endDate: at('2026-11-03T00:00'), runAt: at('2026-11-01T06:30:00Z') });
+  const live = Engine.removeBacklog(o);
+  const snapshot = snapshotSchedule(plant);
+  clearLiveStore();
+  const detached = Engine.evaluateSchedule('backlog', o, snapshot);
+  assert.deepEqual(normPatches(detached), normPatches(live));
+});
+
+test('P0-4: an unmoved placement-exception row inside the window is boundary-only and Apply validation raises no window error', () => {
+  seed({ hours: allDays(0, 24), tasks: [
+    task('exc-overdue', '2026-08-12T06:00', 1, { placement_exception: 'overtime' }),
+  ] });
+  const candidate = Engine.evaluateSchedule('backlog', opts({ plant }));
+  const { snapshot, bounds } = candidate.validationContext;
+  assert.ok(!bounds.scopeTaskIds.includes('exc-overdue'));
+  assert.ok(bounds.boundaryTaskIds.includes('exc-overdue'));
+  assert.deepEqual(validateCandidateForApply(candidate, snapshot).filter(f => f.code === 'date_window'), []);
+});
+
+test('P0-5: sub-30-second and unit-suffixed RUN_TIME parse one way; the bad row is invalid and the line continues', () => {
+  seed({ hours: allDays(0, 24), tasks: [
+    task('tiny', '2026-08-12T06:00', 1, { RUN_TIME: '0.004' }),
+    task('suffix', '2026-08-12T07:00', 1, { RUN_TIME: '2.5 h' }),
+  ] });
+  const result = Engine.removeBacklog(opts());
+  assert.deepEqual(result.diagnostics.invalidRuntimeIds, ['tiny']);
+  assert.deepEqual(result.diagnostics.calendarSearchFailures, []);
+  const placed = patch(result, 'suffix');
+  assert.ok(placed, 'the line continues past the invalid row');
+  assert.equal((placed.changes.end_date - placed.changes.start_date) / 60000, 150);
+});
+
+test('P0-6: queued (needs_planning) rows are not counted as missing a start; a blank MACHINE is on the Unknown line', () => {
+  seed({ tasks: [
+    ...['q1', 'q2', 'q3'].map(id => task(id, '2026-08-12T09:00', 1, { start_date: null, end_date: null, planning_status: 'needs_planning' })),
+    task('never-placed', '2026-08-12T09:00', 1, { start_date: null, end_date: null }),
+  ] });
+  const result = Engine.removeBacklog(opts());
+  assert.deepEqual(result.diagnostics.missingStartIds, ['never-placed']);
+
+  seed({ tasks: [task('blank-line', '2026-08-12T06:00', 1, { MACHINE: '' })] });
+  const c = Engine.evaluateSchedule('backlog', opts({ lines: ['Unknown'] }));
+  assert.ok(c.validationContext.bounds.scopeTaskIds.includes('blank-line'));
+});
+
+test('P1-1: array firmed/boundary ids protect like a Set and each array builds its Set once', () => {
+  seed({ hours: allDays(0, 24), tasks: [task('a', '2026-08-12T06:00', 1), task('b', '2026-08-12T12:00', 1)] });
+  const candidate = Engine.evaluateSchedule('backlog', opts({ plant }));
+  const { snapshot, bounds } = candidate.validationContext;
+  assert.ok(Array.isArray(bounds.boundaryTaskIds));
+  const base = validateCandidateForApply(candidate, snapshot).map(f => f.code);
+  const asSets = { ...candidate, validationContext: { snapshot: { ...snapshot, firmedIds: new Set(snapshot.firmedIds) },
+    bounds: { ...bounds, boundaryTaskIds: new Set(bounds.boundaryTaskIds), scopeTaskIds: new Set(bounds.scopeTaskIds) } } };
+  assert.deepEqual(validateCandidateForApply(asSets, asSets.validationContext.snapshot).map(f => f.code), base);
+
+  const RealSet = globalThis.Set;
+  const countArrayBuilds = () => {
+    let n = 0;
+    globalThis.Set = class extends RealSet { constructor(it) { super(it); if (it && typeof it !== 'string' && !(it instanceof RealSet)) n++; } };
+    try { validateCandidateForApply(candidate, snapshot); } finally { globalThis.Set = RealSet; }
+    return n;
+  };
+  countArrayBuilds();               // warms the memo
+  const warm = countArrayBuilds();
+  assert.equal(warm, countArrayBuilds());
+  assert.ok(warm < 20, `id arrays memoised (saw ${warm} Set builds from iterables)`);
+});
+
+test('P1-2: boundaryConflicts golden order and a large patch set stays fast', () => {
+  seed({ hours: allDays(0, 24), tasks: [
+    task('over', '2026-08-12T06:00', 3),
+    task('fixed1', '2026-08-12T09:00', 1),
+    task('fixed2', '2026-08-12T10:00', 1),
+  ] });
+  const result = Engine.removeBacklog(opts({ endDate: at('2026-08-12T08:30') }));
+  assert.deepEqual(result.diagnostics.boundaryConflicts.map(c => `${c.movedTaskId}>${c.protectedTaskId}`),
+    ['over>fixed1', 'over>fixed2']);
+
+  seed({ hours: allDays(0, 24), tasks: Array.from({ length: 3000 }, (_, i) => task(`b${i}`, '2026-08-12T00:00', 0.01)) });
+  const t0 = performance.now();
+  Engine.removeBacklog(opts({ endDate: at('2026-08-14T00:00') }));
+  assert.ok(performance.now() - t0 < 20000, 'loose timing bound');
 });

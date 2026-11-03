@@ -2435,10 +2435,16 @@ function boundedLocalMoveSequences(
   return result;
 }
 
+const _firmedArrayMemo = new WeakMap<readonly string[], ReadonlySet<string>>();
 function taskIsFirmed(snapshot: Readonly<ScheduleSnapshot>, task: NimbusTask): boolean {
-  const firmedIds = snapshot.firmedIds instanceof Set
-    ? snapshot.firmedIds
-    : new Set(Array.from(snapshot.firmedIds, String));
+  let firmedIds: ReadonlySet<string>;
+  if (snapshot.firmedIds instanceof Set) firmedIds = snapshot.firmedIds;
+  else {
+    const arr = snapshot.firmedIds as readonly string[];
+    let memo = _firmedArrayMemo.get(arr);
+    if (!memo) { memo = new Set(Array.from(arr, String)); _firmedArrayMemo.set(arr, memo); }
+    firmedIds = memo;
+  }
   // `task.firmed` is a Store mirror and may be stale in a detached snapshot.
   // The caller folds manual/running/frozen protection into this effective set
   // before evaluation; membership in that set is the only authoritative
@@ -6829,9 +6835,15 @@ interface TaskScope {
   evaluation: NimbusTask[];
 }
 
+const _idSetMemo = new WeakMap<readonly string[], ReadonlySet<string>>();
 function idSet(value: readonly string[] | ReadonlySet<string> | undefined): ReadonlySet<string> | null {
   if (value instanceof Set) return value;
-  return value ? new Set(Array.from(value, String)) : null;
+  if (!value) return null;
+  // Id arrays are never mutated once the bounds are built: one Set per array, not per call.
+  const arr = value as readonly string[];
+  let set = _idSetMemo.get(arr);
+  if (!set) { set = new Set(Array.from(arr, String)); _idSetMemo.set(arr, set); }
+  return set;
 }
 
 function normalizedQueuedTask(task: NimbusTask): NimbusTask {
