@@ -62,6 +62,28 @@
     }, ids);   // ids let distribution writes drop stale undo entries
   }
 
+  // The palette's one "jump to the first conflict" path (the Right Now card, the intent and the action row used to
+  // carry three copies, one of which only worked for alerts that name an order). Routed through the alert focus
+  // (not the Gantt focus directly) so it also works for the order-less alerts (every overload / closed / calendar
+  // alert); the focus itself brings the Timeline forward. `emptyKey` is the toast shown when nothing is in conflict.
+  function _jumpToFirstConflict(emptyKey) {
+    const err = (Store.alerts || []).filter(a => a.sev === 'err').sort((a, b) => a.time - b.time)[0];
+    if (!err) { Toast.show(t(emptyKey), 'info', 1800); return; }
+    NIMBUS.AlertsUIAdapter.focus(err.id);
+  }
+
+  // Go to a machine's row on the Gantt: the shared line + day navigation (the same call an alert's Go To makes),
+  // on `dayKey` when the caller knows the day that matters (an overloaded day), else on today. Falls back to
+  // focusing any order on the line when the navigation is not available.
+  function _gotoLine(line, dayKey) {
+    NIMBUS.App.gotoGanttTimeline();
+    const day = dayKey || NIMBUS.Util?.dayKey?.(_plantToday());
+    const goto = NIMBUS.Timeline?.gotoLineDay;   // late-bound (the idiom above) so the legacy-surface ratchet does not grow
+    if (day && goto) { goto.call(NIMBUS.Timeline, line, day); return; }
+    const sample = Store.tasksForSelectedPlant().find(x => x.MACHINE === line);
+    if (sample) setTimeout(() => NIMBUS.Timeline.focus(String(sample.id)), 100);
+  }
+
   /* --- CSS injection ------------------------------------------------------- */
   (function _injectStyles() {
     const s = document.createElement('style');
@@ -421,6 +443,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         const req = tx.objectStore(store).put(value);
         tx.oncomplete = () => res(req.result);
         tx.onerror    = e => rej(e.target.error);
+        // A quota or constraint abort fires onabort without a prior onerror on the transaction: without this the
+        // promise never settled and the snapshot's caller waited forever.
+        tx.onabort    = () => rej(tx.error || new Error('IndexedDB transaction aborted'));
       });
     },
 
@@ -476,21 +501,28 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       // Count, then walk the ts index with a KEY cursor (keys only: no snapshot payloads are
       // loaded) deleting the oldest by primary key until keepN remain.
       const fn = () => {
-        const tx = IntelDB._db.transaction('snapshots', 'readwrite');
-        const os = tx.objectStore('snapshots');
-        const countReq = os.count();
-        countReq.onsuccess = () => {
-          let excess = countReq.result - keepN;
-          if (excess <= 0) return;
-          const curReq = os.index('ts').openKeyCursor();
-          curReq.onsuccess = e => {
-            const cursor = e.target.result;
-            if (!cursor || excess <= 0) return;
-            os.delete(cursor.primaryKey);
-            excess -= 1;
-            cursor.continue();
+        // Runs from an idle callback: a closed database (transaction() throws) must not surface as an uncaught error.
+        try {
+          const tx = IntelDB._db.transaction('snapshots', 'readwrite');
+          const os = tx.objectStore('snapshots');
+          const countReq = os.count();
+          countReq.onsuccess = () => {
+            let excess = countReq.result - keepN;
+            if (excess <= 0) return;
+            const curReq = os.index('ts').openKeyCursor();
+            curReq.onsuccess = e => {
+              const cursor = e.target.result;
+              if (!cursor || excess <= 0) return;
+              os.delete(cursor.primaryKey);
+              excess -= 1;
+              cursor.continue();
+            };
           };
-        };
+        } catch (e) {
+          (window.NIMBUS && window.NIMBUS.ErrorLog
+            ? window.NIMBUS.ErrorLog.warn('intel', 'IntelDB snapshot prune failed', { err: String(e), errorCode: 'internal' })
+            : console.warn('[IntelDB] snapshot prune failed', e));
+        }
       };
       if (window.requestIdleCallback) window.requestIdleCallback(fn, { timeout: 2000 });
       else setTimeout(fn, 2000);
@@ -509,10 +541,14 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const tasks    = Store.tasksArr;
       const errAlerts  = alerts.filter(a => a.sev === 'err');
       const warnAlerts = alerts.filter(a => a.sev === 'warn');
-      const unscheduled = tasks.filter(t => !t.start_date || !t.end_date);
+      // Every order is finish-anchored: a row with a finish and no stored start is placed (its start is derived), so
+      // only a row with neither date still needs scheduling.
+      const unscheduled = tasks.filter(t => !t.start_date && !t.end_date);
 
-      // Peak utilization — use sync compute, but trigger worker refresh for next call
-      let maxUtil = 0, overloadedLine = null;
+      // Peak utilization — use sync compute, but trigger worker refresh for next call. Only days that count as
+      // overloaded under the shared rule (the alert's 0.05 h tolerance) are tracked, so a full day never reads as
+      // overloaded here while the alert says it is fine; maxUtil stays 0 when there is none.
+      let maxUtil = 0, overloadedLine = null, overloadedDay = null;
       try {
         // One clock (OQ52 / I13): the plant's today, the same start the Dashboard matrix and the prewarm use.
         const now = _plantToday();
@@ -521,10 +557,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         const matrix = Utilization.computeMatrix(now, 7);
 
         for (const [line, lineData] of Object.entries(matrix)) {
-          for (const row of Object.values(lineData)) {
-            if (row.effectiveCapacity > 0) {
+          for (const [day, row] of Object.entries(lineData)) {
+            if (row.effectiveCapacity > 0 && NimbusComputeCore.isOverloaded(row.scheduled, row.effectiveCapacity)) {
               const ratio = row.scheduled / row.effectiveCapacity;
-              if (ratio > maxUtil) { maxUtil = ratio; overloadedLine = line; }
+              if (ratio > maxUtil) { maxUtil = ratio; overloadedLine = line; overloadedDay = day; }
             }
           }
         }
@@ -548,16 +584,23 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const selSize = selIds.length;
       const selStats = selSize ? (NIMBUS.Selection?.stats?.() || {}) : {};
 
-      // Blackout risk (orders within 48h of a blackout)
+      // Blackout risk (orders that touch a blackout starting or running within the next 48 h). The window is the
+      // plant's clock; a blackout already in progress counts (it has not ended yet); and a blackout only puts an
+      // order at risk when it covers that order's own line (a line blackout) or plant (a plant blackout).
       let blackoutRisk = 0;
       try {
-        const now2    = Date.now();
+        const now2    = _plantClock().getTime();
         const horizon = now2 + 48 * 3600000;
-        const bkts = Store.blocks.concat(Store.plantBlocks).filter(b => b.start > now2 && b.start < horizon);
+        const win = b => { const s = +new Date(b.start), e = +new Date(b.end); return { b, s, e }; };
+        const bkts = Store.blocks.concat(Store.plantBlocks).map(win)
+          .filter(w => Number.isFinite(w.s) && Number.isFinite(w.e) && w.e > now2 && w.s < horizon);
         if (bkts.length) {
-          blackoutRisk = tasks.filter(t => Util.scheduleIntervals(t).some(interval =>
-            bkts.some(b => interval.end.getTime() > b.start && interval.start.getTime() < b.end)
-          )).length;
+          blackoutRisk = tasks.filter(t => {
+            const taskPlant = t.PLANT || Store.selectedPlant;
+            const hits = bkts.filter(({ b }) => (!b.plant || b.plant === taskPlant) && (!b.line || b.line === t.MACHINE));
+            return hits.length && Util.scheduleIntervals(t).some(interval =>
+              hits.some(h => interval.end.getTime() > h.s && interval.start.getTime() < h.e));
+          }).length;
         }
       } catch (e) {
         (window.NIMBUS && window.NIMBUS.ErrorLog
@@ -572,6 +615,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         unscheduledCount: unscheduled.length,
         maxUtil,
         overloadedLine,
+        overloadedDay,
         minsSinceSnap,
         confScore:     Confidence._score,
         confDelta,
@@ -606,12 +650,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           when:  s => s.errCount > 0 && s.hasPlant,
           run()  {
             CommandPalette.close();
-            const err = (Store.alerts || []).filter(a => a.sev === 'err').sort((a, b) => a.time - b.time)[0];
-            if (!err) { Toast.show(t('toast.no_active_conflicts'), 'info', 1800); return; }
-            // Routed through AlertsUIAdapter.focus (not Timeline.focus directly) so
-            // this also works for taskId-less alerts (every overload/closed/calendar
-            // alert) instead of silently no-oping on them — see B3.
-            NIMBUS.AlertsUIAdapter.focus(err.id);
+            _jumpToFirstConflict('toast.no_active_conflicts');
           }
         },
         {
@@ -623,9 +662,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           when:  s => s.maxUtil >= 1.0 && s.hasPlant,
           run(s) {
             CommandPalette.close();
-            NIMBUS.App.gotoGanttTimeline();
-            const sample = Store.tasksArr.find(t => t.MACHINE === s.overloadedLine);
-            if (sample) setTimeout(() => NIMBUS.Timeline.focus(String(sample.id)), 100);
+            _gotoLine(s.overloadedLine, s.overloadedDay);   // the overloaded day, not just any order on the line
           }
         },
         {
@@ -808,17 +845,15 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           icon:  '🚨',
           run()  {
             CommandPalette.close();
-            const err = (Store.alerts || []).filter(a => a.sev === 'err').sort((a, b) => a.time - b.time)[0];
-            if (!err) { Toast.show(t('toast.no_conflicts_clean'), 'info', 1800); return; }
-            // Routed through AlertsUIAdapter.focus (not Timeline.focus directly) so
-            // this also works for taskId-less alerts (every overload/closed/calendar
-            // alert) instead of silently no-oping on them — see B3.
-            NIMBUS.AlertsUIAdapter.focus(err.id);
+            _jumpToFirstConflict('toast.no_conflicts_clean');
           }
         },
       ];
 
-      const results = bank.filter(intent => intent.keywords.some(kw => q.includes(kw)));
+      // A keyword must start a word: plain substring matching offered Freeze for "!shipping" (pin) and Rush for
+      // "!photo" (hot). Inflections still match ("locked", "exporting"), only a match from the middle of a word does not.
+      const startsWord = kw => new RegExp(`(?:^|[^a-z0-9])${kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`).test(q);
+      const results = bank.filter(intent => intent.keywords.some(startsWord));
       if (!results.length) {
         // Loose word-level fallback
         const words = q.split(/\s+/);
@@ -846,27 +881,22 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     _results:   [],
     _cursor:    0,
     _lastQuery: '',
-    _recent: {
-      _key: 'nimbus.recentCmds',
-      get() { try { return JSON.parse(localStorage.getItem('nimbus.recentCmds')) || []; } catch { return []; } },
-      push(label) {
-        const a = CommandPalette._recent.get().filter(l => l !== label);
-        a.unshift(label);
-        localStorage.setItem('nimbus.recentCmds', JSON.stringify(a.slice(0, 5)));
-      }
-    },
 
     init() {
       CommandPalette._buildPanel();
       document.addEventListener('keydown', e => {
-        if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        // Lower-cased: with Caps Lock on, the key arrives as 'K'.
+        if ((e.metaKey || e.ctrlKey) && String(e.key || '').toLowerCase() === 'k') {
           e.preventDefault();
           if (!Store.selectedPlant) return;
           CommandPalette.open();
         }
       });
       Store.subscribe(evt => {
-        if (!evt?.type || evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate' || evt.type === 'plant:selected')
+        // The index holds each order's label (name, machine, colour) and the firm-dependent selection commands, so a
+        // single edit, a removal and a firm change must drop it too, not only the bulk events.
+        if (!evt?.type || evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate' || evt.type === 'plant:selected'
+            || evt.type === 'task:update' || evt.type === 'task:remove' || evt.type === 'firmed:change')
           CommandPalette._index = null;
         if (evt?.type === 'plant:selected') {
           const fab = document.getElementById('ni-cmd-fab');
@@ -950,7 +980,12 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       input.addEventListener('keydown', e => {
         if (e.key === 'ArrowDown') { e.preventDefault(); CommandPalette._move(1); }
         if (e.key === 'ArrowUp')   { e.preventDefault(); CommandPalette._move(-1); }
-        if (e.key === 'Enter')     { e.preventDefault(); CommandPalette._activate(); }
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          // Enter inside the 60 ms input debounce would run the PREVIOUS query's top result: search what is typed first.
+          if (input.value.trim() !== CommandPalette._lastQuery) CommandPalette._search(input.value);
+          CommandPalette._activate();
+        }
         if (e.key === 'Escape')    { CommandPalette.close(); }
       });
       document.addEventListener('mousedown', e => {
@@ -984,9 +1019,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           type: 'line', label: t('cmdp.label_go_to_line', { line }), sub: t('cmdp.sub_scroll_to_this_line'), icon: '🏭',
           run() {
             CommandPalette.close();
-            NIMBUS.App.gotoGanttTimeline();
-            const sample = Store.tasksForSelectedPlant().find(t => t.MACHINE === line);
-            if (sample) setTimeout(() => NIMBUS.Timeline.focus(String(sample.id)), 100);
+            _gotoLine(line);
           }
         });
         idx.push({
@@ -1004,10 +1037,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         { type:'action', label:t('cmdp.label_jump_first_conflict_title'), sub:t('cmdp.sub_scroll_to_error_alert'), icon:'🚨',
           run(){
             CommandPalette.close();
-            const err = (Store.alerts || []).filter(a => a.sev === 'err').sort((a,b) => a.time - b.time)[0];
-            if (!err) { Toast.show(t('toast.no_conflicts_clean'), 'info', 1800); return; }
-            NIMBUS.App.gotoGanttTimeline();
-            setTimeout(() => { if (err.taskId) NIMBUS.Timeline.focus(String(err.taskId)); }, 100);
+            _jumpToFirstConflict('toast.no_conflicts_clean');
           } },
         { type:'action', label:t('cmdp.label_take_snapshot_title'), sub:t('cmdp.sub_save_manual_checkpoint'), icon:'📷',
           run(){
@@ -1054,9 +1084,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const q = query.trim();
       CommandPalette._lastQuery = q;
 
-      // Intent mode: "need: ..." or "! ..."
-      if (q.startsWith('need:') || q.startsWith('!')) {
-        const intentText = q.replace(/^(need:|!)/, '').trim();
+      // Intent mode: "need: ..." or "! ..." (the prefix in any case: "Need:" typed after a capital or Caps Lock)
+      if (/^(need:|!)/i.test(q)) {
+        const intentText = q.replace(/^(need:|!)/i, '').trim();
         if (intentText) {
           CommandPalette._results = NeedsEngine.resolveIntent(intentText);
           if (!CommandPalette._results.length) {
@@ -1148,7 +1178,6 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     _activate() {
       const item = CommandPalette._results[CommandPalette._cursor];
       if (item?.run) {
-        if (item.type === 'action') CommandPalette._recent.push(item.label);
         try { item.run(); } catch (e) {
           (window.NIMBUS && window.NIMBUS.ErrorLog
             ? window.NIMBUS.ErrorLog.warn('intel', 'CommandPalette action failed', { err: String(e), errorCode: 'internal' })
@@ -1161,17 +1190,21 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       return String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
     },
 
+    // Match on the RAW text and escape each piece afterwards: matching inside the already-escaped string let "a"
+    // light up the "a" of "&amp;" (a broken entity) and shifted every index after an escaped character.
     _highlight(text, q) {
-      const safe = CommandPalette._esc(text);
-      if (!q) return safe;
-      const safeLo = safe.toLowerCase(), qLo = q.toLowerCase();
-      const idx = safeLo.indexOf(qLo);
+      const raw = String(text);
+      const esc = CommandPalette._esc;
+      if (!q) return esc(raw);
+      const lo = raw.toLowerCase(), qLo = q.toLowerCase();
+      if (lo.length !== raw.length) return esc(raw);   // a character whose lower case changes length: no safe indexes
+      const idx = lo.indexOf(qLo);
       if (idx !== -1)
-        return safe.slice(0, idx) + '<mark>' + safe.slice(idx, idx + q.length) + '</mark>' + safe.slice(idx + q.length);
+        return esc(raw.slice(0, idx)) + '<mark>' + esc(raw.slice(idx, idx + q.length)) + '</mark>' + esc(raw.slice(idx + q.length));
       let out = '', qi = 0;
-      for (let i = 0; i < safe.length; i++) {
-        if (qi < qLo.length && safeLo[i] === qLo[qi]) { out += `<mark>${safe[i]}</mark>`; qi++; }
-        else out += safe[i];
+      for (let i = 0; i < raw.length; i++) {
+        if (qi < qLo.length && lo[i] === qLo[qi]) { out += `<mark>${esc(raw[i])}</mark>`; qi++; }
+        else out += esc(raw[i]);
       }
       return out;
     },
@@ -1299,12 +1332,70 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       .sort((a, b) => a[0] - b[0]);
   }
 
+  // The one encoding of a live order as a snapshot / diff row (snapshot() stores it, Diff compares the live
+  // schedule through it), so the two can never disagree on what a row holds. Epoch ms or null for a missing or
+  // unreadable date. PRODUCTION_VERSION is kept so a restore on a routing plant can put the pair back (rows from
+  // older snapshots have none: unknown).
+  function snapshotTask(t) {
+    const ms = v => { const n = v instanceof Date ? v.getTime() : (v ? new Date(v).getTime() : NaN); return Number.isFinite(n) ? n : null; };
+    return {
+      id:               t.id,
+      PLANT:            t.PLANT || Store.selectedPlant,
+      start_date:       ms(t.start_date),
+      end_date:         ms(t.end_date),
+      MACHINE:          t.MACHINE  || '',
+      PRODUCTION_VERSION: t.PRODUCTION_VERSION || '',
+      PRODUCTION_ORDER: t.PRODUCTION_ORDER || '',
+      text:             t.text || t.MATERIAL_DESCRIPTION || '',
+      COLOR:            t.COLOR     || '',
+      FORM_SIZE:        t.FORM_SIZE || '',
+      FIRMED:           !!t.firmed,
+      scheduleSegments: snapshotSegments(t),
+    };
+  }
+
   /* ==========================================================================
      TIME MACHINE — durable IndexedDB snapshot history
      ========================================================================== */
   // In-memory history cap; matches the IndexedDB prune (IntelDB.pruneSnapshots(200)).
   const TM_MAX_SNAPSHOTS = 200;
   let timeMachineOpener = null;
+
+  // Does `line` still exist in `plant`: a master-data machine of the plant, a machine the plant's line settings
+  // claim, or one that still carries orders there (the Gantt lists all three).
+  function plantHasLine(plant, line) {
+    return (Store.masterData?.lines || []).some(r => r.machine === line && (!r.plant || r.plant === plant))
+      || Store.lineSettings?.[line]?.plant === plant
+      || Store.tasksForSelectedPlant().some(x => x.MACHINE === line);
+  }
+
+  // The write that puts one order back as the snapshot row `s` had it: a skip result when it cannot be.
+  // The finish comes back and the stored start is a placeholder (the engine re-derives it, see restore()).
+  // The MACHINE comes back too when it has moved since the snapshot:
+  //  - routing plant: the (production version, machine) pair is the only PV writer there, so the move goes through
+  //    the PV-aware pairSchedulePatchFor with the snapshot's version (the order's current one when the snapshot
+  //    predates that field); a pair that no longer resolves, or a placement the engine refuses, is a skip;
+  //  - other plants: a direct MACHINE write, provided the machine still exists in the plant.
+  // A snapshot without a finish (an unplaced order) or without a machine leaves the order's machine alone.
+  function restoreRowPatch(task, s, plant, routing) {
+    const finish = s.end_date ? new Date(s.end_date) : null;
+    const base = {
+      start_date: s.start_date ? new Date(s.start_date) : null,
+      end_date:   finish,
+      // The current split envelope belongs to the current finish. Clear it before Store normalizes dates;
+      // reconcile derives fresh pieces.
+      scheduleSegments: [],
+      runtime_schedule_mismatch: true
+    };
+    const machine = s.MACHINE || '';
+    if (!machine || machine === task.MACHINE || !finish) return { changes: base };
+    if (routing) {
+      const pv = s.PRODUCTION_VERSION || task.PRODUCTION_VERSION;
+      const pair = pv ? NIMBUS.Engine?.pairSchedulePatchFor?.(task, pv, machine, finish, { quiet: true }) : null;
+      return pair ? { changes: pair } : { skip: true };
+    }
+    return plantHasLine(plant, machine) ? { changes: { ...base, MACHINE: machine } } : { skip: true };
+  }
   const TimeMachine = {
     _snapshots: [],
     _panel:     null,
@@ -1316,8 +1407,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       // IndexedDB synchronously on EVERY UndoStack.push. Coalescing to one snapshot
       // ~1s after activity settles keeps that work off the hot push path. Manual
       // snapshot() calls (explicit checkpoints) stay immediate.
+      // Checked when the timer FIRES, not when it is armed: a What-If session entered inside the debounce window
+      // would otherwise snapshot the sandbox's trial schedule as if it were the plan.
       TimeMachine._snapshotAuto = Util.debounce(
-        label => TimeMachine.snapshot(label, { auto: true }), 1000
+        label => { if (!NIMBUS.Sandbox?.active) TimeMachine.snapshot(label, { auto: true }); }, 1000
       );
       Store.subscribe(evt => {
         if (evt.type === 'undo:pushed') TimeMachine._snapshotAuto(evt.label);
@@ -1332,7 +1425,16 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         }
       });
       IntelDB.getNewest('snapshots', 'ts', TM_MAX_SNAPSHOTS).then(rows => {
-        TimeMachine._snapshots = (rows || []).sort((a, b) => a.ts - b.ts);
+        // Merge, don't replace: a snapshot taken while this read was in flight is already in memory (and in the store).
+        const loaded = rows || [];
+        const loadedTs = new Set(loaded.map(s => s.ts));
+        const early = TimeMachine._snapshots.filter(s => !loadedTs.has(s.ts));
+        const merged = (early.length ? loaded.concat(early) : loaded.slice()).sort((a, b) => a.ts - b.ts);
+        TimeMachine._snapshots = merged.length > TM_MAX_SNAPSHOTS ? merged.slice(merged.length - TM_MAX_SNAPSHOTS) : merged;
+      }).catch(e => {
+        (window.NIMBUS && window.NIMBUS.ErrorLog
+          ? window.NIMBUS.ErrorLog.warn('intel', 'TimeMachine history load failed', { err: String(e), errorCode: 'internal' })
+          : console.warn('[TimeMachine] history load failed', e));
       });
     },
 
@@ -1343,23 +1445,12 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         auto:  !!opts.auto,
         plant: Store.selectedPlant || null,
         schemaVersion: 2,
-        tasks: Store.tasksForSelectedPlant().map(t => ({
-          id:               t.id,
-          PLANT:            t.PLANT || Store.selectedPlant,
-          start_date:       t.start_date ? t.start_date.getTime() : null,
-          end_date:         t.end_date   ? t.end_date.getTime()   : null,
-          MACHINE:  t.MACHINE  || '',
-          PRODUCTION_ORDER: t.PRODUCTION_ORDER || '',
-          text:             t.text || t.MATERIAL_DESCRIPTION || '',
-          COLOR:            t.COLOR     || '',
-          FORM_SIZE:        t.FORM_SIZE || '',
-          FIRMED:           !!t.firmed,
-          scheduleSegments: snapshotSegments(t),
-        }))
+        tasks: Store.tasksForSelectedPlant().map(snapshotTask)
       };
       IntelDB.put('snapshots', snap).then(id => {
         snap.id = id || snap.id;
-        TimeMachine._snapshots.push(snap);
+        // The history load may have read this very row back already (it merges by ts): never list it twice.
+        if (snap.id == null || !TimeMachine._snapshots.some(s => s.id === snap.id && s.ts === snap.ts)) TimeMachine._snapshots.push(snap);
         if (TimeMachine._snapshots.length > TM_MAX_SNAPSHOTS) {
           TimeMachine._snapshots.splice(0, TimeMachine._snapshots.length - TM_MAX_SNAPSHOTS);
         }
@@ -1442,30 +1533,29 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const snap = plant && TimeMachine._snapshots.find(s => s.ts === ts && s.plant === plant);
       if (!snap) { Toast.show(t('toast.snapshot_not_found'), 'error'); return; }
       const scopedIds = new Set(Store.tasksForSelectedPlant().map(task => String(task.id)));
+      const routing = !!Store.masterData?.plants?.some(p => p.plant === plant && p.routing_runtime_enabled);
       let skipped = 0;
+      const machineSkipped = [];   // orders whose snapshot machine no longer exists or no longer takes them
       // OQ21 (group 15): a restore brings back the FINISH; the stored start is a placeholder, so each row is flagged
-      // stale and the engine re-derives the start from the finish under the current run time.
-      const patches = snap.tasks
-        .filter(s => {
-          const task = Store.tasks[s.id];
-          if (!task || !scopedIds.has(String(s.id))) return false;
-          // Bulk history restore has no explicit protection override or atomic
-          // distributed-family workflow. Leave those rows for their own editors.
-          if (task.PARENT_ORDER || task.placement_exception || NIMBUS.Engine.firmingStatus(task).firmed) { skipped++; return false; }
-          return true;
-        })
-        .map(s => ({
-          id: s.id,
-          changes: {
-            start_date: s.start_date ? new Date(s.start_date) : null,
-            end_date:   s.end_date   ? new Date(s.end_date)   : null,
-            // The current split envelope belongs to the current finish. Clear
-            // it before Store normalizes dates; reconcile derives fresh pieces.
-            scheduleSegments: [],
-            runtime_schedule_mismatch: true
-          }
-        }));
+      // stale and the engine re-derives the start from the finish under the current run time. The MACHINE comes
+      // back with it (restoreRowPatch): an order moved to another machine since the snapshot returns to the old one.
+      const patches = [];
+      for (const s of snap.tasks) {
+        const task = Store.tasks[s.id];
+        if (!task || !scopedIds.has(String(s.id))) continue;
+        // Bulk history restore has no explicit protection override or atomic
+        // distributed-family workflow. Leave those rows for their own editors.
+        if (task.PARENT_ORDER || task.placement_exception || NIMBUS.Engine.firmingStatus(task).firmed) { skipped++; continue; }
+        const row = restoreRowPatch(task, s, plant, routing);
+        if (row.skip) { machineSkipped.push(task.PRODUCTION_ORDER || task.ORDER || String(s.id)); continue; }
+        patches.push({ id: s.id, changes: row.changes });
+      }
       if (skipped) Toast.show(t('toast.snapshot_restore_skipped', { count: skipped }), 'warn', 5000);
+      if (machineSkipped.length) {
+        const shown = machineSkipped.slice(0, 5).join(', ');
+        const more = machineSkipped.length > 5 ? ` +${machineSkipped.length - 5}` : '';
+        Toast.show(t('toast.snapshot_restore_machine_skipped', { count: machineSkipped.length, orders: shown + more }), 'warn', 7000);
+      }
       if (!patches.length) return;
       const affectedIds = patches.map(p => p.id);
       const beforeSnap = UndoStack.snapshotTasks(affectedIds);
@@ -1484,6 +1574,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
   /* ==========================================================================
      CONFIDENCE — live schedule health score 0-100 + sparkline
      ========================================================================== */
+  let breakdownPending = false;   // showBreakdown is fetching its utilization matrix (see the guard there)
   const Confidence = {
     _score:   100,
     _history: [],
@@ -1652,6 +1743,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     _apply(score) {
       Confidence._startupPending = false;
       const prev = Confidence._score;
+      // The first score of a plant (page load, plant switch: the history is empty) has nothing to differ from: the
+      // placeholder 100 is not a previous score, so no "-N" chip flashes for it.
+      const hadBaseline = Confidence._history.length > 0;
       Confidence._score = score;
       Confidence._history.push({ ts: Date.now(), score });
       if (Confidence._history.length > 500) Confidence._history.shift();
@@ -1671,7 +1765,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         scoreEl.style.color = score >= 80 ? '#4dbd7a' : score >= 50 ? '#e0a018' : '#e88f83';
       }
       const delta = score - prev;
-      if (Confidence._badge && Math.abs(delta) >= 5) {
+      if (hadBaseline && Confidence._badge && Math.abs(delta) >= 5) {
         const flash = document.createElement('span');
         flash.className = 'ni-conf-delta';
         flash.textContent = delta > 0 ? `+${delta}` : `${delta}`;
@@ -1734,6 +1828,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     },
 
     async showBreakdown() {
+      // One breakdown at a time: a second click while the matrix is still being fetched (or while the dialog is open)
+      // used to stack another modal dialog on top of the first.
+      if (breakdownPending || document.querySelector('dialog.ni-breakdown-dlg')) return;
       const { alerts, machines } = Alerts.confidenceInput();   // pre-dismiss list + the plant's machine count, as the badge
       const hMinutes = _confHorizonMinutes();
       const hDays    = Math.ceil(hMinutes / 1440);
@@ -1748,15 +1845,22 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
       // Fetch matrix using worker when available, fall back to sync
       let matrix = null;
+      breakdownPending = true;
       try {
-        matrix = await Utilization.computeMatrixAsync(_plantToday(), hDays, { syncFallback: false });
-      } catch {
-        matrix = Utilization.computeMatrix(horizonStart, hDays);   // a user clicked the badge: paint, even if it costs a sync compute
+        try {
+          matrix = await Utilization.computeMatrixAsync(_plantToday(), hDays, { syncFallback: false });
+        } catch {
+          matrix = Utilization.computeMatrix(horizonStart, hDays);   // a user clicked the badge: paint, even if it costs a sync compute
+        }
+      } finally {
+        breakdownPending = false;   // everything below is synchronous up to the dialog being in the DOM
       }
       const overloadedLines = {};
       Object.entries(matrix).forEach(([line, lineData]) => {
         let days = 0;
-        Object.values(lineData).forEach(row => { if (row.effectiveCapacity > 0 && row.scheduled > row.effectiveCapacity) days++; });
+        // The shared overload rule (0.05 h tolerance), as the alert and the Right Now card use: a day filled exactly
+        // to capacity is not overloaded.
+        Object.values(lineData).forEach(row => { if (row.effectiveCapacity > 0 && NimbusComputeCore.isOverloaded(row.scheduled, row.effectiveCapacity)) days++; });
         if (days > 0) overloadedLines[line] = days;
       });
       const overloadedCount = Object.keys(overloadedLines).length;
@@ -1943,9 +2047,17 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
     _drawChart(canvas, history) {
       if (!canvas || history.length < 2) return;
-      const W = canvas.width, H = canvas.height;
-      const ctx = canvas.getContext('2d');
+      // Size the drawing buffer to the rect the canvas is actually painted at, times the device pixel ratio, and draw
+      // in CSS pixels. The fixed 760x240 buffer was stretched to the CSS box (a different aspect ratio), which
+      // squashed the dots and text vertically and blurred them on a high-density screen. W and H are CSS px.
       const dpr = window.devicePixelRatio || 1;
+      const box = canvas.getBoundingClientRect?.();
+      const W = box && box.width  > 0 ? box.width  : 380;
+      const H = box && box.height > 0 ? box.height : 120;
+      canvas.width  = Math.round(W * dpr);
+      canvas.height = Math.round(H * dpr);
+      const ctx = canvas.getContext('2d');
+      ctx.setTransform?.(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, W, H);
 
       // Theme-driven ok/warn/err triad (read live via _cssVar) replacing the old
@@ -1971,7 +2083,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       });
 
       // Zone labels (right-aligned, faint)
-      ctx.font = `bold ${Math.round(14/dpr)}px system-ui`; ctx.textAlign = 'right';
+      ctx.font = 'bold 10px system-ui'; ctx.textAlign = 'right';
       [{ y: yFor(25), label:'CRITICAL', color:`rgba(${errRgb},0.45)` },
        { y: yFor(65), label:'AT RISK',  color:`rgba(${warnRgb},0.4)` },
        { y: yFor(90), label:'GOOD',     color:`rgba(${okRgb},0.4)`  }
@@ -1985,7 +2097,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       ctx.setLineDash([]);
 
       // Y-axis score labels
-      ctx.font = `${Math.round(18/dpr)}px system-ui`; ctx.textAlign = 'left';
+      ctx.font = '11px system-ui'; ctx.textAlign = 'left';
       [[50,`rgba(${errRgb},0.65)`],[80,`rgba(${okRgb},0.65)`]].forEach(([v,col]) => {
         ctx.fillStyle = col; ctx.fillText(v, 4, yFor(v) - 3);
       });
@@ -2003,8 +2115,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       ctx.closePath(); ctx.fillStyle = fillColor; ctx.fill();
 
       // Score line with glow
-      ctx.shadowColor = lineColor; ctx.shadowBlur = 6;
-      ctx.beginPath(); ctx.strokeStyle = lineColor; ctx.lineWidth = 3; ctx.lineJoin = 'round';
+      ctx.shadowColor = lineColor; ctx.shadowBlur = 4;
+      ctx.beginPath(); ctx.strokeStyle = lineColor; ctx.lineWidth = 2; ctx.lineJoin = 'round';
       pts.forEach((p,i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
       ctx.stroke();
       ctx.shadowBlur = 0;
@@ -2013,11 +2125,11 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       pts.forEach((p, i) => {
         const isLast = i === pts.length - 1;
         const col = ptColor(p.score);
-        if (isLast) { ctx.shadowColor = col; ctx.shadowBlur = 12; }
+        if (isLast) { ctx.shadowColor = col; ctx.shadowBlur = 8; }
         ctx.beginPath();
-        ctx.arc(p.x, p.y, isLast ? 6 : 3, 0, Math.PI * 2);
+        ctx.arc(p.x, p.y, isLast ? 4 : 2, 0, Math.PI * 2);
         ctx.fillStyle = col; ctx.fill();
-        ctx.strokeStyle = isLast ? '#fff' : '#1a1b1f'; ctx.lineWidth = isLast ? 2.5 : 1.5; ctx.stroke();
+        ctx.strokeStyle = isLast ? '#fff' : '#1a1b1f'; ctx.lineWidth = isLast ? 1.7 : 1; ctx.stroke();
         if (isLast) ctx.shadowBlur = 0;
       });
 
@@ -2037,14 +2149,14 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       canvas.style.cursor = 'crosshair';
       canvas.addEventListener('mousemove', e => {
         const rect = canvas.getBoundingClientRect();
-        const mx = (e.clientX - rect.left) * (W / rect.width);
-        const my = (e.clientY - rect.top)  * (H / rect.height);
+        const mx = (e.clientX - rect.left) * (W / (rect.width  || W));
+        const my = (e.clientY - rect.top)  * (H / (rect.height || H));
         let nearest = null, minDist = Infinity;
         pts.forEach(p => {
           const d = Math.hypot(p.x - mx, p.y - my);
           if (d < minDist) { minDist = d; nearest = p; }
         });
-        const threshold = 28 * (W / rect.width);
+        const threshold = 20 * (W / (rect.width || W));
         if (nearest && minDist < threshold) {
           const col = `color:${ptColor(nearest.score)}`;
           const timeStr = nearest.ts
@@ -2057,8 +2169,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             + `<strong style="${col}">${nearest.score}</strong>`
             + (timeStr ? `<span style="color:var(--fg-mute);font-size:10.5px;margin-left:6px">${dateStr} ${timeStr}</span>` : '');
           tip.style.display = 'block';
-          tip.style.left = `${rect.left + nearest.x * (rect.width / W)}px`;
-          tip.style.top  = `${rect.top  + nearest.y * (rect.height / H)}px`;
+          tip.style.left = `${rect.left + nearest.x * ((rect.width  || W) / W)}px`;
+          tip.style.top  = `${rect.top  + nearest.y * ((rect.height || H) / H)}px`;
         } else {
           tip.style.display = 'none';
         }
@@ -2080,14 +2192,16 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
   /* ==========================================================================
      RIPPLE PREVIEW — Alt+hover shows downstream task shift ghosts
      ========================================================================== */
+  // The pending (80 ms debounced) ghost draw. Kept here, not on the object, so it can be cancelled: a hover that
+  // was queued just before Alt was released used to draw ghosts AFTER the key-up had cleared them.
+  let rippleShowTimer = null;
+  const rippleCancelPending = () => { clearTimeout(rippleShowTimer); rippleShowTimer = null; };
   const RipplePreview = {
     _active: false,
     _ghosts: [],
     _lastId: null,
-    _debouncedShow: null,
 
     init() {
-      RipplePreview._debouncedShow = Util.debounce(RipplePreview._show, 80);
       document.addEventListener('keydown', e => {
         if (e.altKey && !RipplePreview._active) {
           RipplePreview._active = true;
@@ -2096,6 +2210,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       });
       document.addEventListener('keyup', e => {
         if (!e.altKey) {
+          rippleCancelPending();
           RipplePreview._active = false;
           RipplePreview._clearGhosts();
           document.getElementById('vis-timeline')?.classList.remove('ripple-mode');
@@ -2105,6 +2220,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       // Window losing focus (e.g. Alt+Tab) suppresses keyup, leaving the
       // crosshair cursor stuck on. Force-clear ripple state on blur/hide.
       const _clearRipple = () => {
+        rippleCancelPending();
         RipplePreview._active = false;
         RipplePreview._clearGhosts();
         document.getElementById('vis-timeline')?.classList.remove('ripple-mode');
@@ -2119,16 +2235,25 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       gantt.addEventListener('mouseover', e => {
         if (!RipplePreview._active) return;
         const item = e.target.closest?.('.vis-item');
-        if (!item) { RipplePreview._clearGhosts(); return; }
+        if (!item) {
+          // Off every bar: drop the ghosts, a queued draw, and the remembered bar, so coming back to the SAME bar
+          // draws its ghosts again instead of being skipped as "unchanged".
+          rippleCancelPending();
+          RipplePreview._clearGhosts();
+          RipplePreview._lastId = null;
+          return;
+        }
         const id = item.getAttribute('data-id');
         if (id && id !== RipplePreview._lastId) {
           RipplePreview._lastId = id;
-          RipplePreview._debouncedShow(id);
+          rippleCancelPending();
+          rippleShowTimer = setTimeout(() => { rippleShowTimer = null; RipplePreview._show(id); }, 80);
         }
       });
     },
 
     _show(taskId) {
+      if (!RipplePreview._active) return;   // Alt was released while the draw was queued
       RipplePreview._clearGhosts();
       const task = Store.tasks[taskId];
       if (!task?.MACHINE || !task.start_date) return;
@@ -2440,18 +2565,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const runDiff = ts => {
         const snap = snaps.find(s => s.ts === ts);
         if (!snap) return;
-        const curr = Store.tasksForSelectedPlant().map(t => ({
-          id:               t.id,
-          start_date:       t.start_date?.getTime?.() || null,
-          end_date:         t.end_date?.getTime?.()   || null,
-          MACHINE:  t.MACHINE  || '',
-          PRODUCTION_ORDER: t.PRODUCTION_ORDER || '',
-          text:             t.text || t.MATERIAL_DESCRIPTION || '',
-          COLOR:            t.COLOR    || '',
-          FORM_SIZE:        t.FORM_SIZE || '',
-          FIRMED:           !!t.firmed,
-          scheduleSegments: snapshotSegments(t),
-        }));
+        const curr = Store.tasksForSelectedPlant().map(snapshotTask);
         const historical = scopeSnapshotTasks(snap, plant);
         const d = Diff.compute(historical.tasks, curr);
         const notice = historical.unknown
@@ -2484,22 +2598,35 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
   /* ==========================================================================
      PATTERNS — heuristic sequence-pair learning from drags
      ========================================================================== */
+  const patternsByPlant = {};   // { [plant]: { 'A→B': count } }; Patterns._pairs is the selected plant's entry
   const Patterns = {
     _LS_KEY:    'nimbus.patterns.v1',
     _pairs:     {},
     _THRESHOLD: 4,
 
+    // The learned colour pairs are per plant (a colour sequence that is habit at one plant says nothing about another),
+    // kept as { [plant]: { 'A→B': count } } under the one storage key so the sign-out wipe still clears all of it.
+    // A value stored by an older build was one flat { 'A→B': count } map with no plant: it is dropped on load.
     init() {
-      try { Patterns._pairs = JSON.parse(localStorage.getItem(Patterns._LS_KEY) || '{}'); } catch {}
+      try {
+        const stored = JSON.parse(localStorage.getItem(Patterns._LS_KEY) || '{}');
+        if (stored && typeof stored === 'object') {
+          for (const [plant, pairs] of Object.entries(stored))
+            if (pairs && typeof pairs === 'object') patternsByPlant[plant] = pairs;
+        }
+      } catch {}
+      Patterns._pairs = patternsByPlant[Store.selectedPlant] || {};
       Store.subscribe(evt => {
+        if (evt.type === 'plant:selected') Patterns._pairs = patternsByPlant[Store.selectedPlant] || {};
         if (evt.type === 'task:update' && evt.source === 'timeline' && evt.changes?.start_date)
           Patterns._observe(evt.id);
       });
     },
 
     _observe(movedId) {
+      const plant = Store.selectedPlant;
       const task = Store.tasks[movedId];
-      if (!task?.MACHINE || !task.start_date) return;
+      if (!plant || !task?.MACHINE || !task.start_date) return;
       const sorted = Store.tasksArr
         .filter(x => x.MACHINE === task.MACHINE && x.start_date)
         .sort((a,b) => a.start_date - b.start_date);
@@ -2507,9 +2634,16 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       if (idx > 0) {
         const prev = sorted[idx - 1];
         const key  = `${Util.norm(prev.COLOR)}→${Util.norm(task.COLOR)}`;
-        Patterns._pairs[key] = (Patterns._pairs[key] || 0) + 1;
-        localStorage.setItem(Patterns._LS_KEY, JSON.stringify(Patterns._pairs));
-        if (Patterns._pairs[key] === Patterns._THRESHOLD)
+        const pairs = patternsByPlant[plant] || (patternsByPlant[plant] = {});
+        Patterns._pairs = pairs;
+        pairs[key] = (pairs[key] || 0) + 1;
+        // A full or blocked store must not throw out of a Gantt drag (the count still lives for this session).
+        try { localStorage.setItem(Patterns._LS_KEY, JSON.stringify(patternsByPlant)); } catch (e) {
+          (window.NIMBUS && window.NIMBUS.ErrorLog
+            ? window.NIMBUS.ErrorLog.warn('intel', 'Patterns save failed', { err: String(e), errorCode: 'internal' })
+            : console.warn('[Patterns] save failed', e));
+        }
+        if (pairs[key] === Patterns._THRESHOLD)
           Toast.show(t('toast.pattern_detected', { key }), 'info', 4500);
       }
     },
@@ -2662,25 +2796,36 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     DarkMode
   });
 
+  // Runs the module inits exactly once, whether or not IndexedDB opened. The inits used to sit in a `.then` followed
+  // by a `.catch` that ran them AGAIN, so any throw inside the first run (one bad init) doubled every Store
+  // subscription and key listener; and one throwing init skipped the ones after it. Each now runs on its own.
+  let intelInitDone = false;
+  function _initAll() {
+    if (intelInitDone) return;
+    intelInitDone = true;
+    const run = (name, fn) => {
+      try { fn(); } catch (e) {
+        (window.NIMBUS && window.NIMBUS.ErrorLog
+          ? window.NIMBUS.ErrorLog.warn('intel', `${name} init failed`, { err: String(e), errorCode: 'internal' })
+          : console.warn(`[NIMBUS.Intelligence] ${name} init failed`, e));
+      }
+    };
+    run('CommandPalette', () => CommandPalette.init());
+    run('TimeMachine', () => TimeMachine.init());   // wires the undo:pushed subscription: must run even without IDB
+    run('Confidence', () => Confidence.init());
+    run('Patterns', () => Patterns.init());
+    setTimeout(() => run('RipplePreview', () => RipplePreview.init()), 220);
+  }
+
   function _boot() {
     DarkMode.init();
     NeedsEngine.init();
-    IntelDB.open().then(() => {
-      CommandPalette.init();
-      TimeMachine.init();
-      Confidence.init();
-      Patterns.init();
-      setTimeout(() => { RipplePreview.init(); }, 220);
-    }).catch(e => {
+    IntelDB.open().then(_initAll, e => {
       (window.NIMBUS && window.NIMBUS.ErrorLog
         ? window.NIMBUS.ErrorLog.warn('intel', 'IndexedDB unavailable — continuing without persistence.', { err: String(e), errorCode: 'internal' })
         : console.warn('[NIMBUS.Intelligence] IndexedDB unavailable — continuing without persistence.', e));
-      CommandPalette.init();
       TimeMachine._snapshots = [];
-      TimeMachine.init(); // wires the undo:pushed subscription; must run even without IDB
-      Confidence.init();
-      Patterns.init();
-      setTimeout(() => { RipplePreview.init(); }, 220);
+      _initAll();
     });
   }
 

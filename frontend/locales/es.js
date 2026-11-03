@@ -2325,6 +2325,7 @@ window.__NIMBUS_LOCALES.es = {
   "toast.calendar_changes_pending": "Calendario actualizado localmente; sincronizando cambios…",
   "toast.calendar_whatif_local": "Calendario actualizado en simulación; aplique el escenario para guardar los cambios.",
   "toast.snapshot_restore_skipped": "No se restauraron {{count}} pedidos protegidos o distribuidos. Utilice sus controles de planificación para modificarlos.",
+  "toast.snapshot_restore_machine_skipped": "No se restauraron {{count}} pedidos porque la máquina de la instantánea ya no existe o ya no los admite: {{orders}}",
   "ui.print_scope": "Ámbito",
   "ui.print_scope_all": "Todos los pedidos cargados",
   "ui.print_scope_plant": "Planta seleccionada",
