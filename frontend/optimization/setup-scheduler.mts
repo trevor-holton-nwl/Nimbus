@@ -1869,6 +1869,20 @@ function preservedAnchorOverrideEdges(
   });
 }
 
+/** The preserved-anchor case: both orders are still on the line, but the override's predecessor cannot sit
+ * next to the preserved first order. Reported with that wording, not as "no longer on this line". */
+function preservedAnchorOverrideReasons(
+  line: string,
+  edges: ReadonlyArray<MissingSetupEdge>,
+): CandidateReason[] {
+  return edges.map(edge => ({
+    code: 'override-inactive',
+    message: `Active override predecessor ${edge.predecessorOrderId ?? 'unknown'} cannot stay adjacent to preserved order ${edge.successorOrderId ?? 'unknown'}.`,
+    line,
+    taskId: edge.successorOrderId ?? undefined,
+  }));
+}
+
 function initialFreeOverrideLock(
   bounds: Readonly<DueDateFirstBounds>,
   line: string,
@@ -5335,7 +5349,7 @@ function evaluateLineWithFirmedBoundaries(
     ...initialReasons,
     ...missingSuccessorOverrideReasons(line, missingSuccessorEdges),
     ...missingPredecessorOverrideReasons(line, missingPredecessorEdges),
-    ...missingPredecessorOverrideReasons(line, preservedAnchorEdges),
+    ...preservedAnchorOverrideReasons(line, preservedAnchorEdges),
     ...inactiveOutOfHorizonFirmedOverrideReasons(line, additionalInactivePostHorizonEdges),
   ];
   if (postHorizonOverrideAudit.protectedEdges.length) {
@@ -7429,7 +7443,7 @@ export function reconcileToolOutcomes(result: CandidateResult): CandidateResult 
   const blocked = new Map<string, ToolBlockedEntry>();
   for (const entry of result.toolBlocked ?? []) {
     const d = status.get(entry.orderId);
-    const cascadeKept = entry.cause === 'cascade' && (entry.reasonCode ?? d?.reason?.code) === d?.reason?.code;
+    const cascadeKept = entry.cause === 'cascade' && (entry.reasonCode === undefined || entry.reasonCode === d?.reason?.code);
     if (d?.status === 'needs_planning' && (isToolCode(d.reason?.code) || cascadeKept)) blocked.set(entry.orderId, entry);
   }
   for (const patch of result.patches) {

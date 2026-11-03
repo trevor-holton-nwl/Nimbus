@@ -1072,6 +1072,20 @@ export function sourcePlantPeriods(plant: string): ReadonlyArray<PlantPeriod> {
   return entry?.periods ?? NO_PERIODS;
 }
 
+/** A tool pass that threw fails closed (tool_overflow_failed blocks Apply); this also carries the thrown message to the
+ *  planner's diagnostics (a detached run) or ErrorLog (a live run), where it was previously dropped. */
+function withToolPassDiagnostic(candidate: CandidateResult): CandidateResult {
+  const pass = candidate.toolPass;
+  if (!pass?.failed) return candidate;
+  reportSchedulerDiagnostic(
+    'error', 'optimizer', 'optimizer.tool-overflow-failed',
+    `Tool overflow pass failed: ${pass.error ?? 'unknown error'}`, { error: pass.error ?? null },
+  );
+  const event = _candidateDiagnostics?.at(-1);
+  if (!event) return candidate;
+  return { ...candidate, diagnostics: { ...candidate.diagnostics, events: [...candidate.diagnostics.events, event] } };
+}
+
 function detachedCandidateResult(
   patches: ReadonlyArray<SchedulePatch>,
   startedAt: number,
@@ -1168,7 +1182,7 @@ export const Engine = {
       const candidate = mode === 'min-changeover' ? evaluateMinChangeoverPure(snapshot, bounds)
         : mode === 'spt' ? evaluateSptWithSetupPure(snapshot, bounds)
           : evaluateDueDateFirstPure(snapshot, bounds, mode);
-      return fillPlanningGaps(snapshot, bounds, candidate, bounds.gapFillBudgetMs);
+      return withToolPassDiagnostic(fillPlanningGaps(snapshot, bounds, candidate, bounds.gapFillBudgetMs));
     }
     return evaluateThroughputPure(snapshot, bounds, thresholds ?? {
       throughputMinSavingsMin: 60,
@@ -2067,7 +2081,7 @@ export const Engine = {
           if (!changes) {
             if (noteOnly(task, { code: 'no_operating_window' })) {
               ErrorLog.warn('engine',
-                `Runtime changed for running order "${task.text || task.id}", but its finish could not be regenerated within the 90-day calendar search.`,
+                `Runtime changed for running order "${task.text || task.id}", but its finish could not be regenerated within the calendar search.`,
                 { line, taskId: task.id, policy, reason: 'runtime-schedule-mismatch' });
             }
             tally(stale, 'blocked');
@@ -2109,7 +2123,7 @@ export const Engine = {
           else {
             if (noteOnly(task, { code: 'no_operating_window' })) {
               ErrorLog.warn('engine',
-                `Order "${task.text || task.id}" could not be re-derived: no operating window within the 90-day calendar search.`,
+                `Order "${task.text || task.id}" could not be re-derived: no operating window within the calendar search.`,
                 { line, taskId: task.id, policy, reason: result.reason });
             }
             tally(stale, 'blocked');
