@@ -2148,10 +2148,21 @@ function orderWithAdjacency(
   adjacency: Readonly<FragmentAdjacency>,
 ): NimbusTask[] | null {
   if (adjacency.issue) return null;
+  const requiredFirst = requiredFirstOrderId(fragment, adjacency);
+  // P1-11: no pair, required-first or required-last constraint means the walk
+  // below reproduces baseOrder exactly, or null when an id repeats.
+  if (!adjacency.successorByPredecessor.size && !adjacency.predecessorBySuccessor.size && !requiredFirst && !fragment.requiredLastOrderId) {
+    const seen = new Set<string>();
+    for (const task of baseOrder) {
+      const id = taskId(task);
+      if (seen.has(id)) return null;
+      seen.add(id);
+    }
+    return [...baseOrder];
+  }
   const byId = new Map(baseOrder.map(task => [taskId(task), task]));
   const selectedIds = new Set<string>();
   const result: NimbusTask[] = [];
-  const requiredFirst = requiredFirstOrderId(fragment, adjacency);
   let baseIndex = 0;
 
   while (result.length < baseOrder.length) {

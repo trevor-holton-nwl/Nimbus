@@ -99,14 +99,18 @@ export function capAwareSequence<T>(
     return [...sorted];
   }
 
-  // Step 2 & 3: Walk and reorder
+  // Step 2 & 3: Walk and reorder. P1-11: ceiling and runtime are read once per
+  // task (parallel arrays kept in step with `remaining`) instead of once per
+  // task per round.
   const result: T[] = [];
   const remaining = [...sorted];
+  const ceilings = remaining.map(task => ceilingMsFor(task));
+  const runtimes = remaining.map(task => runtimeMsFor(task));
   let cursor = cursorStartMs;
 
   while (remaining.length > 0) {
     const head = remaining[0];
-    const headRuntime = runtimeMsFor(head);
+    const headRuntime = runtimes[0];
     const headEnd = cursor + headRuntime;
 
     // Find at-risk tasks (excluding head)
@@ -116,8 +120,8 @@ export function capAwareSequence<T>(
 
     for (let i = 1; i < remaining.length; i++) {
       const task = remaining[i];
-      const ceiling = ceilingMsFor(task);
-      const runtime = runtimeMsFor(task);
+      const ceiling = ceilings[i];
+      const runtime = runtimes[i];
 
       // Skip if ceiling is null/non-finite or runtime is <= 0
       if (ceiling === null || !Number.isFinite(ceiling) || runtime <= 0) {
@@ -146,11 +150,14 @@ export function capAwareSequence<T>(
 
     // Pick: either an at-risk task or head
     const pick = atRiskTask !== null ? atRiskTask : head;
-    const pickRuntime = runtimeMsFor(pick);
+    const pickIndex = remaining.indexOf(pick);
+    const pickRuntime = runtimes[pickIndex];
 
     // Emit and advance
     result.push(pick);
-    remaining.splice(remaining.indexOf(pick), 1);
+    remaining.splice(pickIndex, 1);
+    ceilings.splice(pickIndex, 1);
+    runtimes.splice(pickIndex, 1);
     if (pickRuntime > 0) {
       cursor += pickRuntime;
     }
