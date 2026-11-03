@@ -431,6 +431,13 @@ async function withPaletteHarness(body) {
   // Freeze All is scoped to the SELECTED plant (universal firm, C-2), so the fixtures' plant is selected.
   const priorPlant = Store.selectedPlant;
   Store.setSelectedPlant('CMD-P', 'test');
+  // The harness has no locale files: the undo labels are translated now (keys), so give it the English texts it asserts on.
+  const priorLocales = globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window.__NIMBUS_LOCALES = { [nimbus.Util.locale()]: {
+    'undo.firm_orders': 'Firm {{count}} orders', 'undo.firm_orders_one': 'Firm {{count}} order',
+    'undo.unfirm_orders': 'Unfirm {{count}} orders', 'undo.unfirm_orders_one': 'Unfirm {{count}} order',
+    'undo.firm_all_freeze': 'Firm All (freeze)',
+  } };
   const setFirmedCalls = [];
   const pushCalls = [];
   Toast.show = () => {};
@@ -457,6 +464,7 @@ async function withPaletteHarness(body) {
     TimeMachine.snapshot = priorSnapshot;
     Alerts.scheduleRecompute = priorSchedule;
     nimbus.Selection = priorSelection;
+    globalThis.window.__NIMBUS_LOCALES = priorLocales;
     Store.setSelectedPlant(priorPlant, 'test');
     Store.setTasks(priorTasks, 'test');
     Store.firmedIds.clear();
@@ -640,10 +648,12 @@ test('gate 15: TimeMachine.restore brings back each row\'s finish, flags it stal
   const priorToast = Toast.show;
   const Engine = nimbus.Engine;
   const priorReconcile = Engine.reconcileRestored;
+  const priorLocales = globalThis.window.__NIMBUS_LOCALES;
   const reconciled = [];
   globalThis.NIMBUS = nimbus;
   Alerts.scheduleRecompute = () => {};
   Toast.show = () => {};
+  globalThis.window.__NIMBUS_LOCALES = { [nimbus.Util.locale()]: { 'undo.before_time_machine_restore': 'Before Time Machine restore' } };
   Engine.reconcileRestored = ids => { reconciled.push([...ids].map(String)); };
   try {
     Store.setSelectedPlant('TM-P', 'test');
@@ -660,6 +670,7 @@ test('gate 15: TimeMachine.restore brings back each row\'s finish, flags it stal
     assert.equal(UndoStack._entries.at(-1).label, 'Before Time Machine restore', 'the restore is itself undoable');
   } finally {
     Engine.reconcileRestored = priorReconcile;
+    globalThis.window.__NIMBUS_LOCALES = priorLocales;
     TimeMachine._snapshots = priorSnaps;
     UndoStack._entries = priorEntries;
     Toast.show = priorToast;

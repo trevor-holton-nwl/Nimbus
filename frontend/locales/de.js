@@ -1275,7 +1275,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.conf_filter_critical': 'Kritische Konflikte ({{count}})',
   'ui.conf_filter_warnings': 'Warnungen ({{count}})',
   'ui.conf_filter_overloaded': 'Überlastete Maschinen ({{count}})',
-  'ui.conf_days_over': '{{days}} Tag{{plural}} über Kapazität',
+  'ui.conf_days_over': '{{days}} Tage über Kapazität',
   'ui.err_pts':                        '−{{pts}} Pkt.',
 
   /* ── Time machine / diff ─────────────────────────────────────────────────── */
@@ -1939,20 +1939,60 @@ window.__NIMBUS_LOCALES.de = {
   'btn.setup_field_up':                'Nach oben',
   'btn.setup_field_down':              'Nach unten',
 
+  // Intelligence layer i18n sweep (2026-11-03, code review C29): palette badges, snapshot / undo labels (stored as keys
+  // and translated when shown), relative time, Diff and Confidence breakdown strings, singular forms for the plural keys.
+  'cmdp.fab_hint':                               'Strg + K',
+  'cmdp.fab_locked_hint':                        'Werk auswählen zum Freischalten',
+  'cmdp.type_action':                            'Aktion',
+  'cmdp.type_line':                              'Maschine',
+  'cmdp.type_order':                             'Auftrag',
+  'cmdp.need_conflict_jump_one':                 '{{count}} Konflikt — zum ersten springen',
+  'cmdp.need_unscheduled_review_one':            '{{count}} Auftrag ohne Zeitfenster',
+  'cmdp.need_blackout_risk_one':                 '{{count}} Auftrag nahe einer bevorstehenden Sperrzeit',
+  'snap.manual':                                 'Manuell · {{time}}',
+  'snap.first':                                  'Erste Momentaufnahme · {{time}}',
+  'snap.frozen':                                 'Eingefroren · {{time}}',
+  'snap.intent':                                 'Absicht · {{time}}',
+  'snap.pre_selection':                          'Vor Auswahl · {{count}} Aufträge · {{time}}',
+  'snap.pre_selection_one':                      'Vor Auswahl · {{count}} Auftrag · {{time}}',
+  'snap.data_loaded':                            'Daten geladen',
+  'snap.bulk_update':                            'Massenänderung',
+  'snap.default':                                'Momentaufnahme',
+  'undo.firm_all_freeze':                        'Alle festschreiben (Einfrieren)',
+  'undo.firm_orders':                            '{{count}} Aufträge festschreiben',
+  'undo.firm_orders_one':                        '{{count}} Auftrag festschreiben',
+  'undo.unfirm_orders':                          'Festschreibung von {{count}} Aufträgen aufheben',
+  'undo.unfirm_orders_one':                      'Festschreibung von {{count}} Auftrag aufheben',
+  'undo.before_time_machine_restore':            'Vor der Time-Machine-Wiederherstellung',
+  'ui.hours_mins_ago':                           'vor {{h}} Std. {{m}} Min.',
+  'ui.diff_added_short':                         'Hinzugefügt',
+  'ui.diff_removed_short':                       'Entfernt',
+  'ui.diff_n_moved':                             '{{count}} verschoben',
+  'ui.diff_n_added':                             '{{count}} hinzugefügt',
+  'ui.diff_n_removed':                           '{{count}} entfernt',
+  'ui.diff_snap_auto':                           'auto',
+  'ui.diff_snap_manual':                         'manuell',
+  'ui.ripple_downstream':                        'Nachfolgend: {{name}}',
+  'ui.conf_tier_good':                           'GUT',
+  'ui.conf_tier_at_risk':                        'GEFÄHRDET',
+  'ui.conf_tier_critical':                       'KRITISCH',
+  'ui.conf_axis_now':                            'jetzt',
+  'ui.conf_days_over_one':                       '{{days}} Tag über Kapazität',
+
   // Command Palette (2026-09 i18n sweep)
-  'cmdp.need_conflict_jump':           '{{count}} conflict{{plural}} — jump to first',              // MISSING TRANSLATION
+  'cmdp.need_conflict_jump':           '{{count}} Konflikte — zum ersten springen',
   'cmdp.sub_scroll_to_overlap':        'Scroll Gantt to nearest overlap or error',                   // MISSING TRANSLATION
-  'cmdp.need_overload_inspect':        '{{line}} is overloaded ({{pct}}%)',                          // MISSING TRANSLATION
+  'cmdp.need_overload_inspect':        '{{line}} ist überlastet ({{pct}}%)',
   'cmdp.sub_scroll_to_overloaded_line': 'Scroll Gantt to overloaded line',                            // MISSING TRANSLATION
-  'cmdp.need_unscheduled_review':      '{{count}} order{{plural}} without a time slot',              // MISSING TRANSLATION
+  'cmdp.need_unscheduled_review':      '{{count}} Aufträge ohne Zeitfenster',
   'cmdp.sub_switch_to_orders_table':   'Switch to Orders table to review',                           // MISSING TRANSLATION
-  'cmdp.need_snapshot_due':            'Last snapshot {{mins}}m ago — save now',                     // MISSING TRANSLATION
+  'cmdp.need_snapshot_due':            'Letzte Momentaufnahme vor {{mins}} Min. — jetzt speichern',
   'cmdp.sub_take_checkpoint':          'Take a Time Machine checkpoint',                             // MISSING TRANSLATION
-  'cmdp.need_first_snapshot':          'No snapshots yet — save a checkpoint now',                   // MISSING TRANSLATION
+  'cmdp.need_first_snapshot':          'Noch keine Momentaufnahmen — jetzt einen Kontrollpunkt speichern',
   'cmdp.sub_save_first_entry':         'Save your first Time Machine entry',                         // MISSING TRANSLATION
-  'cmdp.need_blackout_risk':           '{{count}} order{{plural}} near an upcoming blackout',        // MISSING TRANSLATION
+  'cmdp.need_blackout_risk':           '{{count}} Aufträge nahe einer bevorstehenden Sperrzeit',
   'cmdp.sub_review_blackout_overlap':  'Review orders overlapping a scheduled blackout block',       // MISSING TRANSLATION
-  'cmdp.need_sandbox_active':          'Sandbox is active — apply or discard',                       // MISSING TRANSLATION
+  'cmdp.need_sandbox_active':          'Sandbox ist aktiv — übernehmen oder verwerfen',
   'cmdp.sub_whatif_mode':              'You are in what-if mode',                                    // MISSING TRANSLATION
   'cmdp.label_compare_snapshot':       'Compare to a previous snapshot',                              // MISSING TRANSLATION
   'cmdp.sub_open_diff_viewer':         'Open the schedule diff viewer',                               // MISSING TRANSLATION

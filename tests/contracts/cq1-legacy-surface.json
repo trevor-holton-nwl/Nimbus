@@ -595,7 +595,6 @@
     "CommandPalette._buildPanel",
     "CommandPalette._buildSelectionCommands",
     "CommandPalette._cursor",
-    "CommandPalette._esc",
     "CommandPalette._fuzzy",
     "CommandPalette._highlight",
     "CommandPalette._index",

@@ -1275,7 +1275,7 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.conf_filter_critical': 'Conflitos críticos ({{count}})',
   'ui.conf_filter_warnings': 'Avisos ({{count}})',
   'ui.conf_filter_overloaded': 'Máquinas sobrecarregadas ({{count}})',
-  'ui.conf_days_over': '{{days}} dia{{plural}} acima da capacidade',
+  'ui.conf_days_over': '{{days}} dias acima da capacidade',
   'ui.err_pts':                        '−{{pts}} pts',
 
   /* ── Time machine / diff ─────────────────────────────────────────────────── */
@@ -1936,20 +1936,60 @@ window.__NIMBUS_LOCALES.pt = {
   'btn.setup_field_up':                'Mover para cima',
   'btn.setup_field_down':              'Mover para baixo',
 
+  // Intelligence layer i18n sweep (2026-11-03, code review C29): palette badges, snapshot / undo labels (stored as keys
+  // and translated when shown), relative time, Diff and Confidence breakdown strings, singular forms for the plural keys.
+  'cmdp.fab_hint':                               'ctrl + k',
+  'cmdp.fab_locked_hint':                        'Selecione uma planta para desbloquear',
+  'cmdp.type_action':                            'Ação',
+  'cmdp.type_line':                              'Máquina',
+  'cmdp.type_order':                             'Pedido',
+  'cmdp.need_conflict_jump_one':                 '{{count}} conflito — ir ao primeiro',
+  'cmdp.need_unscheduled_review_one':            '{{count}} pedido sem faixa de horário',
+  'cmdp.need_blackout_risk_one':                 '{{count}} pedido perto de uma paralisação futura',
+  'snap.manual':                                 'Manual · {{time}}',
+  'snap.first':                                  'Primeiro instantâneo · {{time}}',
+  'snap.frozen':                                 'Congelado · {{time}}',
+  'snap.intent':                                 'Intenção · {{time}}',
+  'snap.pre_selection':                          'Pré-seleção · {{count}} pedidos · {{time}}',
+  'snap.pre_selection_one':                      'Pré-seleção · {{count}} pedido · {{time}}',
+  'snap.data_loaded':                            'Dados carregados',
+  'snap.bulk_update':                            'Atualização em massa',
+  'snap.default':                                'Instantâneo',
+  'undo.firm_all_freeze':                        'Firmar tudo (congelar)',
+  'undo.firm_orders':                            'Firmar {{count}} pedidos',
+  'undo.firm_orders_one':                        'Firmar {{count}} pedido',
+  'undo.unfirm_orders':                          'Desfirmar {{count}} pedidos',
+  'undo.unfirm_orders_one':                      'Desfirmar {{count}} pedido',
+  'undo.before_time_machine_restore':            'Antes da restauração do Time Machine',
+  'ui.hours_mins_ago':                           'há {{h}}h {{m}}min',
+  'ui.diff_added_short':                         'Adicionado',
+  'ui.diff_removed_short':                       'Removido',
+  'ui.diff_n_moved':                             '{{count}} movido(s)',
+  'ui.diff_n_added':                             '{{count}} adicionado(s)',
+  'ui.diff_n_removed':                           '{{count}} removido(s)',
+  'ui.diff_snap_auto':                           'auto',
+  'ui.diff_snap_manual':                         'manual',
+  'ui.ripple_downstream':                        'Posterior: {{name}}',
+  'ui.conf_tier_good':                           'BOM',
+  'ui.conf_tier_at_risk':                        'EM RISCO',
+  'ui.conf_tier_critical':                       'CRÍTICO',
+  'ui.conf_axis_now':                            'agora',
+  'ui.conf_days_over_one':                       '{{days}} dia acima da capacidade',
+
   // Command Palette (2026-09 i18n sweep)
-  'cmdp.need_conflict_jump':           '{{count}} conflict{{plural}} — jump to first',              // MISSING TRANSLATION
+  'cmdp.need_conflict_jump':           '{{count}} conflitos — ir ao primeiro',
   'cmdp.sub_scroll_to_overlap':        'Scroll Gantt to nearest overlap or error',                   // MISSING TRANSLATION
-  'cmdp.need_overload_inspect':        '{{line}} is overloaded ({{pct}}%)',                          // MISSING TRANSLATION
+  'cmdp.need_overload_inspect':        'Sobrecarga em {{line}} ({{pct}}%)',
   'cmdp.sub_scroll_to_overloaded_line': 'Scroll Gantt to overloaded line',                            // MISSING TRANSLATION
-  'cmdp.need_unscheduled_review':      '{{count}} order{{plural}} without a time slot',              // MISSING TRANSLATION
+  'cmdp.need_unscheduled_review':      '{{count}} pedidos sem faixa de horário',
   'cmdp.sub_switch_to_orders_table':   'Switch to Orders table to review',                           // MISSING TRANSLATION
-  'cmdp.need_snapshot_due':            'Last snapshot {{mins}}m ago — save now',                     // MISSING TRANSLATION
+  'cmdp.need_snapshot_due':            'Último instantâneo há {{mins}} min — salvar agora',
   'cmdp.sub_take_checkpoint':          'Take a Time Machine checkpoint',                             // MISSING TRANSLATION
-  'cmdp.need_first_snapshot':          'No snapshots yet — save a checkpoint now',                   // MISSING TRANSLATION
+  'cmdp.need_first_snapshot':          'Nenhum instantâneo ainda — salve um ponto de controle agora',
   'cmdp.sub_save_first_entry':         'Save your first Time Machine entry',                         // MISSING TRANSLATION
-  'cmdp.need_blackout_risk':           '{{count}} order{{plural}} near an upcoming blackout',        // MISSING TRANSLATION
+  'cmdp.need_blackout_risk':           '{{count}} pedidos perto de uma paralisação futura',
   'cmdp.sub_review_blackout_overlap':  'Review orders overlapping a scheduled blackout block',       // MISSING TRANSLATION
-  'cmdp.need_sandbox_active':          'Sandbox is active — apply or discard',                       // MISSING TRANSLATION
+  'cmdp.need_sandbox_active':          'O Sandbox está ativo — aplicar ou descartar',
   'cmdp.sub_whatif_mode':              'You are in what-if mode',                                    // MISSING TRANSLATION
   'cmdp.label_compare_snapshot':       'Compare to a previous snapshot',                              // MISSING TRANSLATION
   'cmdp.sub_open_diff_viewer':         'Open the schedule diff viewer',                               // MISSING TRANSLATION
