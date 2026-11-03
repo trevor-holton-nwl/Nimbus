@@ -348,6 +348,28 @@ test('show more: top 5, then 10 per click, never more than 50, then no button', 
   assert.equal(rows(sec(many, { limit: 10_000 })), LEV_MAX_RENDER, 'an oversized request is clamped');
 });
 
+test('truncation note: the capped main list says how many are not shown; exactly 50 and short lists say nothing', () => {
+  const note = /class="am-lev-empty am-fixes-trunc">am\.fixes_truncated\|\{"shown":(\d+),"total":(\d+)\}</;
+  const capped = sec(mk(51), { limit: LEV_MAX_RENDER });
+  assert.equal(rows(capped), LEV_MAX_RENDER);
+  assert.deepEqual(capped.match(note).slice(1), ['50', '51']);
+  assert.deepEqual(sec(mk(636), { limit: 10_000 }).match(note).slice(1), ['50', '636'], 'an oversized request is clamped, the note counts the real total');
+  assert.doesNotMatch(sec(mk(50), { limit: LEV_MAX_RENDER }), /fixes_truncated/, 'exactly 50 is all of them');
+  assert.doesNotMatch(sec(mk(51), { limit: 25 }), /fixes_truncated/, 'below the cap the Show 10 more button is the way on');
+  assert.doesNotMatch(sec(mk(8), { limit: LEV_MAX_RENDER }), /fixes_truncated/);
+});
+
+test('truncation note: the admin list (non-admin view) is sliced to 50 and says so only when it is open and over 50', () => {
+  const note = /class="am-lev-empty am-fixes-trunc">am\.fixes_truncated\|\{"shown":(\d+),"total":(\d+)\}</;
+  const adminOf = n => mk(n, { adminOnly: true }).map((it, i) => ({ ...it, key: `adm${i}` }));
+  const open = sec([...mk(2), ...adminOf(51)], { isAdmin: false, adminOpen: true });
+  assert.equal(rows(open.slice(open.indexOf('am-fix-divider'))), LEV_MAX_RENDER);
+  assert.deepEqual(open.match(note).slice(1), ['50', '51']);
+  assert.doesNotMatch(open.slice(0, open.indexOf('am-fix-divider')), /fixes_truncated/, 'two main rows: no main-list note');
+  assert.doesNotMatch(sec([...mk(2), ...adminOf(51)], { isAdmin: false, adminOpen: false }), /fixes_truncated/, 'a collapsed list renders no rows and no note');
+  assert.doesNotMatch(sec([...mk(2), ...adminOf(50)], { isAdmin: false, adminOpen: true }), /fixes_truncated/);
+});
+
 test('rows are ranked 1..n in list order', () => {
   const h = sec(mk(3));
   assert.deepEqual([...h.matchAll(/class="am-fix-rank" role="img" aria-label="[^"]*\{"n":(\d)\}">(\d)</g)].map(m => [m[1], m[2]]), [['1', '1'], ['2', '2'], ['3', '3']]);

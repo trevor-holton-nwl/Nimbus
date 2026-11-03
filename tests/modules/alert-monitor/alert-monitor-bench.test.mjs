@@ -2,12 +2,9 @@
 // Skipped unless NIMBUS_BENCH=1:  NIMBUS_BENCH=1 node --test tests/modules/alert-monitor/alert-monitor-bench.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createRequire } from 'node:module';
-import { Util } from '../../../frontend/platform/foundation.mjs';
 import { groupAlerts } from '../../../frontend/insights/alert-profiles.mjs';
 import { rowHtml, emptyFilter, filterAlerts } from '../../../frontend/alert-monitor/alert-monitor-model.mjs';
 import { matrixModel, matrixHtml } from '../../../frontend/alert-monitor/alert-monitor-matrix.mjs';
-import { overviewData } from '../../../frontend/alert-monitor/alert-monitor-overview.mjs';
 
 const BENCH = process.env.NIMBUS_BENCH === '1';
 const t = (k, v) => `${k}${v ? '|' + Object.entries(v).map(([a, b]) => `${a}=${b}`).join(',') : ''}`;
@@ -53,34 +50,6 @@ test('bench: groupAlerts + row building at 15,000 alerts across 70 lines', { ski
 
   console.log(`[bench] ${N_ALERTS} alerts / ${N_LINES} lines: groupAlerts(line) ${gLine.toFixed(1)} ms, groupAlerts(none) ${gNone.toFixed(1)} ms; `
     + `rowHtml x80 (side list cap) cached formatter ${rowsCached.toFixed(1)} ms vs per-call toLocaleDateString ${rowsPerCall.toFixed(1)} ms`);
-});
-
-test('bench: overviewData at 15,000 alerts across 70 lines (the real Util.dueInstant path)', { skip: !BENCH && 'set NIMBUS_BENCH=1 to run' }, () => {
-  const alerts = synth();
-  // Production wiring: no `deps` (anchorTime resolves NIMBUS.Util.dueInstant -> sapDueDate -> NimbusComputeCore.dueDateInstant
-  // -> Util._dueWindowForLine over the calendar resolver). Every due is a date-only midnight, one in seven lands on a closed Sunday.
-  const prevCore = globalThis.NimbusComputeCore, prevNimbus = globalThis.NIMBUS;
-  globalThis.NimbusComputeCore = createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
-  globalThis.NIMBUS = { Util };
-  const hours = { 0: null, 1: [6, 22], 2: [6, 22], 3: [6, 22], 4: [6, 22], 5: [6, 22], 6: null };
-  Util.setDueCalendarResolver(() => ({ lineHours: hours, plantHours: hours, plant: 'P1', rev: 1 }));
-  try {
-    const tasksById = {};
-    for (let i = 0; i < N_ORDERS; i++) tasksById[String(i)] = { id: String(i), MACHINE: `L${String(i % N_LINES).padStart(2, '0')}`, original_end_date: new Date(2026, 9, 20 + (i % 20)) };
-    const d = { tasksById, plantToday: day0, horizonMinutes: 14 * 1440, window: { from: 0, to: 13 } };
-
-    const [tData, data] = ms(() => overviewData(alerts, d));
-    assert.equal(data.total, N_ALERTS);
-    assert.equal(data.lines.length, N_LINES);
-    const binned = data.days.reduce((n, b) => n + b.err + b.warn, 0) + data.overdue.err + data.overdue.warn + data.later.err + data.later.warn + data.undated;
-    assert.equal(binned, N_ALERTS, 'every alert lands in exactly one day bucket (or is undated)');
-
-    console.log(`[bench] ${N_ALERTS} alerts / ${N_LINES} lines, real Util.dueInstant: overviewData ${tData.toFixed(1)} ms`);
-  } finally {
-    Util.setDueCalendarResolver(null);
-    globalThis.NimbusComputeCore = prevCore;
-    globalThis.NIMBUS = prevNimbus;
-  }
 });
 
 test('bench: matrixModel + matrixHtml + filterAlerts at 15,000 alerts across 70 machines (W6a)', { skip: !BENCH && 'set NIMBUS_BENCH=1 to run' }, () => {

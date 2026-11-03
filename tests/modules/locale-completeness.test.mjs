@@ -840,9 +840,9 @@ const ALERT_MONITOR_KEYS = [
   'am.window_sev_any', 'am.window_sev_err', 'am.window_all',
   'am.sort_impact', 'am.sort_time', 'am.lev_show_alerts', 'am.lev_computing', 'am.lev_none',
   'am.lev_headroom', 'am.lev_type_late', 'am.lev_type_late_one', 'am.lev_type_overlap', 'am.lev_type_overlap_one', 'am.lev_type_overload', 'am.lev_type_overload_one', 'am.lev_type_setup', 'am.lev_type_setup_one', 'am.lev_type_alerts', 'am.lev_type_alerts_one', 'am.lev_affects', 'am.lev_affects_one', 'am.lev_affects_one_alert', 'am.lev_affects_one_order', 'am.lev_full_window', 'am.lev_full_window_some', 'am.lev_full_window_one', 'am.lev_over_room', 'am.lev_full_note', 'am.lev_over_window', 'am.lev_over_window_one', 'am.lev_over_note', 'am.lev_remaining', 'am.lev_admin_fix', 'am.lev_copy_summary',
-  'am.lev_copied', 'am.lev_setup_inactive', 'am.focus_chip', 'am.focus_chip_outside', 'am.focus_clear',
+  'am.lev_copied', 'am.lev_setup_inactive', 'am.focus_clear',
   'alert.profile_hidden', 'alert.profile_show_all', 'alert.profile_override_on', 'alert.profile_back',
-  'am.show_all_n', 'am.rel_in_days', 'am.rel_today', 'am.rel_overdue_days', 'am.whatif_blocked', 'am.empty_no_plant',
+  'am.show_all_n', 'am.whatif_blocked', 'am.empty_no_plant',
   'am.empty_no_match_title', 'am.empty_no_match_msg', 'am.empty_switch_all', 'am.profile_missing', 'am.open_in_table',
   'am.diagnose', 'am.ack', 'am.ack_by', 'am.ack_by_noend', 'am.ack_title', 'am.ack_reason',
   'am.ack_until', 'am.ack_noend', 'am.ack_note', 'am.unack', 'am.ack_err_reason', 'am.ack_err_long',
@@ -886,11 +886,11 @@ const ALERT_MONITOR_KEYS = [
   'legend.pm_calendar_d', 'legend.pm_setup_t', 'legend.pm_setup_d', 'legend.pm_planning_t',
   'legend.pm_planning_d', 'legend.pm_late_t', 'legend.pm_late_d', 'legend.pm_exceptions_t',
   'legend.pm_exceptions_d', 'legend.pm_ring_d',
-  'ui.gantt_outlined', 'ui.gantt_outlined_one', 'ui.gantt_outline_clear', 'ui.gantt_outline_clear_tip', 'am.slot', 'am.view_label', 'am.view_inbox', 'am.view_matrix', 'am.lens_label', 'am.lens_machine', 'am.lens_day', 'am.lens_group', 'am.search_ph', 'am.in_view', 'am.open_in_inbox', 'am.facet_where', 'am.facet_when', 'am.facet_what', 'am.show_on_gantt', 'am.gantt_outline', 'am.gantt_outline_one', 'am.gantt_outline_clear', 'am.lev_none_in_view', 'am.lev_in_view', 'am.mx_machines', 'am.mx_machines_one', 'am.bucket_overdue', 'am.bucket_later', 'am.bucket_none', 'am.filter_clear', 'am.profile_label', 'am.search_label', 'am.filter_lead', 'am.filter_remove', 'am.filter_none', 'am.lines_selected', 'am.lines_selected_one',
+  'ui.gantt_outlined', 'ui.gantt_outlined_one', 'ui.gantt_outline_clear', 'ui.gantt_outline_clear_tip', 'am.slot', 'am.view_label', 'am.view_inbox', 'am.view_matrix', 'am.lens_label', 'am.lens_machine', 'am.lens_day', 'am.lens_group', 'am.search_ph', 'am.in_view', 'am.open_in_inbox', 'am.facet_where', 'am.facet_when', 'am.facet_what', 'am.show_on_gantt', 'am.gantt_outline', 'am.gantt_outline_one', 'am.gantt_outline_clear', 'am.lev_none_in_view', 'am.lev_in_view', 'am.fixes_truncated', 'am.mx_machines', 'am.mx_machines_one', 'am.bucket_overdue', 'am.bucket_later', 'am.bucket_none', 'am.filter_clear', 'am.profile_label', 'am.search_label', 'am.filter_lead', 'am.filter_remove', 'am.filter_none', 'am.lines_selected', 'am.lines_selected_one',
   'am.slot_title', 'am.slot_day', 'am.slot_pair', 'am.slot_hint', 'am.slot_option', 'am.slot_option_short',
   'am.slot_option_closed', 'am.slot_option_unknown', 'am.slot_none', 'am.slot_suggested', 'am.slot_place',
   'am.slot_confirm_title', 'am.slot_confirm_short', 'am.slot_confirm_closed', 'am.slot_confirm_place',
-  'am.slot_placed', 'am.slot_stale', 'am.slot_no_window', 'am.slot_undo', 'am.slot_suggested_on',
+  'am.slot_placed', 'am.slot_stale', 'am.slot_no_window', 'am.slot_undo',
   // Move to an open machine (2026-10-29): the lead, the radio rows, the filter, the consequence line, the day preview.
   'am.slot_lead_push', 'am.slot_lead_push_sub', 'am.slot_st_fits', 'am.slot_st_short', 'am.slot_st_closed', 'am.slot_st_unknown',
   'am.slot_best', 'am.slot_free_h', 'am.slot_free_of', 'am.slot_count', 'am.slot_count_one', 'am.slot_showing', 'am.slot_filter',
@@ -904,7 +904,6 @@ test('Slot wording (final fix wave): the toast carries the landing day, the conf
   const dicts = Object.fromEntries(LOCALES.map(l => [l, localeDict(l)]));
   for (const locale of LOCALES) {
     assert.match(dicts[locale]['am.slot_placed'], /\{\{when\}\}/, `${locale} am.slot_placed carries {{when}}`);
-    assert.equal(dicts[locale]['am.slot_suggested_on'], '{{day}} · {{option}}', `${locale} am.slot_suggested_on`);
     assert.doesNotMatch(dicts[locale]['alert.help.needs_planning'], /Gantt/i, `${locale} help sends the planner to Slot, not the Gantt`);
   }
   assert.match(dicts.en['am.slot_confirm_short'], /overlap other orders/);

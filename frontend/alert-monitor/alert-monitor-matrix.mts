@@ -12,7 +12,7 @@
 
 import type { AlertCategory } from '../platform/types.mjs';
 import { ALERT_CATEGORY_ORDER, NONE_KEY, categoryOf } from '../insights/alert-profiles.mjs';
-import { horizonDayKeys } from './alert-monitor-overview.mjs';
+import { horizonDayKeys, OVERDUE_KEY, LATER_KEY } from './alert-monitor-overview.mjs';
 import { UNGROUPED_KEY, GROUP_ROW_PREFIX, makeBucketer, buildWcByLine } from './alert-monitor-model.mjs';
 import type { MonitorCtx, MonitorFilter, MonitorLens } from './alert-monitor-model.mjs';
 
@@ -106,7 +106,7 @@ export function matrixModel(alerts: ReadonlyArray<NimbusAlert>, lens: MonitorLen
   ALERT_CATEGORY_ORDER.forEach((c, i) => catIdx.set(c, i));
   const bucket = makeBucketer(ctx);
   const dayKeys = horizonDayKeys(ctx.plantToday, ctx.horizonDays);
-  const bucketCols = ['overdue', ...dayKeys, 'later', NONE_KEY];
+  const bucketCols = [OVERDUE_KEY, ...dayKeys, LATER_KEY, NONE_KEY];
 
   const wcByLine = buildWcByLine(ctx.machines);
   const wcOf = (line: string | undefined): string => (line ? (wcByLine.get(line) ?? UNGROUPED_KEY) : UNGROUPED_KEY);

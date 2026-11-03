@@ -4,8 +4,8 @@ import assert from 'node:assert/strict';
 import {
   matrixModel, matrixHtml, cellFilter, rowFilter, colFilter, filterMatches, GROUP_ROW_PREFIX, MAX_CELL_DOTS,
 } from '../../../frontend/alert-monitor/alert-monitor-matrix.mjs';
-import { emptyFilter, UNGROUPED_KEY } from '../../../frontend/alert-monitor/alert-monitor-model.mjs';
-import { overviewData } from '../../../frontend/alert-monitor/alert-monitor-overview.mjs';
+import { emptyFilter, UNGROUPED_KEY, makeBucketer } from '../../../frontend/alert-monitor/alert-monitor-model.mjs';
+import { horizonDayKeys, OVERDUE_KEY, LATER_KEY, NONE_KEY } from '../../../frontend/alert-monitor/alert-monitor-overview.mjs';
 
 const t = (k, v) => `${k}${v ? '|' + Object.entries(v).map(([a, b]) => `${a}=${b}`).join(',') : ''}`;
 const today = new Date(2026, 9, 30);
@@ -125,15 +125,17 @@ test('group lens: rows are the categories in the given order, columns the day bu
   assert.equal(on.rows[0].head.total, 4);
 });
 
-test('the matrix buckets agree with overviewData on every day (same rule, same horizon)', () => {
+test('the matrix buckets agree with makeBucketer on every day (same rule, same horizon)', () => {
   const a = alerts();
   const m = matrixModel(a, 'machine', ctx());
   const colTotal = key => m.groups.reduce((s, g) => s + g.cells.find(c => c.colKey === key).count, 0);
-  const ov = overviewData(a, { tasksById: {}, plantToday: today, horizonMinutes: 3 * 1440, window: null });
-  assert.equal(colTotal('overdue'), ov.overdue.err + ov.overdue.warn);
-  ov.days.forEach(d => assert.equal(colTotal(d.key), d.err + d.warn, d.key));
-  assert.equal(colTotal('later'), ov.later.err + ov.later.warn);
-  assert.equal(colTotal('none'), ov.undated);
+  const bucket = makeBucketer(ctx());
+  const count = {};
+  for (const x of a) count[bucket(x)] = (count[bucket(x)] ?? 0) + 1;
+  assert.equal(colTotal(OVERDUE_KEY), 1);
+  assert.equal(colTotal(LATER_KEY), 1);
+  assert.equal(colTotal(NONE_KEY), 1);
+  for (const key of [OVERDUE_KEY, ...horizonDayKeys(today, 3), LATER_KEY, NONE_KEY]) assert.equal(colTotal(key), count[key] ?? 0, key);
 });
 
 test('cellFilter / rowFilter / colFilter per lens', () => {
