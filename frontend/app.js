@@ -1,289 +1,48 @@
 // app.js — CQ-1 launcher.
 //
-// Every module this file used to define now lives in one of the six real
-// ES modules bridged in frontend/app-entry.mjs. This file exists only because
-// nimbus-intelligence.js accesses NIMBUS as a bare identifier through
-// classic-script shared lexical scope (confirmed: converting it to a real
-// ES module would sever that access — see docs/architecture/
-// cq1-compatibility-inventory.md). This IS "app.js is gone or a documented
-// small launcher" per the CQ-1 design's completion criteria: nothing below
-// is a module body — it is boot orchestration and the compatibility
-// namespace this project's other consumers (index.html inline handlers,
-// nimbus-intelligence.js) still read. `_bootMain()`/`_domReadyGate()` stay
-// here (not in application-shell.mjs) because by the time they run, every
-// module they call `.init()` on is already available in this file's own
-// scope via its seven bridge destructures below — see
-// application-shell.mjs's header comment for the full rationale.
+// Every module this file used to define now lives in a real ES module under
+// frontend/<domain>/, bridged onto eight `window.__NIMBUS_*` objects
+// (FOUNDATION, STATE, SERVICES, DATA, WORKBENCH, PLANT_ADMIN, SHELL,
+// MATERIAL_GRIDS) built in frontend/app-entry.mjs. This file exists only
+// because nimbus-intelligence.js reads `NIMBUS` as a bare identifier through
+// classic-script shared lexical scope (converting it to an ES module would
+// sever that access). It holds no module bodies: only boot orchestration
+// (`_bootMain`/`_domReadyGate`, kept here so every `.init()` target is already
+// resolvable from the bridge destructures below), the DI-seam wiring, and the
+// compatibility namespace `return {...}` at the bottom, which carries only the
+// keys that a bundle outside this file still reads (index.html inline handlers,
+// nimbus-intelligence.js, ES modules via globalThis.NIMBUS, the VM test
+// harness). The migration history that used to live here is in
+// docs/architecture/cq1-compatibility-inventory.md (section 9).
 
-/* =============================================================================
-   N.I.M.B.U.S. 2.0 — Application
-   Organised as modules inside a single `NIMBUS` namespace.
-
-   CQ-1 Phase 1 moved 11 of these modules out of this file into two real ES
-   modules, bridged in via app-entry.mjs (window.__NIMBUS_FOUNDATION /
-   __NIMBUS_STATE — see the destructure at the top of this IIFE):
-     Config, Util, PerfMonitor, VirtualList, ErrorLog, Toast, Modal
-                       — now defined in application-foundation.mjs
-     Store, Selection, UndoStack, Sandbox
-                       — now defined in schedule-state.mjs
-   CQ-1 Phase 2 Task 1 moved Calendar's capacity-math half and Compute out
-   into a third real ES module, bridged the same way (window.__NIMBUS_SERVICES):
-     Calendar (capacity math only), Compute
-                       — now defined in schedule-services.mjs
-   Calendar's blackout-block-tab UI half stayed here, renamed `CalendarUI`.
-   CQ-1 Phase 2 Task 2 moved Alerts' computation half and Utilization into the
-   same schedule-services.mjs module:
-     Alerts (computation only), Utilization
-                       — now defined in schedule-services.mjs
-   Alerts' drawer/bell-badge/cell-briefing-modal UI half stayed here, renamed
-   `AlertsUIAdapter`.
-   CQ-1 Phase 2 Task 3 moved Engine (optimizer + auto-reflow) into the same
-   schedule-services.mjs module, verbatim — Engine has no DOM half, so
-   nothing stayed behind in app.js besides consumers of `Engine.*`.
-   CQ-1 Phase 2 Task 4 moved Persistence and CalendarSync into a fourth real
-   ES module, bridged the same way (window.__NIMBUS_DATA):
-     Persistence, CalendarSync
-                       — now defined in schedule-data.mjs
-   Neither has a DOM half — both are pure backend-fetch/localStorage-cache/
-   backend-sync logic — so nothing stayed behind in app.js besides consumers
-   of `Persistence.*`/`CalendarSync.*`. The two real data→services dependencies
-   found during Phase 2 research (Persistence calling into Calendar's capacity
-   math, and Persistence calling Alerts.scheduleRecompute()) were resolved by
-   an injected seam (`Persistence.setCalendarService`, removed with the load-time
-   re-snap in backward scheduling Task 2.5) and a
-   Store event (`schedule:hydrated`, subscribed to once in schedule-services.mjs)
-   respectively — schedule-data.mjs still never imports schedule-services.mjs.
-   CQ-1 Phase 2 Task 5 moved Session's pure state/API half into the same
-   schedule-data.mjs module (window.__NIMBUS_DATA):
-     Session (currentUser/actor/isAdmin/allowedPlants/pref/setPref/flushPrefs/
-              signIn/signOut/refresh/onAuthDenied/updateCachedUser)
-                       — now defined in schedule-data.mjs
-   Session's DOM/settings-pane half (~600 lines: gates, the user-settings
-   modal, profile/password self-service, personalization/workflow panes)
-   stayed here, renamed `SessionUIAdapter` — mirrors the Phase 1
-   Sandbox/SandboxAdapter split exactly. `signIn`/`signOut`/`refresh` now emit
-   `{type:'session:changed', kind}` instead of calling `_applyGates()`/DOM code
-   inline; `SessionUIAdapter.init()` (called from `_bootMain()`, alongside
-   `SandboxAdapter.init()`) is the sole subscriber.
-   CQ-1 Phase 3 Task 1 moved Timeline, TimelineNav, and DependencyOverlay into
-   a fifth real ES module, bridged the same way (window.__NIMBUS_WORKBENCH):
-     Timeline, TimelineNav, DependencyOverlay
-                       — now defined in schedule-workbench.mjs
-   None of the three has a DOM-remnant half — all three moved whole. Timeline
-   still has five genuine cross-references into app.js-resident code that
-   hasn't moved into schedule-workbench.mjs yet (App.gotoGanttTimeline,
-   Inspector.show, Interaction.DEBUG, GanttFilter._selectedLines,
-   EmptyState.render) — all reached via the shared `NIMBUS` binding rather
-   than as bare identifiers; see the header comment in schedule-workbench.mjs.
-   CQ-1 Phase 3 Task 2 moved Table, Inspector, and ContextMenu into the same
-   schedule-workbench.mjs module:
-     Table, Inspector, ContextMenu
-                       — now defined in schedule-workbench.mjs
-   None of the three has a DOM-remnant half — all three moved whole. Table's
-   `_showAlertPopup` still calls `AlertsUIAdapter.focus` (via the shared
-   `NIMBUS` binding, same rationale as Timeline's five above) — a genuine
-   cross-file reference in the wrong direction (schedule-workbench.mjs calling
-   into app.js) until `AlertsUIAdapter` itself moves into schedule-workbench.mjs
-   in Task 7; Table's `_renderEmptyState`/`_NoRowsOverlay` similarly reach
-   `EmptyState.render` via `NIMBUS` (EmptyState stays in app.js — boot UI, not
-   part of this phase's module list). Timeline's `Inspector.show` cross-
-   reference above is unaffected by Inspector's move — it is left calling
-   through `NIMBUS.Inspector` rather than simplified to a same-module bare
-   reference, since both forms are equivalent at runtime and Task 2 doesn't
-   require touching Timeline's code. Likewise, Timeline's `GanttFilter.
-   _selectedLines` cross-reference above is unaffected by GanttFilter's Task 3
-   move into schedule-workbench.mjs — it is left calling through
-   `NIMBUS.GanttFilter` rather than simplified to a same-module bare
-   reference, for the identical reason.
-   CQ-1 Phase 3 Task 3 moved Hierarchy and GanttFilter into the same
-   schedule-workbench.mjs module:
-     Hierarchy, GanttFilter
-                       — now defined in schedule-workbench.mjs
-   Neither has a DOM-remnant half — both moved whole, plus the
-   `VL_HIER_LINE_H`/`VL_HIER_TASK_H` VirtualList row-height consts they use
-   (`VL_ALERT_ROW_H` stays here, travelling with AlertsUIAdapter in a later
-   task; `VL_LS_ROW_H` moves with Dashboard in Task 4 — see below). Task 3
-   also closed GanttFilter's nimbus-intelligence.js private-consumer debt:
-   `GanttFilter._selectedLines`/`_active`/`_refreshLineBtn`/`_buildLineDropdown`
-   direct reaches became `GanttFilter.selectedLines()`/`.activeFilter()`/
-   `.isolateLine(line)`/`.restoreAllLines()` — see nimbus-intelligence.js and
-   docs/architecture/cq1-compatibility-inventory.md §4 for the remaining
-   `GanttFilter._toggle*Dropdown` private-consumer rows (reached only from
-   index.html's inline onclick attributes, out of scope for this phase's
-   inline-handler migration mandate, so they stay open).
-   CQ-1 Phase 3 Task 4 moved Dashboard into the same schedule-workbench.mjs
-   module, plus its `VL_LS_ROW_H` VirtualList row-height const (see above).
-   No DOM-remnant half — it moved whole. Dashboard had two direct
-   `Store._rev`/`Store._state` touches (a memo-key read and a
-   `masterData.plants` lookup) that became `Store.rev()`/`Store.masterData`
-   (both pre-existing Phase 1 public getters), closing Dashboard's §6 row.
-   It also had three bare cross-references into app.js-resident code that
-   hasn't moved yet — `AlertsUIAdapter.renderBell()`, `EmptyState.render(...)`,
-   `App.goto(...)`/`App.gotoGanttTimeline()` — rewritten through the shared
-   `NIMBUS` binding, same rationale as Timeline's/Table's cross-references
-   above. Dashboard's module-map entry below used to read "home KPIs +
-   Chart.js charts" — stale: Dashboard has always been a hand-rolled DOM/CSS
-   heatmap, and grepping the whole codebase for real `Chart(` instantiations
-   turns up none (`AdminCockpit._dbHBarChart`/`nimbus-intelligence.js`'s
-   `Confidence._drawChart` are unrelated same-named helpers, not the CDN
-   `Chart` global), so Task 4 also removes the dead Chart.js `<script>` tag
-   from index.html.
-   CQ-1 Phase 3 Task 5 moved Interaction into the same schedule-workbench.mjs
-   module — the densest (~1,140 lines) and, before this task, the only module
-   in the whole migration with zero test coverage anywhere in the codebase.
-   Task 5 added characterization tests first, then an install()/uninstall()
-   pair: install()'s three unconditional document-level listeners
-   (mousemove/mouseleave/keydown) plus _installHoverPreview()'s separate
-   document keydown were refactored into named, stored bound references so
-   uninstall() — new, purely additive, and intentionally unwired (Gantt
-   Timeline has no unmount trigger today) — has concrete references to remove;
-   it deliberately leaves every #vis-timeline-container-scoped listener
-   attached (see the header comment on uninstall() in schedule-workbench.mjs).
-   The plan's inline-handler-migration mandate's one concrete instance —
-   _showMultiInspector's inline onclick strings — turned out to be four call
-   sites, not the three originally named (_bulkFirm(true), _bulkFirm(false),
-   Selection.clear(), and a fourth, _unscheduleSelected(), missed by the
-   plan's prose); all four now wire through real addEventListener calls
-   instead. Writing the first-ever test for _onDataSetUpdate also found the
-   module's own header comment describing firmed-order drag protection didn't
-   match the code — the comment was corrected, the logic (correctly) left
-   unchanged. One same-phase forward reference, AlertsUIAdapter.showForCell
-   (...), is left calling through the shared NIMBUS binding until
-   AlertsUIAdapter itself moves in Task 7 (same rationale as Timeline's/
-   Table's/Dashboard's forward references above). See
-   docs/architecture/cq1-compatibility-inventory.md §6 for the full writeup.
-   CQ-1 Phase 3 Task 6 moved OptimizeDialog and OptimizerPreview into the same
-   schedule-workbench.mjs module, verbatim — including OptimizerPreview's
-   _installAbandonGuard() MutationObserver and its optional-chained
-   NIMBUS.Confidence?.snapshot()/.restore() cross-file call into
-   nimbus-intelligence.js, which is unaffected by which file OptimizerPreview
-   lives in and so was left exactly as-is. Neither module had a DOM-remnant
-   half or a Store._state/_rev touch to close.
-   CQ-1 Phase 3 Task 7 moved EditCalendar, ColorWheelViewer, Printer,
-   SandboxAdapter, and AlertsUIAdapter into the same schedule-workbench.mjs
-   module. `SandboxAdapter`'s move is the design doc's explicit mandate;
-   `AlertsUIAdapter`'s is a deliberate, documented scope decision based on its
-   coupling to Timeline/Inspector/Table/Dashboard/Interaction — see
-   docs/architecture/cq1-compatibility-inventory.md. `VL_ALERT_ROW_H`
-   (AlertsUIAdapter's VirtualList row-height const) travels with it. The
-   shared hour-conversion helpers previously duplicated as `CalendarUI`'s
-   private `_hToT`/`_tToH` moved to `Util.hoursToTimeString`/
-   `.timeStringToHours` in application-foundation.mjs — `CalendarUI` (which
-   stayed here through Phase 3) and `Plant` (which also stayed here through
-   Phase 3) called the shared helper instead of `CalendarUI`'s own private
-   copy.
-   CQ-1 Phase 4 Task 1 moved CalendarUI, Plant, and ProdLines into a sixth
-   real ES module, bridged the same way (window.__NIMBUS_PLANT_ADMIN):
-     CalendarUI, Plant, ProdLines
-                       — now defined in plant-and-administration.mjs
-   `Plant`'s `App._renderSettingsPane()` call site was eliminated, not carried
-   forward: `_renderSettingsPane`'s entire body (per-plant scheduling-
-   constraint list, color-wheel enable toggle) was per-plant-admin content
-   that only ever rendered into Plant's own `#plant-tab-settings` DOM and was
-   only ever triggered from `Plant.gotoTab('settings')` — it moved bodily
-   into `Plant._renderSettingsPane()` in plant-and-administration.mjs this
-   task, even though the rest of `App` doesn't move until Task 4. The old
-   call site below is now a one-line stub, removed entirely when Task 4
-   deletes the rest of `App`. `Plant`'s Store-subscribe callback's read of
-   `App._currentTab`/`_currentMasterSub` became
-   `_activeTabResolvers.currentTab()`/`.currentMasterSub()` (an injected
-   getter seam, `PlantAdmin.setActiveTabResolvers(...)`, wired once below
-   immediately after this task's bridge destructure — the same one-directional
-   "am I currently visible?" pattern used throughout this migration).
-   CQ-1 Phase 4 Task 2 moved MasterData and LaborPlanning into the same
-   plant-and-administration.mjs module:
-     MasterData, LaborPlanning
-                       — now defined in plant-and-administration.mjs
-   `Plant`'s/`ProdLines`' `MasterData.syncLineSettings(...)` call sites are
-   left going through the shared `NIMBUS` binding
-   (`NIMBUS.MasterData.syncLineSettings(...)`) rather than simplified to a
-   same-module bare reference now that `MasterData` lives in the same file —
-   both forms are equivalent at runtime, and Task 2 doesn't require touching
-   Plant/ProdLines' code, the same reasoning Phase 3 used once its own
-   forward references' targets landed in the same file. `LaborPlanning`'s
-   `App._laborSub`/`App._currentTab` reads became `_activeTabResolvers.
-   laborSub()`/`.currentTab()` (the same injected getter seam Task 1
-   established for `Plant`). `MasterData`'s one `Store._state.masterData = {
-   ...}; Store.rebuildPlantIndex();` write became `Store.setMasterData(...)`
-   (the existing public setter from Phase 2 Task 4), closing `MasterData`'s
-   tracked §6 exception for real rather than carrying it forward by
-   relocation. `LaborPlanning` itself still has six direct
-   `Store._state.masterData` *reads*, not in this task's stated scope to
-   close — tracked as a new §6 row rather than silently dropped; see
-   docs/architecture/cq1-compatibility-inventory.md §6.
-   CQ-1 Phase 4 Task 3 moved Interface, Security, and AdminCockpit into the
-   same plant-and-administration.mjs module:
-     Interface, Security, AdminCockpit
-                       — now defined in plant-and-administration.mjs
-   All three moved verbatim, no changes. Research confirmed Interface and
-   Security are fully self-contained (zero cross-references to any other of
-   the 14 modules moved across this migration). AdminCockpit — by far the
-   largest single module moved in this entire migration (~2,260 lines) — has
-   a dispatch to MasterData.render()/Interface.render()/Security.render() in
-   its _setSub that is now a same-file bare reference: all four already
-   lived behind the same __NIMBUS_PLANT_ADMIN bridge destructure in this
-   file before this task (extended in Task 2), so there was no seam to
-   close here.
-   CQ-1 Phase 4 Task 4 moved SessionUIAdapter, showLoginScreen, EmptyState,
-   PlantSelector, and App into a seventh and final real ES module, bridged
-   the same way (window.__NIMBUS_SHELL):
-     Settings, SessionUIAdapter, showLoginScreen, EmptyState, PlantSelector, App
-                       — now defined in application-shell.mjs
-   (WelcomeSplash also moved here at the time, then was retired outright —
-   overlay, arrow SVG, and all — by the Command Band re-skin's chrome-wiring
-   task; App.registerPausable/_pausables stayed, since that's generic App
-   infrastructure, not WelcomeSplash-specific.)
-   `Settings` (the per-user settings catalog) travels with this move too —
-   see application-shell.mjs's header comment for why, since it was never
-   one of CQ-1's 14 tracked modules. `_bootMain()` and `_domReadyGate()`
-   deliberately stay in THIS file (see the launcher note at the very top) —
-   they are boot orchestration, not module bodies, and by the time they run
-   every `.init()` target they call is already resolvable through this
-   file's own bridge destructures. This is the last bridge: app.js now
-   contains no module bodies of its own.
-   See docs/architecture/cq1-compatibility-inventory.md §1 for the full
-   ownership map.
-
-   Module map (load order) — modules still defined in THIS file: none. Every
-   module has moved into one of the seven real ES modules bridged above; what
-   remains below is boot orchestration (`_bootMain`/`_domReadyGate`), the
-   DI-seam wiring, and the compatibility namespace `return {...}` at the
-   bottom of this IIFE.
-   ========================================================================== */
-
-// CACHE-BUST GUARD moved to frontend/app-entry.mjs's runCacheBustGuard() (CQ-1): it
-// now runs before app.js is even requested, off `NIMBUS_BUILD_ID` instead of a
-// second, separately-bumped `APP_VERSION` constant here. See that file for the
-// full rationale.
+// CACHE-BUST GUARD lives in frontend/app-entry.mjs's runCacheBustGuard(); it runs
+// before app.js is requested, off `NIMBUS_BUILD_ID`.
 
 const NIMBUS = (function () {
   'use strict';
 
   // nimbus-compute-core.js is the single source of truth for the capacity engine,
-  // alert rules, and utilization matrix; the Calendar/Alerts/Utilization modules below
-  // delegate to it (the same module the worker importScripts). index.html injects it
-  // just above app.js. Fail fast with a clear message rather than throwing cryptically
-  // deep inside Alerts/Utilization on first compute.
+  // alert rules, and utilization matrix (the same module the worker importScripts).
+  // index.html injects it just above app.js. Fail fast with a clear message rather
+  // than throwing cryptically deep inside Alerts/Utilization on first compute.
   if (typeof NimbusComputeCore === 'undefined') {
     throw new Error('NIMBUS boot error: nimbus-compute-core.js did not load before app.js — check index.html script order / deploy.');
   }
 
   if (typeof window === 'undefined' || !window.__NIMBUS_FOUNDATION || !window.__NIMBUS_STATE || !window.__NIMBUS_SERVICES || !window.__NIMBUS_DATA || !window.__NIMBUS_WORKBENCH || !window.__NIMBUS_PLANT_ADMIN || !window.__NIMBUS_SHELL || !window.__NIMBUS_MATERIAL_GRIDS) {
-    throw new Error('NIMBUS boot error: application-foundation.mjs/schedule-state.mjs/schedule-services.mjs/schedule-data.mjs/schedule-workbench.mjs/plant-and-administration.mjs/application-shell.mjs/master-data-grids.mjs did not load before app.js — check app-entry.mjs.');
+    throw new Error('NIMBUS boot error: one of the window.__NIMBUS_* bridges (FOUNDATION, STATE, SERVICES, DATA, WORKBENCH, PLANT_ADMIN, SHELL, MATERIAL_GRIDS) did not load before app.js — check app-entry.mjs.');
   }
-  const { Config, Util, PerfMonitor, VirtualList, ErrorLog, Toast, Modal } = window.__NIMBUS_FOUNDATION;
+  const { Config, Util, ErrorLog, Toast, Modal } = window.__NIMBUS_FOUNDATION;
   const { Store, Selection, UndoStack, Sandbox } = window.__NIMBUS_STATE;
-  const { Calendar, Compute, Alerts, Utilization, Engine } = window.__NIMBUS_SERVICES;
-  const { Persistence, CalendarSync, Session } = window.__NIMBUS_DATA;
-  const { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu, Hierarchy, GanttFilter, Dashboard, Interaction, OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer, PriorityListViewer, Printer, SandboxAdapter, AlertsUIAdapter } = window.__NIMBUS_WORKBENCH;
-  const { SetupAdmin, CalendarUI, Plant, ProdLines, MasterData, LaborPlanning, Interface, Security, SystemConfig, AdminCockpit, PriorityListMapping, setActiveTabResolvers: _setPlantAdminTabResolvers } = window.__NIMBUS_PLANT_ADMIN;
+  const { Alerts, Utilization, Engine } = window.__NIMBUS_SERVICES;
+  const { Persistence, Session } = window.__NIMBUS_DATA;
+  const { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu, Hierarchy, GanttFilter, Dashboard, Interaction, OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer, Printer, SandboxAdapter, AlertsUIAdapter } = window.__NIMBUS_WORKBENCH;
+  const { SetupAdmin, CalendarUI, Plant, ProdLines, MasterData, LaborPlanning, AdminCockpit, setActiveTabResolvers: _setPlantAdminTabResolvers } = window.__NIMBUS_PLANT_ADMIN;
   const { Settings, SessionUIAdapter, showLoginScreen, EmptyState, PlantSelector, App } = window.__NIMBUS_SHELL;
   const { MaterialGrids } = window.__NIMBUS_MATERIAL_GRIDS;
-  // Injected getter seam so plant-and-administration.mjs's Plant/LaborPlanning
-  // can ask "am I currently the visible tab/sub-tab?" without a bare reference
-  // to `App`. `App` is now imported from application-shell.mjs via the bridge
-  // destructure immediately above, resolved lazily at call time, same as
-  // every other seam in this migration.
+  // Injected getter seam so master-data/admin-ui's Plant and labor/labor-planning's
+  // LaborPlanning can ask "am I currently the visible tab/sub-tab?" without a bare
+  // reference to `App` (resolved lazily at call time, like every other seam here).
   _setPlantAdminTabResolvers({
     currentTab: () => App._currentTab,
     currentMasterSub: () => App._currentMasterSub,
@@ -324,109 +83,109 @@ const NIMBUS = (function () {
   Store.setAllowedPlantsResolver(() => Session.allowedPlants());
   Store.setSettingsDefaultsResolver(() => Settings.DEFAULTS);
 
-  // SETTINGS — moved to application-shell.mjs (CQ-1 Phase 4 Task 4), alongside
-  // SessionUIAdapter/showLoginScreen/EmptyState/PlantSelector/App — see
-  // application-shell.mjs's header comment for why this per-user
-  // settings catalog travels with that move even though it isn't one of
-  // CQ-1's 14 tracked modules. Imported via the __NIMBUS_SHELL bridge
-  // destructure at the top of this IIFE.
-
-  // VL_ALERT_ROW_H moved to schedule-workbench.mjs (CQ-1 Phase 3 Task 7),
-  // travelling with AlertsUIAdapter.
-
-  // CalendarUI, Plant, and ProdLines moved to plant-and-administration.mjs
-  // (CQ-1 Phase 4 Task 1); MasterData and LaborPlanning moved to the same
-  // file (CQ-1 Phase 4 Task 2) — see the bridge destructure above and the
-  // header comment at the top of this file.
-
-  // LABOR PLANNING — moved to plant-and-administration.mjs (CQ-1 Phase 4
-  // Task 2), minus its App._laborSub/App._currentTab reads, which became
-  // _activeTabResolvers.laborSub()/.currentTab(). Imported via the
-  // __NIMBUS_PLANT_ADMIN bridge destructure at the top of this IIFE.
-
-  // EDIT CALENDAR — moved to schedule-workbench.mjs (CQ-1 Phase 3 Task 7).
-  // Imported via the __NIMBUS_WORKBENCH bridge destructure at the top of
-  // this IIFE.
-
-  // COLOR WHEEL VIEWER — moved to schedule-workbench.mjs (CQ-1 Phase 3
-  // Task 7). Imported via the __NIMBUS_WORKBENCH bridge destructure at the
-  // top of this IIFE.
-
   /* =============================================================================
-     COMPUTE — moved to schedule-services.mjs (CQ-1 Phase 2 Task 1). Imported
-     via the __NIMBUS_SERVICES bridge destructure at the top of this IIFE.
+     RUNTIME WATCHDOGS (long task, JS heap, main-thread freeze)
+     Started once from _bootMain(). Diagnostics only: each one logs through
+     ErrorLog and never changes app behaviour.
      ========================================================================== */
+  const WATCHDOG = Object.freeze({
+    LONGTASK_MS: 250,               // only long tasks above this are worth a log line
+    LONGTASK_LOG_CAP: 5,            // max long-task log lines per window (a busy page can emit hundreds)
+    LONGTASK_LOG_WINDOW_MS: 60_000,
+    HEAP_WARN_RATIO: 0.85,          // warn once when used/limit first crosses this ...
+    HEAP_REARM_RATIO: 0.80,         // ... and re-arm only after it falls back below this (hysteresis)
+    HEAP_POLL_MS: 30_000,
+    BYTES_PER_MB: 1048576,
+    FREEZE_TICK_MS: 1000,           // the interval the freeze watchdog expects to fire at
+    FREEZE_WARN_GAP_MS: 2000,       // a tick gap above this means the main thread was blocked
+    FREEZE_SLEEP_GAP_MS: 15_000,    // a gap this long is sleep / lock screen / throttling, not a JS block
+  });
 
-  // ALERTS UI ADAPTER — moved to schedule-workbench.mjs (CQ-1 Phase 3 Task 7,
-  // a deliberate, documented scope decision — see
-  // docs/architecture/cq1-compatibility-inventory.md for the coupling
-  // evidence). Imported via the __NIMBUS_WORKBENCH bridge destructure at the
-  // top of this IIFE. `VL_ALERT_ROW_H` travels with it.
+  function startRuntimeWatchdogs() {
+    // Long tasks (PerformanceObserver), rate-limited per window.
+    try {
+      if ('PerformanceObserver' in window &&
+          PerformanceObserver.supportedEntryTypes &&
+          PerformanceObserver.supportedEntryTypes.includes('longtask')) {
+        let windowStart = 0, logged = 0, suppressed = 0;
+        new PerformanceObserver(list => {
+          for (const entry of list.getEntries()) {
+            if (entry.duration <= WATCHDOG.LONGTASK_MS) continue;
+            const now = performance.now();
+            if (now - windowStart > WATCHDOG.LONGTASK_LOG_WINDOW_MS) {
+              if (suppressed > 0) ErrorLog.info('perf', `${suppressed} further long task(s) not logged in the previous ${WATCHDOG.LONGTASK_LOG_WINDOW_MS / 1000}s window`);
+              windowStart = now; logged = 0; suppressed = 0;
+            }
+            if (logged >= WATCHDOG.LONGTASK_LOG_CAP) { suppressed++; continue; }
+            logged++;
+            const attr = entry.attribution?.[0]?.name || 'n/a';
+            ErrorLog.warn('perf', `longtask ${Math.round(entry.duration)}ms (attribution: ${attr})`);
+          }
+        }).observe({ entryTypes: ['longtask'] });
+      }
+    } catch (e) { ErrorLog.info('perf', `longtask observer unavailable: ${e?.message || e}`); }
 
-  /* =============================================================================
-     UTILIZATION — moved to schedule-services.mjs (CQ-1 Phase 2 Task 2). Imported
-     via the __NIMBUS_SERVICES bridge destructure at the top of this IIFE.
-     ========================================================================== */
+    // JS heap sampler: warns on crossing the ratio, not on every poll above it.
+    let heapWarned = false;
+    setInterval(() => {
+      if (document.hidden) return; // skip heap sampling while the tab is backgrounded
+      const m = performance && performance.memory;
+      if (!m) return;
+      const usedMB  = m.usedJSHeapSize  / WATCHDOG.BYTES_PER_MB;
+      const limitMB = m.jsHeapSizeLimit / WATCHDOG.BYTES_PER_MB;
+      const ratio   = usedMB / limitMB;
+      if (ratio > WATCHDOG.HEAP_WARN_RATIO) {
+        if (heapWarned) return;
+        heapWarned = true;
+        ErrorLog.warn('memory',
+          `JS heap ${usedMB.toFixed(0)}/${limitMB.toFixed(0)} MB (${Math.round(ratio * 100)}%)`);
+      } else if (ratio < WATCHDOG.HEAP_REARM_RATIO) {
+        heapWarned = false;
+      }
+    }, WATCHDOG.HEAP_POLL_MS);
 
-  /* =============================================================================
-     ENGINE — moved to schedule-services.mjs (CQ-1 Phase 2 Task 3). Imported via
-     the __NIMBUS_SERVICES bridge destructure at the top of this IIFE.
-     ========================================================================== */
+    // Freeze watchdog: a setInterval that records actual elapsed time. If the
+    // gap is much larger than the schedule, the main thread was blocked. The
+    // gap is measured with performance.now() (monotonic), so a wall-clock jump
+    // cannot fake or hide a freeze.
+    // Caveat: hidden-tab timers are throttled (Chrome/Edge: ~1 tick/min under
+    // intensive throttling, and Windows window occlusion counts as hidden), so
+    // the in-tick hidden guard alone can't keep _lastTick fresh across a
+    // background stint — the visibilitychange reset below handles resume.
+    let _lastTick = performance.now();
+    document.addEventListener('visibilitychange', () => { _lastTick = performance.now(); });
+    setInterval(() => {
+      const now = performance.now();
+      // Belt-and-suspenders alongside the visibilitychange reset, in case a
+      // throttled tick races the event on resume.
+      if (document.hidden) { _lastTick = now; return; }
+      const drift = now - _lastTick;
+      _lastTick = now;
+      if (drift > WATCHDOG.FREEZE_WARN_GAP_MS) {
+        const blockedMs = Math.round(drift - WATCHDOG.FREEZE_TICK_MS);
+        if (drift > WATCHDOG.FREEZE_SLEEP_GAP_MS) {
+          // A real synchronous block this long is implausible (and would show up
+          // as a longtask entry) — this is system sleep / lock screen / residual
+          // background-tab throttling.
+          ErrorLog.info('freeze', `~${blockedMs}ms timer gap — likely system sleep or background-tab throttling, not a JS block`);
+        } else {
+          ErrorLog.warn('freeze', `Main thread blocked ~${blockedMs}ms`);
+        }
+      }
+    }, WATCHDOG.FREEZE_TICK_MS);
+  }
 
-
-  // SESSION UI ADAPTER — moved to application-shell.mjs (CQ-1 Phase 4
-  // Task 4), alongside Settings/showLoginScreen/EmptyState/PlantSelector/App.
-  // Imported via the __NIMBUS_SHELL bridge destructure at the top of this IIFE.
-
-  // AUTH (LOGIN SCREEN) — showLoginScreen() moved to application-shell.mjs
-  // (CQ-1 Phase 4 Task 4). Imported via the __NIMBUS_SHELL bridge
-  // destructure at the top of this IIFE.
-
-  // SANDBOX ADAPTER — moved to schedule-workbench.mjs (CQ-1 Phase 3 Task 7,
-  // the design doc's explicitly-mandated move). Imported via the
-  // __NIMBUS_WORKBENCH bridge destructure at the top of this IIFE.
-
-  // ADMIN COCKPIT — moved to plant-and-administration.mjs (CQ-1 Phase 4 Task
-  // 3), verbatim — the single largest module moved in this entire migration
-  // (~2,260 lines). Its dispatch to MasterData.render()/Interface.render()/
-  // Security.render() in _setSub is a same-file bare reference there (no
-  // seam — all four already lived behind the same __NIMBUS_PLANT_ADMIN
-  // bridge destructure in this file before this task). Imported via that
-  // bridge destructure at the top of this IIFE.
-
-  // PRINTER — moved to schedule-workbench.mjs (CQ-1 Phase 3 Task 7). Imported
-  // via the __NIMBUS_WORKBENCH bridge destructure at the top of this IIFE.
-
-  // EMPTY STATE — moved to application-shell.mjs (CQ-1 Phase 4 Task 4).
-  // Imported via the __NIMBUS_SHELL bridge destructure at the top of this
-  // IIFE.
-
-  // PLANT SELECTOR — moved to application-shell.mjs (CQ-1 Phase 4 Task 4).
-  // Imported via the __NIMBUS_SHELL bridge destructure at the top of this
-  // IIFE.
-
-  // WELCOME SPLASH — moved to application-shell.mjs (CQ-1 Phase 4 Task 4).
-  // Imported via the __NIMBUS_SHELL bridge destructure at the top of this
-  // IIFE.
-
-  // APP — moved to application-shell.mjs (CQ-1 Phase 4 Task 4), minus
-  // _renderSettingsPane (relocated to Plant in Task 1). Imported via the
-  // __NIMBUS_SHELL bridge destructure at the top of this IIFE.
-
-  // MASTER DATA — moved to plant-and-administration.mjs (CQ-1 Phase 4 Task
-  // 2). Its one Store._state.masterData write became Store.setMasterData(...)
-  // (closing MasterData's tracked §6 exception). Imported via the
-  // __NIMBUS_PLANT_ADMIN bridge destructure at the top of this IIFE.
-
-  // INTERFACE — moved to plant-and-administration.mjs (CQ-1 Phase 4 Task 3),
-  // verbatim — fully self-contained, zero cross-references to any other of
-  // the 14 modules. Imported via the __NIMBUS_PLANT_ADMIN bridge destructure
-  // at the top of this IIFE.
-
-  // SECURITY — moved to plant-and-administration.mjs (CQ-1 Phase 4 Task 3),
-  // verbatim — fully self-contained, zero cross-references to any other of
-  // the 14 modules. Imported via the __NIMBUS_PLANT_ADMIN bridge destructure
-  // at the top of this IIFE.
+  // Settle delays for work that must run after the first Timeline render. The
+  // Timeline exposes no "ready" signal to gate on, so these are heuristic
+  // delays: vis-timeline needs a layout pass before Interaction can wire its
+  // listeners, TimelineNav / DependencyOverlay read the rendered range, and the
+  // first-load view reset runs after the landing navigation has settled.
+  const BOOT_DELAY_MS = Object.freeze({
+    INTERACTION_INSTALL: 80,
+    TIMELINE_NAV_INIT: 150,
+    DEPENDENCY_OVERLAY_INIT: 160,
+    FIRST_LOAD_DAY_VIEW: 200,
+  });
 
   /* =============================================================================
      BOOTSTRAP
@@ -441,17 +200,12 @@ const NIMBUS = (function () {
     // Global hard-error net FIRST (captures stack traces, normalized through ErrorLog), so a throw in any boot
     // step below (SessionUIAdapter.init, the gates, the settings hydration) is recorded instead of vanishing.
     ErrorLog.installGlobalHandlers();
-    // Subscribe SessionUIAdapter to session:changed FIRST (CQ-1 Phase 2 Task 5 —
-    // Session.signIn/signOut/refresh now emit that event instead of calling
-    // _applyGates()/DOM code inline). Then re-apply session-driven UI gates
-    // explicitly — this covers the "already signed in on page load" resume path,
-    // which never goes through signIn() and so never fires session:changed. The
-    // "just signed in" path is covered too: showLoginScreen's signIn() already
-    // fired the event (with nobody subscribed yet, since init() hadn't run), so
-    // this explicit call is what actually applies the gates for that path as
-    // well — a harmless, idempotent single application either way (the pre-split
-    // code applied gates twice for a fresh sign-in; _applyGates is idempotent,
-    // so once is behaviorally equivalent).
+    // Subscribe SessionUIAdapter to session:changed FIRST (Session.signIn/signOut/refresh emit that event
+    // instead of calling _applyGates()/DOM code inline). Then re-apply session-driven UI gates explicitly —
+    // this covers the "already signed in on page load" resume path, which never goes through signIn() and so
+    // never fires session:changed. The "just signed in" path is covered too: showLoginScreen's signIn() already
+    // fired the event (with nobody subscribed yet, since init() hadn't run), so this explicit call is what
+    // actually applies the gates for that path as well — a harmless, idempotent single application either way.
     SessionUIAdapter.init();
     try { SessionUIAdapter._applyGates(); } catch (e) { ErrorLog.error('boot', `SessionUIAdapter._applyGates: ${e.message}`); }
     // N2: Config.CONCURRENCY_CHECK=false makes every manual save force:true
@@ -478,7 +232,7 @@ const NIMBUS = (function () {
         Store.setUserSettings(_u.settings || {}, 'session-cache');
         Store.setRoleDefaults(_u.role_settings || {}, 'session-cache');
       }
-    } catch {}
+    } catch (e) { ErrorLog.warn('boot', `settings hydration from the session cache failed: ${e?.message || e}`); }
     // Now that Store carries the resolved per-user prefs, apply the display-scoped
     // ones that must be settled BEFORE the first render (App.init's data-i18n sweep
     // and DarkMode). Both fall back to their offline localStorage caches when no
@@ -489,20 +243,22 @@ const NIMBUS = (function () {
       const lang = (us.language != null) ? us.language : (rd.language != null ? rd.language : null);
       if (lang && lang !== Util.locale()) {
         Util.setLocale(lang);
-        try { localStorage.setItem('nimbus.locale', lang); } catch {}
+        // Storage can be unavailable (private mode, blocked site data); the locale still applies for this page.
+        try { localStorage.setItem('nimbus.locale', lang); } catch (e) { ErrorLog.info('boot', `locale cache not written: ${e?.message || e}`); }
       }
-    } catch {}
+    } catch (e) { ErrorLog.warn('boot', `language preference apply failed: ${e?.message || e}`); }
     // Re-apply the theme from the resolved pref. Covers the just-signed-in path
     // (DarkMode.init already ran off the offline cache before settings loaded) and
     // is idempotent for the resume path (DarkMode.init runs again right after).
-    try { if (typeof NIMBUS !== 'undefined' && NIMBUS.DarkMode?.init) NIMBUS.DarkMode.init(); } catch {}
+    // The typeof/DarkMode guard is live: nimbus-intelligence.js (which defines DarkMode) loads AFTER app.js.
+    try { if (typeof NIMBUS !== 'undefined' && NIMBUS.DarkMode?.init) NIMBUS.DarkMode.init(); } catch (e) { ErrorLog.warn('boot', `DarkMode.init failed: ${e?.message || e}`); }
     // Feed the resolved firstDayOfWeek pref into Flatpickr's default locale so every
     // calendar-style picker created afterwards renders weeks starting on the chosen day.
     App._applyFirstDayOfWeek();
     // Reconcile the cached session role against backend truth (a stale cache is
     // what leaves the admin UI visible while every admin request 403s). Fire-and-
     // forget — it re-applies the gates when it resolves.
-    try { Session.refresh(); } catch {}
+    Session.refresh().catch(e => ErrorLog.warn('boot', `Session.refresh failed: ${e?.message || e}`));
 
     // (Global error handlers are installed at the top of _bootMain.)
     // Restore the persisted error-log ring from the previous page load (best-effort).
@@ -512,68 +268,13 @@ const NIMBUS = (function () {
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.getRegistrations().then(rs => {
         if (rs.length) {
-          ErrorLog.warn('boot', `Unregistering ${rs.length} legacy service worker(s)`);
+          ErrorLog.info('boot', `Unregistering ${rs.length} legacy service worker(s)`);
           rs.forEach(r => r.unregister());
         }
       }).catch(() => {});
     }
 
-    /* ---- Performance watchdogs (long-task, JS heap, main-thread freeze) ---- */
-    try {
-      if ('PerformanceObserver' in window &&
-          PerformanceObserver.supportedEntryTypes &&
-          PerformanceObserver.supportedEntryTypes.includes('longtask')) {
-        new PerformanceObserver(list => {
-          for (const entry of list.getEntries()) {
-            if (entry.duration > 250) {
-              const attr = entry.attribution?.[0]?.name || 'n/a';
-              ErrorLog.warn('perf', `longtask ${Math.round(entry.duration)}ms (attribution: ${attr})`);
-            }
-          }
-        }).observe({ entryTypes: ['longtask'] });
-      }
-    } catch { /* longtask API not supported */ }
-
-    setInterval(() => {
-      if (document.hidden) return; // skip heap sampling while the tab is backgrounded
-      const m = performance && performance.memory;
-      if (!m) return;
-      const usedMB  = m.usedJSHeapSize  / 1048576;
-      const limitMB = m.jsHeapSizeLimit / 1048576;
-      const ratio   = usedMB / limitMB;
-      if (ratio > 0.85) {
-        ErrorLog.warn('memory',
-          `JS heap ${usedMB.toFixed(0)}/${limitMB.toFixed(0)} MB (${Math.round(ratio * 100)}%)`);
-      }
-    }, 30_000);
-
-    // Freeze watchdog: a setInterval that records actual elapsed time. If the
-    // gap is much larger than the schedule, the main thread was blocked.
-    // Caveat: hidden-tab timers are throttled (Chrome/Edge: ~1 tick/min under
-    // intensive throttling, and Windows window occlusion counts as hidden), so
-    // the in-tick hidden guard alone can't keep _lastTick fresh across a
-    // background stint — the visibilitychange reset below handles resume.
-    let _lastTick = Date.now();
-    document.addEventListener('visibilitychange', () => { _lastTick = Date.now(); });
-    setInterval(() => {
-      const now   = Date.now();
-      // Belt-and-suspenders alongside the visibilitychange reset, in case a
-      // throttled tick races the event on resume.
-      if (document.hidden) { _lastTick = now; return; }
-      const drift = now - _lastTick;
-      _lastTick = now;
-      if (drift > 2000) {
-        const blockedMs = drift - 1000;
-        if (drift > 15_000) {
-          // A real synchronous block this long is implausible (and would show up
-          // as a longtask entry) — this is system sleep / lock screen / residual
-          // background-tab throttling.
-          ErrorLog.info('freeze', `~${blockedMs}ms timer gap — likely system sleep or background-tab throttling, not a JS block`);
-        } else {
-          ErrorLog.warn('freeze', `Main thread blocked ~${blockedMs}ms`);
-        }
-      }
-    }, 1000);
+    startRuntimeWatchdogs();
 
     // Shared guard for the two global tab shortcuts below: not while typing in a field, not while a dialog is
     // open or an order is being dragged (a tab switch under either would orphan the gesture), and not for
@@ -641,8 +342,8 @@ const NIMBUS = (function () {
           Store.rebuildPlantIndex();
           Store.emit({ type: 'lineSettings:change', line: null, source: 'master-data-bulk' });
         }
-        try { if (typeof Hierarchy !== 'undefined') Hierarchy.render(); } catch {}
-        try { if (typeof ProdLines !== 'undefined' && App._currentTab === 'masterdata' && App._currentMasterSub === 'lines') ProdLines.render(); } catch {}
+        try { Hierarchy.render(); } catch (e) { ErrorLog.warn('boot', `Hierarchy.render after master-data change: ${e?.message || e}`); }
+        try { if (App._currentTab === 'masterdata' && App._currentMasterSub === 'lines') ProdLines.render(); } catch (e) { ErrorLog.warn('boot', `ProdLines.render after master-data change: ${e?.message || e}`); }
       }
     }, 'App.masterData');
     try { Plant.init();       } catch (e) { ErrorLog.error('boot', `Plant.init: ${e.message}`); }
@@ -650,10 +351,9 @@ const NIMBUS = (function () {
     try { PlantSelector.init();  } catch (e) { ErrorLog.error('boot', `PlantSelector.init: ${e.message}`); }
     try { App.init();            } catch (e) { ErrorLog.error('boot', `App.init: ${e.message}`); }
     // ProdLines has no async init — it renders on-demand when its tab is activated.
-    // TimelineNav init deferred until after first Timeline render
-    setTimeout(() => { try { TimelineNav.init(); } catch (e) { ErrorLog.error('boot', `TimelineNav.init: ${e.message}`); } }, 150);
-    // DependencyOverlay init deferred similarly
-    setTimeout(() => { try { DependencyOverlay.init(); } catch (e) { ErrorLog.error('boot', `DependencyOverlay.init: ${e.message}`); } }, 160);
+    // TimelineNav / DependencyOverlay init are deferred until after the first Timeline render (see BOOT_DELAY_MS).
+    setTimeout(() => { try { TimelineNav.init(); } catch (e) { ErrorLog.error('boot', `TimelineNav.init: ${e.message}`); } }, BOOT_DELAY_MS.TIMELINE_NAV_INIT);
+    setTimeout(() => { try { DependencyOverlay.init(); } catch (e) { ErrorLog.error('boot', `DependencyOverlay.init: ${e.message}`); } }, BOOT_DELAY_MS.DEPENDENCY_OVERLAY_INIT);
     // Sandbox init
     try { SandboxAdapter.init(); } catch (e) { ErrorLog.error('boot', `SandboxAdapter.init: ${e.message}`); }
 
@@ -663,7 +363,7 @@ const NIMBUS = (function () {
     setTimeout(() => {
       try { Interaction.install(); }
       catch (e) { ErrorLog.error('boot', `Interaction.install: ${e.message}`); }
-    }, 80);
+    }, BOOT_DELAY_MS.INTERACTION_INSTALL);
 
     ErrorLog.renderBadge();
 
@@ -677,7 +377,7 @@ const NIMBUS = (function () {
         // by now (session hydrated above; first task payload has arrived).
         App._gotoLanding();
         // Anchor Gantt to today as the leftmost column on first visit (3-day Day view).
-        setTimeout(() => Timeline.setView('day'), 200);
+        setTimeout(() => Timeline.setView('day'), BOOT_DELAY_MS.FIRST_LOAD_DAY_VIEW);
       }
     }, 'App.firstLoad');
     // One-shot: apply the user's defaultPlant preference once plant metadata is
@@ -692,7 +392,6 @@ const NIMBUS = (function () {
     //   • else, when the user can see exactly ONE plant → auto-select that one.
     // Setting the plant (source 'default-plant') triggers Persistence.loadForPlant
     // via the usual 'plant:selected' subscribers.
-    let _defaultPlantApplied = false;
     const _offDefaultPlant = Store.subscribe(evt => {
       if (evt.type !== 'master-data-changed') return;
       // Act only on authoritative plant metadata: an early or failed load can emit master-data-changed with no
@@ -700,8 +399,6 @@ const NIMBUS = (function () {
       // also fall back to the hardcoded seed list). Stay subscribed until a non-empty plant list shows up.
       if (!(Store.masterData?.plants?.length > 0)) return;
       _offDefaultPlant();
-      if (_defaultPlantApplied) return;
-      _defaultPlantApplied = true;
       try {
         if (Store.selectedPlant) return;                 // already selected — never override
         const known = Store.knownPlants();               // already allowedPlants()-scoped
@@ -793,18 +490,21 @@ const NIMBUS = (function () {
     queueMicrotask(_domReadyGate);
   }
 
-  /* Public namespace for inline onclick handlers in index.html */
+  /* Public namespace: only the keys a bundle outside this file still reads —
+     index.html inline handlers, nimbus-intelligence.js (its destructure plus
+     NIMBUS.X reads), ES modules reaching globalThis.NIMBUS, and the VM test
+     harness. A key with no remaining reader is dropped, not kept "just in case"
+     (npm run check:legacy-surface + grep the repo before adding or removing one). */
   return {
     App, Engine, Alerts, AlertsUIAdapter, Timeline, Table, Inspector,
-    Dashboard, Calendar, CalendarUI, Plant, ProdLines, Persistence, Modal, Toast, Store, Util, Config, Settings,
-    Utilization, ContextMenu, Hierarchy,
+    Dashboard, CalendarUI, Plant, ProdLines, Persistence, Modal, Toast, Store, Util,
+    Utilization, Hierarchy,
     Selection, UndoStack, Interaction,
-    ErrorLog, AdminCockpit,
-    TimelineNav, GanttFilter, DependencyOverlay, Sandbox, SandboxAdapter, Printer,
-    OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer, PriorityListViewer,
-    PlantSelector, EmptyState, MasterData, PriorityListMapping, SetupAdmin,
-    LaborPlanning, Interface, Security, SystemConfig, CalendarSync,
-    Session, SessionUIAdapter, showLoginScreen, MaterialGrids
+    ErrorLog,
+    TimelineNav, GanttFilter, Sandbox, SandboxAdapter, Printer,
+    OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer,
+    EmptyState, MasterData, SetupAdmin,
+    LaborPlanning, Session
   };
 })();
 
