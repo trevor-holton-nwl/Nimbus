@@ -576,6 +576,7 @@ test('Patterns keep counts per plant under one key, drop the old flat format, an
       handlers.at(-1)({ type: 'plant:selected' });
       Patterns._observe('PA2');
       Patterns._observe('PA2');
+      Patterns.flush();   // the write is debounced; flush it to read the storage back
     });
     const stored = JSON.parse(written['nimbus.patterns.v1']);
     assert.equal(Object.values(stored.PA)[0], 2, 'two observations under plant PA');
@@ -585,6 +586,7 @@ test('Patterns keep counts per plant under one key, drop the old flat format, an
       handlers.at(-1)({ type: 'plant:selected' });
       assert.deepEqual({ ...Patterns._pairs }, {}, 'another plant starts clean');
       Patterns._observe('PB2');
+      Patterns.flush();
     });
     assert.equal(Object.values(JSON.parse(written['nimbus.patterns.v1']).PB)[0], 1);
     assert.equal(Object.values(JSON.parse(written['nimbus.patterns.v1']).PA)[0], 2, 'plant PA is untouched');
@@ -592,7 +594,7 @@ test('Patterns keep counts per plant under one key, drop the old flat format, an
     ls.setItem = () => { throw new Error('QuotaExceededError'); };
     withPlant('PA', mkTasks('PA'), () => {
       handlers.at(-1)({ type: 'plant:selected' });
-      assert.doesNotThrow(() => Patterns._observe('PA2'));
+      assert.doesNotThrow(() => { Patterns._observe('PA2'); Patterns.flush(); });
     });
   } finally {
     ls.getItem = priorGet; ls.setItem = priorSet; Store.subscribe = priorSub; Patterns._pairs = priorPairs;
