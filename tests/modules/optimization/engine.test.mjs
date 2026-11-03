@@ -31,7 +31,7 @@ import {
   Engine, snapshotSchedule, deriveSetupObservation,
   MIN_PRODUCTIVE_SEGMENT_MINUTES, effectiveFirmedIdSet,
 } from '../../../frontend/optimization/engine.mjs';
-import { capAwareSequence } from '../../../frontend/optimization/scheduler-contract.mjs';
+import { capAwareSequence, PRIORITY_FIELD_DEFAULTS } from '../../../frontend/optimization/scheduler-contract.mjs';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Calendar } from '../../../frontend/calendar/calendar-engine.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
@@ -1990,9 +1990,8 @@ test('Engine.runAndApply respects explicit respectFirmed/respectCalendar options
 });
 
 // ---------------------------------------------------------------------------
-// Stage 3 seam 3 — Engine.flattenConstraints + the _sortTerms term factory.
-// These are _sortTerms' first-ever direct coverage (Task 0's audit confirmed no
-// test anywhere referenced _sortTerms / _comparator / colorMap before this).
+// Stage 3 seam 3 — Engine.flattenConstraints + constraintEnabled (the rank
+// terms themselves are the detached scheduler's, covered below via evaluateSchedule).
 //
 // NOTE on `Store.setMasterData(...)` vs. the plan's illustrative
 // `Store.masterData = {...}`: `masterData` is a getter-ONLY accessor on Store
@@ -2032,8 +2031,7 @@ test('flattenConstraints falls back to CONSTRAINT_CATALOG order when plant has n
 // through to the `key === 'colorWheel'` default. Its one real consumer is
 // OptimizeDialog's pre-run "no color wheel configured" confirm
 // (frontend/schedule-workbench.mts) — a UI nag, never a sequencing decision
-// (_sortTerms goes through flattenConstraints, which has always walked the
-// tree). Semantics must stay identical to flattenConstraints': a disabled node
+// (sequencing reads the tree through flattenConstraints / activePriorityKeys). Semantics must stay identical to flattenConstraints': a disabled node
 // takes its whole subtree with it, and any reachable enabled occurrence counts.
 
 
@@ -2165,81 +2163,118 @@ test('constraintEnabled preserves the never-configured default (colorWheel ON, r
 });
 
 
-test('_sortTerms resolves rank via Store.priorityRankMaps, line override winning over plant-wide', () => {
-  Store.setMasterData({ plants: [{ plant: 'P3', constraints: [{ key: 'colorWheel', enabled: true, order: 1 }] }], lines: [] }, 'unit-test');
-  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 5 } }, L01: { colorWheel: { RED: 1 } } }, 'unit-test');
-  const terms = Engine._sortTerms('changeover', { plant: 'P3' });
-  const key = terms[0].get({ COLOR: 'red', MACHINE: 'L01' });
-  assert.equal(key, '0000001|RED');  // line override (rank 1), not plant-wide (rank 5)
-  const keyNoLine = terms[0].get({ COLOR: 'red', MACHINE: 'L99' });
-  assert.equal(keyNoLine, '0000005|RED');  // falls back to plant-wide for an unmapped line
+// Priority-rank resolution now lives in the detached scheduler (setup-scheduler's
+// rankForTask / policyKeyForTask); Engine's old _sortTerms/_comparator/_taskFieldFor
+// were deleted with the live runAndApply tail (P3-3a). These cases are pinned through
+// the observable result: the order Engine.evaluateSchedule('changeover') sequences a
+// line's orders in, with zero setup cost and no due dates so policy rank decides.
+function rankedOrderByLine({ plant, constraints, rankMaps, tasks }) {
+  Store.setMasterData({ plants: [{ plant, constraints }], lines: [] }, 'unit-test');
+  Store.setPriorityRankMaps(rankMaps, 'unit-test');
+  Store.setTasks(tasks.map(t => ({ PLANT: plant, start_date: null, end_date: null, ...t })), 'unit-test');
+  Store.setSelectedPlant(plant, 'unit-test');
+  const result = Engine.evaluateSchedule('changeover', { plant, respectFirmed: true, respectCalendar: false });
+  const byLine = {};
+  const lineOf = id => tasks.find(t => t.id === id).MACHINE;
+  for (const patch of result.patches.filter(patch => patch.changes.start_date)) {
+    (byLine[lineOf(patch.id)] ??= []).push({ id: patch.id, start: +new Date(patch.changes.start_date) });
+  }
+  return Object.fromEntries(Object.entries(byLine).map(([line, rows]) => [line, rows.sort((x, y) => x.start - y.start).map(r => r.id)]));
+}
+
+
+test('priority rank resolves via Store.priorityRankMaps, line override winning over plant-wide', () => {
+  const order = rankedOrderByLine({
+    plant: 'P3',
+    constraints: [{ key: 'colorWheel', enabled: true, order: 1 }],
+    rankMaps: { '': { colorWheel: { RED: 5, BLUE: 2 } }, L01: { colorWheel: { RED: 1, BLUE: 2 } } },
+    tasks: [
+      { id: 'a-blue', MACHINE: 'L01', RUN_TIME: '1', COLOR: 'blue' }, { id: 'a-red', MACHINE: 'L01', RUN_TIME: '3', COLOR: 'red' },
+      { id: 'b-blue', MACHINE: 'L99', RUN_TIME: '1', COLOR: 'blue' }, { id: 'b-red', MACHINE: 'L99', RUN_TIME: '3', COLOR: 'red' },
+    ],
+  });
+  assert.deepEqual(order.L01, ['a-red', 'a-blue'], 'line override (RED rank 1) beats plant-wide (RED rank 5)');
+  assert.deepEqual(order.L99, ['b-blue', 'b-red'], 'an unmapped line falls back to the plant-wide list (BLUE rank 2 before RED rank 5)');
 });
 
 
-test('_sortTerms groups unranked values together, after ranked ones, instead of interleaving (N12)', () => {
-  Store.setMasterData({ plants: [{ plant: 'P4', constraints: [{ key: 'colorWheel', enabled: true, order: 1 }] }], lines: [] }, 'unit-test');
-  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 1 } } }, 'unit-test');
-  const terms = Engine._sortTerms('changeover', { plant: 'P4' });
-  const redKey    = terms[0].get({ COLOR: 'RED',    MACHINE: 'L1' });
-  const blueKey   = terms[0].get({ COLOR: 'BLUE',   MACHINE: 'L1' });   // unranked
-  const greenKey  = terms[0].get({ COLOR: 'GREEN',  MACHINE: 'L1' });   // unranked
-  assert.ok(redKey < blueKey);            // ranked sorts before unranked
-  assert.notEqual(blueKey, greenKey);     // both rank 999999 but keys still differ by value
-  assert.ok(blueKey.startsWith('0999999|') && greenKey.startsWith('0999999|'));  // grouped under the same rank prefix
+test('ranked values sequence before unranked ones (N12)', () => {
+  const order = rankedOrderByLine({
+    plant: 'P4',
+    constraints: [{ key: 'colorWheel', enabled: true, order: 1 }],
+    rankMaps: { '': { colorWheel: { RED: 1 } } },
+    tasks: [
+      { id: 'blue', MACHINE: 'L1', RUN_TIME: '1', COLOR: 'BLUE' },
+      { id: 'green', MACHINE: 'L1', RUN_TIME: '1', COLOR: 'GREEN' },
+      { id: 'red', MACHINE: 'L1', RUN_TIME: '5', COLOR: 'RED' },
+    ],
+  });
+  assert.equal(order.L1[0], 'red', 'the only ranked value sequences first even though it is the longest job');
+  assert.equal(order.L1.length, 3);
 });
 
 
-test('_sortTerms keeps the rank half exactly 7 digits for fractional and oversized ranks', () => {
-  // Ranks are floats end to end (brain.py persists float(rank); JSON round-trips
-  // 1.4 verbatim), so the padded-key encoding has to survive a non-integer.
-  // Unguarded, String(1.4).padStart(7,'0') === '00001.4' — already 7 chars, so
-  // NOTHING is padded — and it compares AFTER '0000003' on the 4th character,
-  // silently putting rank 1.4 behind rank 3. Same class of break above 1e7,
-  // where the rank half overflows to 8 digits.
-  Store.setMasterData({ plants: [{ plant: 'P7', constraints: [{ key: 'colorWheel', enabled: true, order: 1 }] }], lines: [] }, 'unit-test');
-  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 1.4, BLUE: 3, HUGE: 99999999 } } }, 'unit-test');
-  const terms = Engine._sortTerms('changeover', { plant: 'P7' });
-  const redKey  = terms[0].get({ COLOR: 'RED',  MACHINE: 'L1' });
-  const blueKey = terms[0].get({ COLOR: 'BLUE', MACHINE: 'L1' });
-  const hugeKey = terms[0].get({ COLOR: 'HUGE', MACHINE: 'L1' });
-  assert.match(redKey,  /^\d{7}\|RED$/,  'a fractional rank must still yield a 7-digit rank half');
-  assert.match(hugeKey, /^\d{7}\|HUGE$/, 'an oversized rank must be clamped to a 7-digit rank half');
-  assert.equal(redKey, '0000001|RED');   // 1.4 rounds to 1
-  assert.equal(hugeKey, '9999999|HUGE'); // clamped at the 7-digit ceiling
-  assert.ok(redKey < blueKey,
-    'fractional rank 1.4 must still sort before integer rank 3 — the unguarded encoding inverted this');
+test('priority rank stays ordinal for fractional and oversized ranks', () => {
+  // Ranks are floats end to end (brain.py persists float(rank)); a fractional or >= 1e7 rank must not break the
+  // fixed-width key: 1.4 rounds to 1 and still sequences before 3, and 99999999 clamps to 9999999 (after unranked 999999).
+  const order = rankedOrderByLine({
+    plant: 'P7',
+    constraints: [{ key: 'colorWheel', enabled: true, order: 1 }],
+    rankMaps: { '': { colorWheel: { RED: 1.4, BLUE: 3, HUGE: 99999999 } } },
+    tasks: [
+      { id: 'huge', MACHINE: 'L1', RUN_TIME: '1', COLOR: 'HUGE' },
+      { id: 'orange', MACHINE: 'L1', RUN_TIME: '1', COLOR: 'ORANGE' },
+      { id: 'blue', MACHINE: 'L1', RUN_TIME: '1', COLOR: 'BLUE' },
+      { id: 'red', MACHINE: 'L1', RUN_TIME: '9', COLOR: 'RED' },
+    ],
+  });
+  assert.deepEqual(order.L1, ['red', 'blue', 'orange', 'huge']);
 });
 
 
-test('_sortTerms with no rank map for the field falls back to 999999 for every value (no crash)', () => {
-  Store.setMasterData({ plants: [{ plant: 'P5', constraints: [{ key: 'prt01', enabled: true, order: 1 }] }], lines: [] }, 'unit-test');
-  Store.setPriorityRankMaps({}, 'unit-test');
-  const terms = Engine._sortTerms('changeover', { plant: 'P5' });
-  assert.equal(terms[0].get({ PRT_01: 'DOG', MACHINE: 'L1' }), '0999999|DOG');
+test('priority rank with no rank map for the field leaves every order unranked (no crash)', () => {
+  const order = rankedOrderByLine({
+    plant: 'P5',
+    constraints: [{ key: 'prt01', enabled: true, order: 1 }],
+    rankMaps: {},
+    tasks: [{ id: 'dog', MACHINE: 'L1', RUN_TIME: '1', PRT_01: 'DOG' }, { id: 'cat', MACHINE: 'L1', RUN_TIME: '1', PRT_01: 'CAT' }],
+  });
+  assert.equal(order.L1.length, 2, 'both orders are still placed');
 });
 
 
-test('_sortTerms maps every registered priority key to its REAL task field, not key.toUpperCase()', () => {
-  // Task 0's audit defect 4a: 'prt01' -> 'PRT_01' (not 'PRT01'),
-  // 'productionVersion' -> 'PRODUCTION_VERSION' (not 'PRODUCTIONVERSION'). A
-  // toUpperCase() guess would read an undefined field and rank every order
-  // 999999 — configured, inert, silent. Assert the mapping directly AND that a
-  // real rank resolves off the real field name.
-  assert.equal(Engine._taskFieldFor('colorWheel'), 'COLOR');
-  assert.equal(Engine._taskFieldFor('prt01'), 'PRT_01');
-  assert.equal(Engine._taskFieldFor('prt02'), 'PRT_02');
-  assert.equal(Engine._taskFieldFor('productionVersion'), 'PRODUCTION_VERSION');
-  Store.setMasterData({ plants: [{ plant: 'P6', constraints: [
-    { key: 'prt01', enabled: true, order: 1 },
-    { key: 'productionVersion', enabled: true, order: 2 },
-  ] }], lines: [] }, 'unit-test');
-  Store.setPriorityRankMaps({ '': {
-    prt01: { 'TOOL-A': 2 },
-    productionVersion: { V1: 3 },
-  } }, 'unit-test');
-  const terms = Engine._sortTerms('changeover', { plant: 'P6' });
-  assert.equal(terms[0].get({ PRT_01: 'tool-a', MACHINE: 'L1' }), '0000002|TOOL-A');
-  assert.equal(terms[1].get({ PRODUCTION_VERSION: 'v1', MACHINE: 'L1' }), '0000003|V1');
+test("priority rank reads each registered key's REAL task field, not key.toUpperCase()", () => {
+  // 'prt01' -> PRT_01 (not PRT01), 'productionVersion' -> PRODUCTION_VERSION (not PRODUCTIONVERSION). A toUpperCase()
+  // guess reads an undefined field and ranks every order 999999: configured, inert, silent.
+  assert.deepEqual({ ...PRIORITY_FIELD_DEFAULTS }, {
+    colorWheel: 'COLOR', prt01: 'PRT_01', prt02: 'PRT_02', productionVersion: 'PRODUCTION_VERSION',
+  });
+  const prt = rankedOrderByLine({
+    plant: 'P6',
+    constraints: [{ key: 'prt01', enabled: true, order: 1 }],
+    rankMaps: { '': { prt01: { 'TOOL-A': 2, 'TOOL-B': 1 } } },
+    tasks: [{ id: 'a', MACHINE: 'L1', RUN_TIME: '1', PRT_01: 'tool-a' }, { id: 'b', MACHINE: 'L1', RUN_TIME: '3', PRT_01: 'tool-b' }],
+  });
+  assert.deepEqual(prt.L1, ['b', 'a'], 'PRT_01 drives the rank');
+  const pv = rankedOrderByLine({
+    plant: 'P6',
+    constraints: [{ key: 'productionVersion', enabled: true, order: 1 }],
+    rankMaps: { '': { productionVersion: { V1: 3, V2: 1 } } },
+    tasks: [{ id: 'a', MACHINE: 'L1', RUN_TIME: '1', PRODUCTION_VERSION: 'v1' }, { id: 'b', MACHINE: 'L1', RUN_TIME: '3', PRODUCTION_VERSION: 'v2' }],
+  });
+  assert.deepEqual(pv.L1, ['b', 'a'], 'PRODUCTION_VERSION drives the rank');
+});
+
+
+test('priority rank: an EMPTY line-scoped map falls through to the plant-wide list', () => {
+  // Reachable state: the generic upload route rejects only a row-less file, so an override whose value column is
+  // entirely blank persists as {}. It must not shadow the plant-wide list (every order on the line used to rank 999999).
+  const tasks = [{ id: 'blue', MACHINE: 'L01', RUN_TIME: '1', COLOR: 'BLUE' }, { id: 'red', MACHINE: 'L01', RUN_TIME: '3', COLOR: 'RED' }];
+  const constraints = [{ key: 'colorWheel', enabled: true, order: 1 }];
+  const empty = rankedOrderByLine({ plant: 'SH1', constraints, tasks, rankMaps: { '': { colorWheel: { RED: 1, BLUE: 2 } }, L01: { colorWheel: {} } } });
+  assert.deepEqual(empty.L01, ['red', 'blue'], 'an empty override must not shadow the plant-wide rank (shadowing would sequence BLUE first by value)');
+  const real = rankedOrderByLine({ plant: 'SH1', constraints, tasks, rankMaps: { '': { colorWheel: { RED: 1, BLUE: 2 } }, L01: { colorWheel: { BLUE: 1, RED: 2 } } } });
+  assert.deepEqual(real.L01, ['blue', 'red'], 'a real line override still beats the plant-wide list');
 });
 
 // ---------------------------------------------------------------------------
@@ -2341,6 +2376,21 @@ test('setFieldTaskFields with an empty/falsy fields array is a no-op', () => {
 });
 
 
+test('setFieldTaskFields feeds changeoverTaskFields (its one remaining consumer) and never mutates PRIORITY_FIELD_DEFAULTS', () => {
+  const before = { ...Engine._fieldTaskFields };
+  try {
+    Store.setMasterData({ plants: [{ plant: 'SF1', constraints: [{ key: 'colorWheel', enabled: true, order: 1 }, { key: 'legacyNew', enabled: true, order: 2 }] }], lines: [] }, 'unit-test');
+    assert.deepEqual(Engine.changeoverTaskFields('SF1'), ['COLOR', 'FORM_SIZE'], 'an unregistered key contributes nothing and does not throw');
+    Engine.setFieldTaskFields([{ field_key: 'legacyNew', task_field: 'NEW_FIELD' }, { field_key: 'colorWheel', task_field: 'COLOR_X' }]);
+    assert.deepEqual(Engine.changeoverTaskFields('SF1'), ['COLOR_X', 'NEW_FIELD', 'FORM_SIZE'], 'registry entries (new and overriding) are picked up');
+    assert.equal(PRIORITY_FIELD_DEFAULTS.colorWheel, 'COLOR', 'the shared default table is copied, never mutated');
+    assert.equal(PRIORITY_FIELD_DEFAULTS.legacyNew, undefined);
+  } finally {
+    Engine._fieldTaskFields = before;
+  }
+});
+
+
 test('runAndApply with NO explicit plant/map resolves real ranks from Store state (alert auto-fix path)', () => {
   // The one call site Task 0's audit flagged as silently breakable:
   // Alerts.applyFix's overload branch calls Engine.runAndApply('changeover', {
@@ -2372,8 +2422,8 @@ test('runAndApply with NO explicit plant/map resolves real ranks from Store stat
      - unrankedActiveFields: the generic (all-fields) form of "is this priority
        actually configured?" behind the pre-Run confirm (N11).
      - changeoverTaskFields: what the changeover KPI must measure so it tracks
-       the same fields _sortTerms sequences on.
-   Plus the two contained _sortTerms fixes (dead term, empty-override shadowing).
+       the same fields the scheduler sequences on.
+   Plus the two contained rank-resolution fixes (dead term, empty-override shadowing).
    ------------------------------------------------------------------------ */
 
 
@@ -2490,7 +2540,7 @@ test('changeoverTaskFields tracks active priority fields, defaulting to COLOR+FO
   assert.deepEqual(Engine.changeoverTaskFields('CO1'), ['COLOR', 'FORM_SIZE']);
 
   // PRT-only plant: COLOR drops out (not sequenced on), FORM_SIZE stays because
-  // _sortTerms appends it in both grouping modes regardless.
+  // it is always part of what a run groups on.
   Store.setMasterData({ plants: [{ plant: 'CO2', constraints: [
     { key: 'prt01', enabled: true, order: 1, children: [{ key: 'prt02', enabled: true, order: 1 }] },
   ] }], lines: [] }, 'unit-test');
@@ -2502,38 +2552,6 @@ test('changeoverTaskFields tracks active priority fields, defaulting to COLOR+FO
   assert.deepEqual(Engine.changeoverTaskFields('CO3'), ['FORM_SIZE']);
 });
 
-
-test('_sortTerms skips the term for an unregistered key instead of adding a constant one', () => {
-  Store.setMasterData({ plants: [{ plant: 'DT1', constraints: [
-    { key: 'legacyGone', enabled: true, order: 1 },
-    { key: 'colorWheel', enabled: true, order: 2 },
-  ] }], lines: [] }, 'unit-test');
-  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 1 } } }, 'unit-test');
-  // 'changeover' tail is [FORM_SIZE, MATERIAL_NUMBER, runHours] = 3 terms, so one
-  // priority term (colorWheel only) means 4 — not 5 with a dead one.
-  assert.equal(Engine._sortTerms('changeover', { plant: 'DT1' }).length, 4,
-    'an unregistered key must not contribute a term returning the same string for every task');
-});
-
-
-test('_sortTerms: an EMPTY line-scoped map falls through to the plant-wide list', () => {
-  // Reachable state: the generic upload route rejects only a row-less file, so an
-  // override whose value column is entirely blank persists as {}. `??` does not
-  // bridge an empty object, so this used to rank every order on that line 999999
-  // while every other line ranked correctly.
-  Store.setMasterData({ plants: [{ plant: 'SH1', constraints: [{ key: 'colorWheel', enabled: true, order: 1 }] }], lines: [] }, 'unit-test');
-  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 4 } }, L01: { colorWheel: {} } }, 'unit-test');
-  const term = Engine._sortTerms('changeover', { plant: 'SH1' })[0];
-  assert.equal(term.get({ COLOR: 'RED', MACHINE: 'L01' }), '0000004|RED',
-    'an empty override must not shadow the plant-wide rank');
-  assert.equal(term.get({ COLOR: 'RED', MACHINE: 'L02' }), '0000004|RED',
-    'unmapped line still resolves plant-wide (regression guard)');
-  // A NON-empty override must still win — the fix must not break line scoping.
-  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 4 } }, L01: { colorWheel: { RED: 1 } } }, 'unit-test');
-  const term2 = Engine._sortTerms('changeover', { plant: 'SH1' })[0];
-  assert.equal(term2.get({ COLOR: 'RED', MACHINE: 'L01' }), '0000001|RED',
-    'a real line override must still beat the plant-wide list');
-});
 
 // ---------------------------------------------------------------------------
 // F12 gap 3 (Part 3 integration): Engine.runAndApply's setup-aware live-run

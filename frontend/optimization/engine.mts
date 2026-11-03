@@ -99,7 +99,7 @@ import type {
   EvaluationRequest,
 } from './setup-scheduler.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy, SetupSnapshot, SetupDefinition, SetupStateKey, SetupValueDefault, PlantCalendarEntry, PlantPeriod } from '../platform/types.mjs';
-import { MIN_PRODUCTIVE_SEGMENT_MINUTES } from './scheduler-contract.mjs';
+import { MIN_PRODUCTIVE_SEGMENT_MINUTES, PRIORITY_FIELD_DEFAULTS } from './scheduler-contract.mjs';
 import type { RemoveBacklogResult, RemoveBacklogDiagnostics } from './scheduler-contract.mjs';
 import type { SerializedOptimizerValidation } from './optimizer-worker-contract.mjs';
 import { firmActionForReasons, firmReasonLabels, planFirmActions } from './firm-actions.mjs';
@@ -209,17 +209,6 @@ export interface ManualPlacementOptions {
 
 /** Why the last manual placement returned null (read by callers right after the call). */
 export type ManualRefusal = FinishRefusal | 'finish_cannot_hold' | 'needs_overtime_confirm' | 'running_finish_locked';
-
-/** Deliberately loose (see this plan's "Why Engine gets looser typing" section):
- *  cmp's params are `any` (not `T`) so a heterogeneous array of terms with
- *  different key types (number for runHours, string for the padded
- *  rank|value priority keys / FORM_SIZE / MATERIAL_NUMBER) can share one array
- *  type without fighting strict-mode function-parameter variance. Precision
- *  here is intentionally deferred to a future Engine-focused phase. */
-interface SortTerm {
-  get(t: NimbusTask): number | string;
-  cmp(a: any, b: any): number;
-}
 
 /** Capture the complete read model for one optimizer candidate.  Every member
  * is cloned at the Store boundary so candidate scheduling cannot hold a live
@@ -2482,7 +2471,7 @@ export const Engine = {
 
   /* ----- Per-plant switchable constraints (phased registry) -------------
      CONSTRAINT_CATALOG declares which fields are rankable; every enabled key
-     gets an optimizer sort term generically (see _sortTerms). Per-plant config
+     gets a policy rank term generically (setup-scheduler's rankForTask). Per-plant config
      (which constraints are enabled, in what order, and — Stage 3 — nested
      under which parent) lives in plants.constraints JSONB, surfaced on
      Store.masterData.plants[*].constraints. */
@@ -2554,8 +2543,8 @@ export const Engine = {
    *  was invisible to that `find()`. It then fell through to the
    *  `key === 'colorWheel'` default and reported `true` for a colorWheel that
    *  was nested and switched OFF (and `false` for any non-colorWheel field
-   *  configured below the root). Sequencing was never affected — _sortTerms
-   *  goes through flattenConstraints, which has always walked the tree — but
+   *  configured below the root). Sequencing was never affected — the scheduler's
+   *  activePriorityKeys walks the tree, which has always walked the tree — but
    *  OptimizeDialog's pre-run "no color wheel configured" confirm
    *  (schedule-workbench.mts) reads this directly and could nag or stay
    *  silent for the wrong tree.
@@ -2610,7 +2599,7 @@ export const Engine = {
    *  nested under a field is mathematically identical to the next key in a
    *  lexicographic sort (docs/scheduling_priority.md "Sub-sort model"
    *  decision), so this is the ONLY tree-aware function in the optimizer;
-   *  every existing caller of activeConstraintKeys (including _sortTerms)
+   *  every existing caller of activeConstraintKeys
    *  gets tree support for free. A disabled node skips its ENTIRE subtree
    *  (an unreachable priority is not "half-configured," it's off). An
    *  already-emitted key is skipped on a later occurrence (duplicates
@@ -2675,9 +2664,9 @@ export const Engine = {
     return new Set(Engine._walkPriorityTree(tree).map(n => n.path));
   },
 
-  /** Delegates to flattenConstraints — every existing caller (this file's
-   *  _sortTerms, and anything else that asked "which constraints are active,
-   *  in order") picks up tree support with no call-site change. */
+  /** Delegates to flattenConstraints — every caller that asks "which
+   *  constraints are active, in order" picks up tree support with no
+   *  call-site change. */
   activeConstraintKeys(plant: string | null): string[] {
     return Engine.flattenConstraints(plant);
   },
@@ -2697,24 +2686,7 @@ export const Engine = {
    *  fetch ever resolved (it has a `.catch(() => {})`). A wrong guess would
    *  make Util.norm(t['PRT01']) === '' -> rank 999999 for every order:
    *  configured, inert, silent. */
-  _fieldTaskFields: {
-    colorWheel:        'COLOR',
-    prt01:             'PRT_01',
-    prt02:             'PRT_02',
-    productionVersion: 'PRODUCTION_VERSION',
-  } as Record<string, string>,
-
-  _taskFieldFor(key: string): string {
-    const f = Engine._fieldTaskFields[key];
-    if (f) return f;
-    // No known mapping: warn rather than guess a field name that will
-    // silently resolve to undefined for every order.
-    reportSchedulerDiagnostic(
-      'warn', 'engine', 'engine.unknown-task-field',
-      `No task field registered for priority field "${key}" — orders will not rank on it.`, { key },
-    );
-    return '';
-  },
+  _fieldTaskFields: { ...PRIORITY_FIELD_DEFAULTS } as Record<string, string>,
 
   setFieldTaskFields(fields: Array<{ field_key: string; task_field: string }>): void {
     if (!fields || !fields.length) return; // keep the offline fallback
@@ -2725,7 +2697,7 @@ export const Engine = {
 
   /** Does the loaded rank cache carry ANY ranks for this priority field —
    *  plant-wide ('') or scoped to a specific line? Reads the exact same
-   *  Store.priorityRankMaps that _sortTerms' terms read, so every "is this
+   *  Store.priorityRankMaps the scheduler's rank lookup reads, so every "is this
    *  field actually configured?" UI hint agrees with what a run will actually
    *  do. Two consumers today: OptimizeDialog's wheel badge + its pre-Run
    *  "no color wheel" confirm (schedule-workbench.mts) and Plant → System
@@ -2766,8 +2738,7 @@ export const Engine = {
 
   /** Task fields whose change between two adjacent orders constitutes a
    *  changeover for this plant: every ACTIVE priority field's task field, plus
-   *  FORM_SIZE (which `_sortTerms` appends to the tail unconditionally in both
-   *  grouping modes, so form really is always part of what a run groups on).
+   *  FORM_SIZE (always part of what a run groups on).
    *
    *  The single source of truth for "what counts as a changeover", shared by
    *  `Util.countChangeovers` (via the resolver app.js injects — Util is the
@@ -2777,113 +2748,15 @@ export const Engine = {
    *  ['COLOR', 'FORM_SIZE'] — byte-identical to the hardcoded pair it
    *  replaces.
    *
-   *  Reads `_fieldTaskFields` directly rather than through `_taskFieldFor`: an
-   *  unregistered key is a sequencing concern and `_taskFieldFor` warns about
-   *  it there, once per run. This runs on every KPI computation (twice per
-   *  optimizer preview, and on Dashboard renders), so routing it through the
-   *  warning path would turn one diagnostic into a flood of duplicates. */
+   *  An unregistered key contributes no field and never warns: this runs on
+   *  every KPI computation (twice per optimizer preview, and on Dashboard
+   *  renders), so a warning path would flood duplicates. */
   changeoverTaskFields(plant: string | null): string[] {
     const fields = Engine.activeConstraintKeys(plant)
       .map(k => Engine._fieldTaskFields[k])
       .filter(Boolean);
     if (!fields.includes('FORM_SIZE')) fields.push('FORM_SIZE');
     return fields;
-  },
-
-  /** Ordered list of sort terms for a mode — single source of truth for
-   *  optimizer ordering, shared by _comparator and runAndApply's decorate
-   *  sort. Term-factory rewrite (Stage 3, seam 3): each active constraint key
-   *  (from flattenConstraints, so tree-aware for free) gets an ordinal term
-   *  reading Store.priorityRankMaps — no more single hardcoded colorWheel
-   *  branch, and ORDER_Y is no longer consulted at all. Key encoding is
-   *  pad(rank,7)+'|'+value (N12): a fixed-width zero-padded rank so
-   *  equal/unranked values GROUP by value instead of interleaving (999999
-   *  unranked sorts after any real rank; two orders both at 999999 still sort
-   *  deterministically against each other by value). Each term yields one
-   *  scalar string key (a single allocation, not a decorate object) for a
-   *  Schwartzian sort — same shape as before, just built generically instead
-   *  of only for color.
-   *
-   *  opts.plant selects which plant's constraint tree applies. The line scope
-   *  is resolved PER TASK inside each term's get(), off the task's *current*
-   *  MACHINE (line override winning over plant-wide, ''), which is
-   *  what makes a cross-line drag or an Orders-grid line edit picked up with
-   *  no refetch (the N2 fix — see docs/scheduling_priority.md's Seam 1). */
-  _sortTerms(mode: string, opts: { plant?: string | null } = {}): SortTerm[] {
-    const { plant } = opts;
-    const numCmp = (a: number, b: number) => a - b;
-    const strCmp = (a: string, b: string) => a.localeCompare(b);
-
-    if (mode === 'spt') {
-      return [{ get: (t: NimbusTask) => Util.runHours(t), cmp: numCmp }];
-    }
-    if (mode === 'changeover') {
-      // Changeover groups identical attributes adjacently to minimize setups.
-      // Domain constraints come FIRST, in the plant's
-      // configured (now possibly nested) order; the intrinsic form / material /
-      // hours heuristic always follows as the tail.
-      const terms: SortTerm[] = [];
-      for (const key of Engine.activeConstraintKeys(plant ?? null)) {
-        const taskField = Engine._taskFieldFor(key);
-        // No registered task field (_taskFieldFor already warned): pushing the
-        // term anyway would decorate every task, on every calendar day, with
-        // the SAME constant '0999999|' key — pure cost for a term that can
-        // never discriminate. Skip it instead.
-        if (!taskField) continue;
-        terms.push({
-          get: (t: NimbusTask): string => {
-            const v = Util.norm((t as unknown as Record<string, unknown>)[taskField]);
-            const byLine = sourcePriorityRankMaps() || {};
-            const line = t.MACHINE || '';
-            // An EMPTY line-scoped map must fall through to the plant-wide list,
-            // not shadow it: `??` only bridges null/undefined, and a stored
-            // override with zero entries ({} — reachable from an all-blank-value
-            // upload, which the generic upload route does not reject) is truthy.
-            // Left unguarded, one such override silently unranked every order on
-            // that line while every other line ranked correctly.
-            const lineScoped = byLine[line]?.[key];
-            const scoped = (lineScoped && Object.keys(lineScoped).length) ? lineScoped : byLine['']?.[key];
-            const raw = scoped?.[v] ?? 999999;
-            // Defensive floor on the SORT KEY, not on what gets stored or
-            // uploaded: ranks are floats end to end (brain.py persists
-            // float(rank), and JSON round-trips 1.5 verbatim), and a
-            // non-integer — or a rank >= 1e7 — silently defeats the
-            // fixed-width padding this encoding depends on.
-            // String(1.5).padStart(7,'0') is '00001.5': already 7 chars, so
-            // NOTHING is padded, and it compares AFTER '0000002' on the 4th
-            // character. Round + clamp so the rank half is always exactly 7
-            // digits and lexicographic order always matches numeric order.
-            // (Whether fractional ranks should be a supported input at all is
-            // a separate product question — this only guarantees the sort
-            // can't silently invert.) A non-finite/non-numeric rank from a
-            // malformed payload falls back to unranked rather than NaN.
-            const rank = Number.isFinite(raw) ? Math.max(0, Math.min(9999999, Math.round(raw))) : 999999;
-            return String(rank).padStart(7, '0') + '|' + v;
-          },
-          cmp: strCmp,
-        });
-      }
-      terms.push({ get: (t: NimbusTask) => Util.norm(t.FORM_SIZE), cmp: strCmp });
-      terms.push({ get: (t: NimbusTask) => Util.norm(t.MATERIAL_NUMBER), cmp: strCmp });
-      terms.push({ get: (t: NimbusTask) => Util.runHours(t), cmp: numCmp });
-      return terms;
-    }
-    return []; // default: preserve input order
-  },
-
-  /** Comparator built from _sortTerms — kept for callers that want a plain
-   *  comparator. runAndApply uses the decorate variant for the Schwartzian win.
-   *  For 'changeover' this reflects only the color/form-grouping tie-break
-   *  order those terms encode — B3a (2026-08-21): 'changeover' no longer
-   *  dispatches through any comparator-driven walk at all; it always routes
-   *  through Engine.evaluateSetupAware('min-changeover', ...) instead (see
-   *  runAndApply). */
-  _comparator(mode: string, opts: { plant?: string | null } = {}): (a: NimbusTask, b: NimbusTask) => number {
-    const terms = Engine._sortTerms(mode, opts);
-    return (a, b) => {
-      for (const tm of terms) { const c = tm.cmp(tm.get(a), tm.get(b)); if (c) return c; }
-      return 0;
-    };
   },
 
   /** Main optimiser. Groups by line, optionally respects firmed + calendar.
