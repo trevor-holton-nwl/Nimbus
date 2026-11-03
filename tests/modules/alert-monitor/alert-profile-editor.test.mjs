@@ -1,5 +1,5 @@
 // Tests for frontend/alert-monitor/alert-profile-editor.mts: the pure helpers (category tri-state, delete
-// permission, draft round trip, unique copy names, live day range, live match count) and the modal DOM
+// permission, draft round trip, unique copy names, live day range) and the modal DOM
 // against a stubbed document (inline validation keys, creator/admin Delete gate, create vs update,
 // server 409 mapping, set-as-mine read-modify-write, never-firing types hidden).
 import { test, beforeEach, afterEach } from 'node:test';
@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import {
   AlertProfileEditor, categoryCheckState, canDeleteProfile, draftFromProfile, profileFromDraft,
-  uniqueCopyName, liveRange, liveMatchCount, blankDraft, tunedCategories, dayPresetOf, dayPresetRange, editorSeams,
+  uniqueCopyName, liveRange, blankDraft, tunedCategories, dayPresetOf, dayPresetRange, editorSeams,
 } from '../../../frontend/alert-monitor/alert-profile-editor.mjs';
 import { OverflowMenu } from '../../../frontend/platform/overflow-menu.mjs';
 import { ALERT_CATEGORY_ORDER, DEFAULT_CATEGORY_COLORS, PALETTE } from '../../../frontend/insights/alert-profiles.mjs';
@@ -17,7 +17,7 @@ import { AlertApiError } from '../../../frontend/insights/plant-lru.mjs';
 import { FIRING_ALERT_TYPES } from '../../../frontend/insights/alert-profiles.mjs';
 import { Session } from '../../../frontend/security/session.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
-import { Modal, Toast } from '../../../frontend/platform/foundation.mjs';
+import { Modal, Toast, Util } from '../../../frontend/platform/foundation.mjs';
 
 globalThis.NimbusComputeCore = globalThis.NimbusComputeCore || createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
 globalThis.window = globalThis.window || {};
@@ -86,18 +86,6 @@ test('liveRange: positive, negative and blank offsets step by calendar day', () 
   assert.equal(liveRange(null, null, today, iso), null);
   // month-end rollover (calendar stepping, not +86400000)
   assert.deepEqual(liveRange(12, 12, today, iso), { from: '2026-11-1', to: '2026-11-1' });
-});
-
-test('liveMatchCount counts the alerts the whole draft matches', () => {
-  const today = new Date(2026, 9, 20);
-  const alert = (id, type, sev, day) => ({ id, type, sev, msg: '', line: '', taskId: null, time: new Date(2026, 9, day, 8) });
-  const alerts = [alert('a', 'overlap', 'err', 21), alert('b', 'overlap', 'warn', 21), alert('c', 'late', 'err', 21), alert('d', 'overlap', 'err', 28)];
-  const draft = { plant: 'P1', name: 'x', rules: [
-    { types: ['overlap'], dayFrom: 0, dayTo: 3, minSev: 'err', minLateHours: null },
-    { types: ['late'], dayFrom: null, dayTo: null, minSev: null, minLateHours: null },
-  ] };
-  assert.equal(liveMatchCount(draft, alerts, {}, today), 2);
-  assert.equal(liveMatchCount({ ...draft, rules: [] }, alerts, {}, today), 0);
 });
 
 // ---- DOM -------------------------------------------------------------------------------------
@@ -560,9 +548,10 @@ test('the Fine-tuned badge follows live edits; single-type groups render no type
   const s = AlertProfileEditor._test.state();
   const i = String(s.draft.rules.findIndex(r => r.types.includes('overlap')));
   fire('ape-body', 'change', tgt({ apeField: 'errOnly', apeRule: i }, { checked: true }));
-  assert.equal(els['ape-badge-conflicts'].hidden, false, 'badge shows after Errors only');
+  // Errors only re-renders the body (it can flip Add rule / the matches-everything line), so read the markup, not a stale element.
+  assert.doesNotMatch(els['ape-body'].innerHTML, /id="ape-badge-conflicts"[^>]* hidden>/, 'badge shows after Errors only');
   fire('ape-body', 'change', tgt({ apeField: 'errOnly', apeRule: i }, { checked: false }));
-  assert.equal(els['ape-badge-conflicts'].hidden, true, 'and hides again');
+  assert.match(els['ape-body'].innerHTML, /id="ape-badge-conflicts"[^>]* hidden>/, 'and hides again');
   // Late has one type: no type checkboxes at all.
   assert.doesNotMatch(els['ape-body'].innerHTML, /data-ape-type="late"/);
   // Conflicts reduced to one type: the disabled box carries the explanation.
@@ -776,7 +765,8 @@ test('switching, New, Duplicate and Copy confirm first when edits are unsaved; a
   assert.match(calls.confirm[0].message, /ape\.discard_confirm/);
   assert.equal(calls.confirm[0].tone, 'warn');
   assert.doesNotMatch(els['ape-body'].innerHTML, /data-ape-copy-plant/, 'declined: still on the edited form');
-  assert.match(els['ape-body'].innerHTML, /value="Edited name"/, 'the edits survive a declined discard');
+  // (Typing never re-renders, and an unchanged profile list no longer repaints on open, so read the draft, not the markup.)
+  assert.equal(AlertProfileEditor._test.state().draft.name, 'Edited name', 'the edits survive a declined discard');
 
   Modal.confirm = async o => { calls.confirm.push(o); return true; };   // now yes
   click('ape-body', { apeAct: 'select', apeId: 'p1' });
@@ -830,16 +820,6 @@ test('_revalidate sees the categories: switching every group off on a stored pro
   assert.equal(calls.update.length, 0);
   fire('ape-body', 'change', tgt({ apeGrpOn: 'late' }, { checked: true }));   // showErrors is on: the error clears live
   assert.doesNotMatch(els['ape-body'].innerHTML, /ape\.err_no_categories/);
-});
-
-test('liveMatchCount passes the categories: an OFF group contributes nothing', () => {
-  const today = new Date(2026, 9, 20);
-  const alert = (id, type) => ({ id, type, sev: 'err', msg: '', line: '', taskId: null, time: new Date(2026, 9, 21, 8) });
-  const alerts = [alert('a', 'late'), alert('b', 'overlap')];
-  const categories = blankDraft('P1').categories;
-  assert.equal(liveMatchCount({ plant: 'P1', rules: [], categories }, alerts, {}, today), 2);
-  categories.late.on = false;
-  assert.equal(liveMatchCount({ plant: 'P1', rules: [], categories }, alerts, {}, today), 1);
 });
 
 test('Duplicate opens a new unsaved draft named "<name> (copy)"', async () => {
@@ -1022,4 +1002,250 @@ test('Duplicate and Copy to plants carry show_acknowledged', async () => {
   click('ape-body', { apeAct: 'copy-go' });
   await flush(); await flush();
   assert.equal(calls.create.find(c => c.plant === 'P2').show_acknowledged, true, 'Copy to plants');
+});
+
+// ---------------------------------------------------------------------------
+// Closing, in-flight guards, focus keys and open() refresh (alert-monitor review E1-E9).
+// ---------------------------------------------------------------------------
+const dirty = () => fire('ape-body', 'input', tgt({ apeField: 'name' }, { value: 'Edited name' }));
+const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
+const openShell = () => globalThis.document.getElementById('modal-alert-profile');
+const keydown = key => openShell().handlers.keydown({ key, defaultPrevented: false });
+const backdropClick = () => { const sh = openShell(); sh.handlers.mousedown({ target: sh }); sh.handlers.click({ target: sh }); };
+
+test('Cancel, the X, Escape and a backdrop click ask first when edits are unsaved, and close without asking when clean', async () => {
+  const closers = {
+    Cancel: () => click('ape-foot', { apeAct: 'cancel' }),
+    X: () => globalThis.document.getElementById('ape-close').handlers.click({}),
+    Escape: () => keydown('Escape'),
+    Backdrop: backdropClick,
+  };
+  for (const [name, close] of Object.entries(closers)) {
+    calls.confirm.length = 0; calls.closed.length = 0;
+    AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+    close();
+    await flush();
+    assert.equal(calls.confirm.length, 0, `${name}: clean draft closes without a prompt`);
+    assert.deepEqual(calls.closed, ['modal-alert-profile'], `${name}: clean draft closes`);
+
+    calls.closed.length = 0;
+    AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+    dirty();
+    Modal.confirm = async o => { calls.confirm.push(o); return false; };
+    close();
+    await flush();
+    assert.equal(calls.confirm.length, 1, `${name}: a dirty draft prompts`);
+    assert.match(calls.confirm[0].message, /ape\.discard_confirm/);
+    assert.deepEqual(calls.closed, [], `${name}: declined, the editor stays open`);
+    assert.equal(AlertProfileEditor._test.state().draft.name, 'Edited name');
+
+    Modal.confirm = async o => { calls.confirm.push(o); return true; };
+    close();
+    await flush();
+    assert.deepEqual(calls.closed, ['modal-alert-profile'], `${name}: confirmed discard closes`);
+    AlertProfileEditor.close();
+  }
+});
+
+test('a backdrop click closes only when the press also started on the backdrop (a drag-select ending there does not)', () => {
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  const sh = openShell();
+  sh.handlers.mousedown({ target: tgt({}) });   // pressed inside the form...
+  sh.handlers.click({ target: sh });            // ...released on the backdrop: the browser retargets the click to it
+  assert.deepEqual(calls.closed, []);
+  sh.handlers.click({ target: tgt({}) });       // an ordinary click inside
+  assert.deepEqual(calls.closed, []);
+  backdropClick();
+  assert.deepEqual(calls.closed, ['modal-alert-profile']);
+});
+
+test('while a save is on the wire Cancel, X, Escape, backdrop and the rail do nothing; the buttons render disabled', async () => {
+  const gate = deferred();
+  AlertProfileClient.update = async (id, p) => { calls.update.push([id, p]); await gate.promise; return { ...mine, ...p, id }; };
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  dirty();
+  click('ape-foot', { apeAct: 'save' });
+  assert.match(els['ape-foot'].innerHTML, /data-ape-act="cancel"[^>]* disabled/);
+  assert.match(els['ape-body'].innerHTML, /data-ape-act="new"[^>]* disabled/);
+  assert.equal(els['ape-close'].disabled, true);
+  click('ape-foot', { apeAct: 'cancel' });
+  globalThis.document.getElementById('ape-close').handlers.click({});
+  keydown('Escape');
+  backdropClick();
+  click('ape-body', { apeAct: 'select', apeId: 'p2' });
+  click('ape-body', { apeAct: 'new' });
+  await flush();
+  assert.deepEqual(calls.closed, [], 'still open');
+  assert.equal(calls.confirm.length, 0, 'and nothing asked');
+  assert.equal(AlertProfileEditor._test.state().draft.id, 'p1', 'the rail did not switch the draft');
+  gate.resolve();
+  await flush(); await flush();
+  assert.deepEqual(calls.closed, ['modal-alert-profile'], 'closes once the save lands');
+});
+
+test('a save that settles after the editor was closed elsewhere does not close again; a failure is still toasted', async () => {
+  const ok = deferred();
+  AlertProfileClient.update = async () => { await ok.promise; return { ...mine }; };
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  dirty();
+  click('ape-foot', { apeAct: 'save' });
+  AlertProfileEditor.close();   // e.g. another code path...
+  assert.equal(calls.closed.length, 1);
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p2' });   // ...and a new editor session is already up
+  ok.resolve();
+  await flush(); await flush();
+  assert.equal(calls.closed.length, 1, 'the late save does not close the newer editor');
+  assert.ok(AlertProfileEditor._test.state(), 'the newer editor is still open');
+  AlertProfileEditor.close();
+  assert.equal(calls.toast.filter(t => t[1] === 'success').length, 1, 'the save is still reported');
+
+  calls.toast.length = 0;
+  const bad = deferred();
+  AlertProfileClient.update = async () => { await bad.promise; };
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  dirty();
+  click('ape-foot', { apeAct: 'save' });
+  AlertProfileEditor.close();
+  bad.reject(new Error('boom'));
+  await flush(); await flush();
+  assert.deepEqual(calls.toast.at(-1), ['boom', 'error'], 'a failed save with no editor left is toasted');
+});
+
+test('Delete confirms with the stored profile name, not the unsaved Name box, and locks the editor while it runs', async () => {
+  const gate = deferred();
+  AlertProfileClient.remove = async (id, plant) => { calls.remove.push([id, plant]); await gate.promise; };
+  const realT = Util.t;
+  Util.t = (key, vars) => (key === 'ape.delete_confirm_msg' ? `${vars.name}@${vars.plant}` : key);
+  try {
+    AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+    fire('ape-body', 'input', tgt({ apeField: 'name' }, { value: 'Typed rename' }));
+    click('ape-foot', { apeAct: 'delete' });
+    await flush();
+    assert.equal(calls.confirm[0].message, 'Overlaps@P1');
+  } finally { Util.t = realT; }
+  assert.equal(AlertProfileEditor._test.state().saving, true, 'in flight');
+  click('ape-foot', { apeAct: 'cancel' });
+  assert.deepEqual(calls.closed, [], 'Cancel is ignored mid-delete');
+  gate.resolve();
+  await flush(); await flush();
+  assert.deepEqual(calls.closed, ['modal-alert-profile']);
+});
+
+test('a failed Delete unlocks the editor', async () => {
+  AlertProfileClient.remove = async () => { throw new Error('nope'); };
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  click('ape-foot', { apeAct: 'delete' });
+  await flush(); await flush();
+  assert.equal(AlertProfileEditor._test.state().saving, false);
+  assert.deepEqual(calls.toast.at(-1), ['nope', 'error']);
+  assert.deepEqual(calls.closed, []);
+});
+
+test('Errors only re-renders (Add rule and the matches-everything line follow); day inputs flip them without a re-render', async () => {
+  const one = { ...mine, id: 'p7', name: 'One', rules: [{ types: ['late'], dayFrom: 0, dayTo: 6, minSev: null, minLateHours: null }] };
+  AlertProfileClient.cached = () => [one];
+  AlertProfileClient.list = async () => [one];
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p7' });
+  const html = () => els['ape-body'].innerHTML;
+  assert.match(html(), /id="ape-add-late" data-ape-act="add-rule" data-ape-cat="late">/, 'a narrowing rule: Add rule shown');
+  click('ape-body', { apeAct: 'add-rule', apeCat: 'late' });
+  const blank = String(AlertProfileEditor._test.state().draft.rules.length - 1);
+  assert.match(html(), /id="ape-all-late-0" hidden>/, 'the narrowing rule has no matches-everything line');
+  assert.match(html(), new RegExp(`id="ape-all-late-${blank}">ape\\.rule_matches_all`), 'the blank rule does');
+  assert.match(html(), /id="ape-add-late"[^>]* hidden>/, 'a rule that narrows nothing hides Add rule');
+
+  // Errors only on the blank rule: it narrows now, so the line hides and Add rule returns, from the render itself.
+  let renders = 0;
+  const body = els['ape-body'];
+  Object.defineProperty(body, 'innerHTML', { get() { return this._h ?? ''; }, set(v) { renders++; this._h = v; }, configurable: true });
+  fire('ape-body', 'change', tgt({ apeField: 'errOnly', apeRule: blank }, { checked: true }));
+  assert.equal(renders, 1, 'errOnly re-renders');
+  assert.doesNotMatch(html(), /id="ape-add-late"[^>]* hidden>/);
+  assert.match(html(), new RegExp(`id="ape-all-late-${blank}" hidden>`));
+
+  // Back off, then type: the flags flip on the live elements, no render.
+  fire('ape-body', 'change', tgt({ apeField: 'errOnly', apeRule: blank }, { checked: false }));
+  renders = 0;
+  els['ape-add-late'] = { hidden: false };
+  els[`ape-all-late-${blank}`] = { hidden: true };
+  fire('ape-body', 'input', tgt({ apeField: 'dayTo', apeRule: '0' }, { value: '9' }));
+  await new Promise(r => setTimeout(r, 160));
+  assert.equal(renders, 0, 'typing in a day box never re-renders');
+  assert.equal(els['ape-add-late'].hidden, true, 'Add rule hidden while the blank rule leaves the group unnarrowed');
+  assert.equal(els[`ape-all-late-${blank}`].hidden, false, 'the matches-everything line shows');
+  fire('ape-body', 'input', tgt({ apeField: 'dayFrom', apeRule: blank }, { value: '1' }));
+  await new Promise(r => setTimeout(r, 160));
+  assert.equal(els['ape-add-late'].hidden, false, 'every rule narrows again: Add rule returns');
+  assert.equal(els[`ape-all-late-${blank}`].hidden, true);
+});
+
+test('copy-cancel and the rail are locked while a copy runs; the copy view clears when it finishes', async () => {
+  Store.setMasterData({ plants: [{ plant: 'P1' }, { plant: 'P2' }], lines: [] }, 'test');
+  const gate = deferred();
+  AlertProfileClient.create = async p => { calls.create.push(p); await gate.promise; return { ...p, id: 'x' }; };
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  click('ape-body', { apeAct: 'copy', apeId: 'p1' });
+  fire('ape-body', 'change', tgt({ apeCopyPlant: 'P2' }, { checked: true }));
+  click('ape-body', { apeAct: 'copy-go' });
+  assert.match(els['ape-foot'].innerHTML, /data-ape-act="copy-cancel"[^>]* disabled/);
+  click('ape-foot', { apeAct: 'copy-cancel' });
+  click('ape-body', { apeAct: 'select', apeId: 'p2' });
+  assert.ok(AlertProfileEditor._test.state().copy, 'still copying');
+  assert.equal(AlertProfileEditor._test.state().draft.id, 'p1');
+  gate.resolve();
+  await flush(); await flush();
+  assert.equal(AlertProfileEditor._test.state().copy, null, 'the copy view clears when it finishes');
+});
+
+test('rail and footer buttons and the Name box carry data-ape-key, and a render puts focus back on the footer or rail twin', () => {
+  const foot = globalThis.document.getElementById('ape-foot');
+  const body = globalThis.document.getElementById('ape-body');
+  const found = [];
+  const twin = key => ({ focus() { found.push(key); } });
+  foot.querySelector = sel => (/foot:save/.test(sel) ? twin('foot:save') : null);
+  body.querySelector = sel => (/rail:sel:p1/.test(sel) ? twin('rail:sel:p1') : null);
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  const html = els['ape-body'].innerHTML + els['ape-foot'].innerHTML;
+  for (const k of ['rail:new', 'rail:sel:p1', 'rail:dup:p1', 'rail:copy:p1', 'name', 'foot:save', 'foot:cancel']) assert.match(html, new RegExp(`data-ape-key="${k}"`), k);
+  globalThis.document.activeElement = { dataset: { apeKey: 'foot:save' } };
+  AlertProfileEditor._test.render();
+  globalThis.document.activeElement = { dataset: { apeKey: 'rail:sel:p1' } };
+  AlertProfileEditor._test.render();
+  assert.deepEqual(found, ['foot:save', 'rail:sel:p1']);
+});
+
+test('open() refetches with force, repaints only when the list changed, and swaps the blank draft only if nobody touched it', async () => {
+  const seen = [];
+  const gate = deferred();
+  AlertProfileClient.cached = () => [];
+  AlertProfileClient.list = async (plant, opts) => { seen.push(opts); return gate.promise; };
+  const body = globalThis.document.getElementById('ape-body');
+  let renders = 0;
+  Object.defineProperty(body, 'innerHTML', { get() { return this._h ?? ''; }, set(v) { renders++; this._h = v; }, configurable: true });
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  assert.deepEqual(seen, [{ force: true }], 'forced past the cache');
+  const first = renders;
+  dirty();   // the planner typed into the blank draft before the list came back
+  gate.resolve([mine, theirs]);
+  await flush(); await flush();
+  assert.equal(AlertProfileEditor._test.state().draft.id, undefined, 'an edited blank draft is not swapped');
+  assert.equal(AlertProfileEditor._test.state().draft.name, 'Edited name');
+  assert.ok(renders > first, 'the rail repainted with the new list');
+  assert.match(els['ape-body'].innerHTML, /data-ape-id="p2"/);
+
+  AlertProfileEditor.close();
+  AlertProfileClient.cached = () => [mine, theirs];
+  AlertProfileClient.list = async () => [{ ...mine }, { ...theirs }];
+  renders = 0;
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  const after = renders;
+  await flush(); await flush();
+  assert.equal(renders, after, 'an identical list does not rebuild the body');
+
+  AlertProfileEditor.close();
+  AlertProfileClient.cached = () => [];
+  AlertProfileClient.list = async () => [mine, theirs];
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  await flush(); await flush();
+  assert.equal(AlertProfileEditor._test.state().draft.id, 'p1', 'an untouched blank draft swaps to the requested profile');
 });
