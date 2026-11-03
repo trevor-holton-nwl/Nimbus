@@ -377,6 +377,9 @@ export const Compute = (() => {
         } catch {}
         for (const p of _pending.values()) p.reject(new Error('worker error'));
         _pending.clear();
+        // A crashed worker may still be alive (an uncaught error does not stop it); terminate it before dropping
+        // the reference so a discarded worker never lingers beside its replacement.
+        try { _worker?.terminate(); } catch {}
         _worker = null;
         if (_crashCount >= 2) {
           // Permanent failure: give up on the worker for the session.
@@ -617,16 +620,19 @@ export const Alerts = {
     // selected nothing is rendered, so route to the cheap sync path instead of
     // structured-cloning every line's calendars/lineSettings/masterData across.
     if (Compute.available() && Store.selectedPlant) {
-      const reqRev = Store.rev();
+      // dataRev, not rev: an alerts:change (our own or a sibling recompute's publish), a line-checkbox toggle or a
+      // settings change bumps rev() but cannot change the alert inputs, so it must not discard a good worker result.
+      const reqRev = Store.dataRev();
       Compute.alerts(opts)   // never filtered by dismissals: _publish filters, Confidence needs the full list
         .then(({ alerts, elapsed }) => {
-          if (Store.rev() !== reqRev) {
+          // Record the measured cost first so the adaptive debounce sees it even when the result is discarded.
+          Alerts._lastMs = elapsed;
+          if (Store.dataRev() !== reqRev) {
             Alerts.scheduleRecompute();
             return;
           }
           const onlyLines = opts.lines instanceof Set && opts.lines.size ? opts.lines : null;
           Alerts._publish(alerts.concat(Alerts.queuedAlerts(onlyLines, true)), onlyLines);
-          Alerts._lastMs = elapsed;
         })
         .catch((e) => {
           ErrorLog.warn('worker', 'compute fell back to main thread', { error: String(e?.message || e) });

@@ -276,7 +276,7 @@ const NIMBUS = (function () {
   const { Calendar, Compute, Alerts, Utilization, Engine } = window.__NIMBUS_SERVICES;
   const { Persistence, CalendarSync, Session } = window.__NIMBUS_DATA;
   const { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu, Hierarchy, GanttFilter, Dashboard, Interaction, OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer, PriorityListViewer, Printer, SandboxAdapter, AlertsUIAdapter } = window.__NIMBUS_WORKBENCH;
-  const { CalendarUI, Plant, ProdLines, MasterData, LaborPlanning, Interface, Security, SystemConfig, AdminCockpit, PriorityListMapping, setActiveTabResolvers: _setPlantAdminTabResolvers } = window.__NIMBUS_PLANT_ADMIN;
+  const { SetupAdmin, CalendarUI, Plant, ProdLines, MasterData, LaborPlanning, Interface, Security, SystemConfig, AdminCockpit, PriorityListMapping, setActiveTabResolvers: _setPlantAdminTabResolvers } = window.__NIMBUS_PLANT_ADMIN;
   const { Settings, SessionUIAdapter, showLoginScreen, EmptyState, PlantSelector, App } = window.__NIMBUS_SHELL;
   const { MaterialGrids } = window.__NIMBUS_MATERIAL_GRIDS;
   // Injected getter seam so plant-and-administration.mjs's Plant/LaborPlanning
@@ -311,7 +311,11 @@ const NIMBUS = (function () {
     // An inherited line is open all day and relies on the plant's hours bounding it; this reader only intersects
     // when the plant has a calendar entry, so without one fall back to the default week instead.
     const lineHours = row.inherited && !(plant && Store.plants[plant]) ? Store.effectiveLineHours(line) : row.workHours;
-    return { lineHours, plantHours: plant ? (Store.plants[plant]?.workHours ?? null) : null, plantPeriods: plant ? (Store.plants[plant]?.periods ?? null) : null, plant, rev: Store.rev() };
+    return { lineHours, plantHours: plant ? (Store.plants[plant]?.workHours ?? null) : null, plantPeriods: plant ? (Store.plants[plant]?.periods ?? null) : null, plant,
+      // dataRev, not rev: every calendar / plant / period / master-data edit emits an event that bumps it, while
+      // alerts:change (a recompute lands every few hundred ms during edits) and line-checkbox toggles do not, so
+      // they no longer flush the per-line+date due-window cache.
+      rev: Store.dataRev() };
   });
   ErrorLog.setPlantResolver(() => Store.selectedPlant);
   ErrorLog.setRouteResolver(() => ({ tab: App._currentTab, ganttSub: App._ganttSub }));
@@ -434,6 +438,9 @@ const NIMBUS = (function () {
      authenticated, so the exact same boot path runs either way.
      ========================================================================== */
   function _bootMain() {
+    // Global hard-error net FIRST (captures stack traces, normalized through ErrorLog), so a throw in any boot
+    // step below (SessionUIAdapter.init, the gates, the settings hydration) is recorded instead of vanishing.
+    ErrorLog.installGlobalHandlers();
     // Subscribe SessionUIAdapter to session:changed FIRST (CQ-1 Phase 2 Task 5 —
     // Session.signIn/signOut/refresh now emit that event instead of calling
     // _applyGates()/DOM code inline). Then re-apply session-driven UI gates
@@ -446,20 +453,22 @@ const NIMBUS = (function () {
     // code applied gates twice for a fresh sign-in; _applyGates is idempotent,
     // so once is behaviorally equivalent).
     SessionUIAdapter.init();
-    SessionUIAdapter._applyGates();
+    try { SessionUIAdapter._applyGates(); } catch (e) { ErrorLog.error('boot', `SessionUIAdapter._applyGates: ${e.message}`); }
     // N2: Config.CONCURRENCY_CHECK=false makes every manual save force:true
     // (last-write-wins). Documented escape hatch, but nobody should run the
     // pilot in that mode without seeing it. Logged once per boot + a
     // persistent banner (same chrome band as the What-If sandbox banner).
-    if (Config.CONCURRENCY_CHECK === false) {
-      ErrorLog.warn('concurrency', 'Config.CONCURRENCY_CHECK is false — task saves run last-write-wins');
-      const _ccBanner = document.getElementById('concurrency-banner');
-      if (_ccBanner) {
-        _ccBanner.textContent = Util.t('ui.concurrency_off_banner');
-        _ccBanner.hidden = false;
-        document.body.classList.add('concurrency-off');
+    try {
+      if (Config.CONCURRENCY_CHECK === false) {
+        ErrorLog.warn('concurrency', 'Config.CONCURRENCY_CHECK is false — task saves run last-write-wins');
+        const _ccBanner = document.getElementById('concurrency-banner');
+        if (_ccBanner) {
+          _ccBanner.textContent = Util.t('ui.concurrency_off_banner');
+          _ccBanner.hidden = false;
+          document.body.classList.add('concurrency-off');
+        }
       }
-    }
+    } catch (e) { ErrorLog.error('boot', `concurrency banner: ${e.message}`); }
     // Hydrate per-user settings + role defaults from the cached session blob so the
     // app reflects the user's prefs immediately AND works offline. Session.refresh()
     // below overwrites these with DB truth from /security/me when the network is up.
@@ -495,8 +504,7 @@ const NIMBUS = (function () {
     // forget — it re-applies the gates when it resolves.
     try { Session.refresh(); } catch {}
 
-    // Global hard-error net (captures stack traces, normalized through ErrorLog).
-    ErrorLog.installGlobalHandlers();
+    // (Global error handlers are installed at the top of _bootMain.)
     // Restore the persisted error-log ring from the previous page load (best-effort).
     try { ErrorLog.restore(); } catch {}
     // Defensively unregister any legacy service workers — none should be installed
@@ -567,22 +575,34 @@ const NIMBUS = (function () {
       }
     }, 1000);
 
-    // Ctrl+Alt+L → open Admin Cockpit log tab (gated by the same per-role page
-    // access as the Admin Cockpit tab itself; App.goto('admin') already guards
-    // this, but the early-return here is a redundant defense-in-depth check).
+    // Shared guard for the two global tab shortcuts below: not while typing in a field, not while a dialog is
+    // open or an order is being dragged (a tab switch under either would orphan the gesture), and not for
+    // auto-repeat (holding the keys must not re-navigate every ~30 ms).
+    const _shortcutBlocked = e => {
+      if (e.repeat) return true;
+      const el = document.activeElement;
+      const tag = el?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+      if (el?.isContentEditable) return true;
+      if (Modal.anyOpen()) return true;
+      if (Interaction._isDragging || Interaction._marquee) return true;
+      return false;
+    };
+
+    // Ctrl+Alt+L → open Admin Cockpit log tab. Gated by the same per-role page access as the Admin Cockpit tab
+    // itself, checked BEFORE preventDefault so a user without access keeps the browser's/OS's own binding.
     document.addEventListener('keydown', e => {
       if (e.ctrlKey && e.altKey && e.key.toLowerCase() === 'l') {
-        e.preventDefault();
+        if (_shortcutBlocked(e)) return;
         if (!Session.canAccessTab('admin')) return;
+        e.preventDefault();
         App.goto('admin'); AdminCockpit.gotoSub('logs');
       }
     });
 
     // ` (backtick) → go back to previous tab  |  Alt+H → Dashboard
     document.addEventListener('keydown', e => {
-      const tag = document.activeElement?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-      if (document.activeElement?.isContentEditable) return;
+      if (_shortcutBlocked(e)) return;
       if (e.key === '`' && !e.ctrlKey && !e.altKey && !e.metaKey) {
         e.preventDefault();
         if (App._prevTab) App.goto(App._prevTab);
@@ -673,6 +693,10 @@ const NIMBUS = (function () {
     let _defaultPlantApplied = false;
     const _offDefaultPlant = Store.subscribe(evt => {
       if (evt.type !== 'master-data-changed') return;
+      // Act only on authoritative plant metadata: an early or failed load can emit master-data-changed with no
+      // plants, and unsubscribing then would lose the one-shot before the real list arrives (knownPlants() would
+      // also fall back to the hardcoded seed list). Stay subscribed until a non-empty plant list shows up.
+      if (!(Store.masterData?.plants?.length > 0)) return;
       _offDefaultPlant();
       if (_defaultPlantApplied) return;
       _defaultPlantApplied = true;
@@ -688,7 +712,7 @@ const NIMBUS = (function () {
         const cached = Persistence._rememberedPlant();
         if (cached && known.includes(cached)) return;
         // Neither a default nor a remembered plant, but the user can see exactly one.
-        if (!dp && known.length === 1) Store.setSelectedPlant(known[0], 'default-plant');
+        if (!(dp && known.includes(dp)) && known.length === 1) Store.setSelectedPlant(known[0], 'default-plant');
       } catch (e) { ErrorLog.warn('boot', `default-plant apply failed: ${e.message}`); }
     }, 'App.defaultPlant');
 
@@ -709,8 +733,11 @@ const NIMBUS = (function () {
     fetch(`${Config.API_BASE}/security/client-config?${bust}`, { cache: 'no-store' })
       .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then(d => Util.setApiKey(d.apiKey))
-      .catch(() => {
-        if (attempt < 3) setTimeout(() => _loadApiKey(attempt + 1), 1000 * 2 ** (attempt - 1));
+      .catch(e => {
+        // Attempts 1..4 = the first try plus three retries, backing off 1 s, 2 s, 4 s.
+        if (attempt <= 3) { setTimeout(() => _loadApiKey(attempt + 1), 1000 * 2 ** (attempt - 1)); return; }
+        // Terminal failure: leave a record (the admin Security / Table Browser calls will 401 until a reload).
+        try { ErrorLog.warn('boot', `client-config (API key) load failed after ${attempt} attempts: ${e?.message || e}`); } catch {}
       });
   }
 
@@ -724,7 +751,7 @@ const NIMBUS = (function () {
     // behavior when NIMBUS_API_KEY is unset on the backend.
     // One blip at page load used to leave admin calls 401-ing until a manual refresh, so:
     // check r.ok (a 5xx HTML body is not config), bypass the corporate proxy's URL-keyed
-    // cache, and retry 3x with backoff (1s, 2s, 4s). Still fire-and-forget.
+    // cache, and retry 3x after the first try with backoff (1s, 2s, 4s). Still fire-and-forget.
     _loadApiKey(1);
 
     // Mandatory login gate — blocks the whole app until authenticated against
@@ -773,7 +800,7 @@ const NIMBUS = (function () {
     ErrorLog, AdminCockpit,
     TimelineNav, GanttFilter, DependencyOverlay, Sandbox, SandboxAdapter, Printer,
     OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer, PriorityListViewer,
-    PlantSelector, EmptyState, MasterData, PriorityListMapping,
+    PlantSelector, EmptyState, MasterData, PriorityListMapping, SetupAdmin,
     LaborPlanning, Interface, Security, SystemConfig, CalendarSync,
     Session, SessionUIAdapter, showLoginScreen, MaterialGrids
   };
