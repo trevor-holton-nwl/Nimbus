@@ -11,6 +11,7 @@ import { Timeline } from '../../../frontend/scheduling/gantt.mjs';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Util, ErrorLog, Toast, Modal } from '../../../frontend/platform/foundation.mjs';
 import { Alerts, Compute, Utilization } from '../../../frontend/insights/services.mjs';
+import { Session } from '../../../frontend/security/session.mjs';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { Engine } from '../../../frontend/optimization/engine.mjs';
@@ -2662,6 +2663,62 @@ test('P0-15: Run refuses a From at or after To before closing the dialog', () =>
       OptimizeDialog.setTimeMode(false);
     }
   }));
+
+// P0-19: Remove Backlog forces Respect calendar on for its own run; that must not overwrite the planner's saved choice.
+test('P0-19: Remove Backlog restores the planner Respect-calendar choice when another strategy is picked, and never saves the forced value', () =>
+  withCalendarGate('hydrated', true, async (calls) => {
+    const cal = makeSandboxElement('opt-chk-calendar');
+    const baseGet = globalThis.document.getElementById;
+    globalThis.document.getElementById = id => (id === 'opt-chk-calendar' ? cal : baseGet(id));
+    const priorSet = Session.setPref;
+    const saved = [];
+    Session.setPref = (key, value) => { saved.push({ key, value }); };
+    try {
+      OptimizeDialog.open();
+      cal.checked = false;
+      OptimizeDialog.selectMode('backlog');
+      assert.equal(cal.checked, true, 'Backlog forces calendar on for its run');
+      assert.equal(cal.disabled, true);
+      await OptimizeDialog.run();
+      await wait(20);
+      const persisted = saved.find(entry => entry.key === 'optimizerDefaults');
+      assert.equal(persisted.value.respectCalendar, false, 'the saved value is the planner choice, not the forced one');
+      OptimizeDialog.selectMode('spt');
+      assert.equal(cal.checked, false, 'leaving Backlog restores the planner choice');
+      assert.equal(cal.disabled, false);
+      // A choice made while on another strategy is kept across a Backlog round trip.
+      cal.checked = true;
+      OptimizeDialog.selectMode('backlog');
+      OptimizeDialog.selectMode('duedate');
+      assert.equal(cal.checked, true);
+    } finally {
+      Session.setPref = priorSet;
+      globalThis.document.getElementById = baseGet;
+    }
+  }));
+
+// P0-19: a quick close() then open() must not be hidden by the first close's 230 ms fade timer.
+test('P0-19: a close() fade timer does not hide a dialog that was reopened inside the fade', async () => {
+  const fx = openBackgroundFixture();
+  const priorRaf = globalThis.requestAnimationFrame;
+  const priorMaster = Store.masterData;
+  try {
+    globalThis.requestAnimationFrame = () => 1;
+    globalThis.flatpickr = () => new Proxy({ selectedDates: [] }, { get: (target, key) => (key in target ? target[key] : () => {}) });
+    const modal = makeSandboxElement('modal-optimize');
+    const baseGet = globalThis.document.getElementById;
+    globalThis.document.getElementById = id => (id === 'modal-optimize' ? modal : baseGet(id));
+    OptimizeDialog.open();
+    OptimizeDialog.close();          // schedules the 230 ms hide
+    OptimizeDialog.open();           // reopened inside the fade
+    await wait(300);
+    assert.equal(modal.hidden, false, 'the stale fade timer must not hide the reopened dialog');
+  } finally {
+    delete globalThis.flatpickr;
+    globalThis.requestAnimationFrame = priorRaf;
+    fx.restore();
+  }
+});
 
 test('Gap C: a pending calendar also asks, and "Run anyway" proceeds in both the background and foreground paths', () =>
   withCalendarGate('pending', true, async (calls, chk) => {

@@ -319,12 +319,26 @@ export const OptimizeDialog = (() => {
     hint.textContent = Util.t('tip.backlog_mode') + (grew ? ' ' + Util.t('ui.opt_backlog_runtime_grew', { count: grew }) : '');
   }
 
+  /** The planner's own Respect-calendar choice while Remove Backlog holds the box forced on (null = not in Backlog).
+   *  Backlog needs the calendar for its run, but that must neither be saved as the planner's default nor outlive
+   *  the mode: leaving Backlog puts the remembered choice back. */
+  let _calendarBeforeBacklog: boolean | null = null;
+
   function _applyModeOptions() {
     const backlog = _mode === 'backlog';
     const firmed = document.getElementById('opt-chk-firmed') as HTMLInputElement | null;
     const calendar = document.getElementById('opt-chk-calendar') as HTMLInputElement | null;
     if (firmed) firmed.disabled = backlog;
-    if (calendar) { calendar.checked = backlog || calendar.checked; calendar.disabled = backlog; }
+    if (calendar) {
+      if (backlog) {
+        if (_calendarBeforeBacklog === null) _calendarBeforeBacklog = calendar.checked;
+        calendar.checked = true;
+      } else if (_calendarBeforeBacklog !== null) {
+        calendar.checked = _calendarBeforeBacklog;
+        _calendarBeforeBacklog = null;
+      }
+      calendar.disabled = backlog;
+    }
     const firmedLabel = document.getElementById('opt-firmed-label');
     const calendarLabel = document.getElementById('opt-calendar-label');
     if (firmedLabel) firmedLabel.title = backlog ? 'Firmed orders move when reached and remain firmed.' : Util.t('ui.opt_respect_firmed_hint');
@@ -585,6 +599,7 @@ export const OptimizeDialog = (() => {
     }
     const el = document.getElementById('modal-optimize');
     if (!el) return;
+    if (_closeTimer) { clearTimeout(_closeTimer); _closeTimer = null; }
     el.hidden = false;
     _startDirty = false;
     _endDirty = false;
@@ -602,6 +617,7 @@ export const OptimizeDialog = (() => {
     const rcEl = document.getElementById('chk-respect-calendar') as HTMLInputElement | null;
     const ofEl = document.getElementById('opt-chk-firmed') as HTMLInputElement | null;
     const ocEl = document.getElementById('opt-chk-calendar') as HTMLInputElement | null;
+    _calendarBeforeBacklog = null;   // the boxes are re-seeded below; any forced-on state from a past session is gone
     if (rcEl && ocEl) ocEl.checked = rcEl.checked;
     // Saved defaults override the toolbar mirror when present. Older saved
     // presets used the pre-rename `respectFixed` key — fall back to it.
@@ -670,9 +686,12 @@ export const OptimizeDialog = (() => {
     }, 'OptimizeDialog');
   }
 
+  let _closeTimer: ReturnType<typeof setTimeout> | null = null;
+
   function close(immediate = false) {
     const el = document.getElementById('modal-optimize');
     if (!el) return;
+    if (immediate && _closeTimer) { clearTimeout(_closeTimer); _closeTimer = null; }
     const inner = el.querySelector('.opt-modal');
     inner?.classList.remove('visible');
     if (immediate) {
@@ -682,7 +701,9 @@ export const OptimizeDialog = (() => {
       el.hidden = true;
       return;
     }
-    setTimeout(() => { el.hidden = true; }, 230);
+    // Kept so open() can cancel it: a reopen inside the fade must not be hidden by this timer.
+    if (_closeTimer) clearTimeout(_closeTimer);
+    _closeTimer = setTimeout(() => { _closeTimer = null; el.hidden = true; }, 230);
   }
 
   /** Undo close(true) when a pre-run confirm is cancelled: the dialog comes back with every choice intact (scope, lines,
@@ -745,7 +766,8 @@ export const OptimizeDialog = (() => {
       Session.setPref('optimizerDefaults', {
         mode, preset: _preset,
         respectFirmed:   sfEl?.checked ?? true,
-        respectCalendar: scEl?.checked ?? true,
+        // In Backlog the box is forced on for the run: save what the planner chose, not the forced value.
+        respectCalendar: mode === 'backlog' ? (_calendarBeforeBacklog ?? scEl?.checked ?? true) : (scEl?.checked ?? true),
       });
     } catch {}
 
