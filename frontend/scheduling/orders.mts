@@ -41,7 +41,8 @@ import { ORDER_FIELD_CATALOG, getField } from './order-field-catalog.mjs';
 import { planningReasonText } from './planning-reason.mjs';
 import { toolingRowHtml, warnUnknownToolId } from './order-tooling.mjs';
 import { raiseToolInventory } from '../optimization/tool-queue-confirm.mjs';
-import { Timeline, TimelineNav, setupDiagnosticLabel, setupSourceLabel } from './gantt.mjs';
+import { Timeline, TimelineNav, Interaction, setupDiagnosticLabel, setupSourceLabel } from './gantt.mjs';
+import { Selection } from './selection.mjs';
 import type { SetupPresentationDetail } from './gantt.mjs';
 import type { NimbusTask, SetupStateKey, SetupOccurrenceOverride } from '../platform/types.mjs';
 
@@ -3256,6 +3257,7 @@ export const ContextMenu = {
           if (!want) notifyResidualFirming([id]);
         }
         else if (action === 'override') { Table._openOverrideModalForId(id); }
+        else if (action === 'moveby')   { void Interaction.promptMoveBy(Selection.has(id) ? Selection.ids() : [id]); }
         else if (action === 'inspect')  { const t = Store.tasks[id]; if (t) Inspector.show(t); }
       };
     });

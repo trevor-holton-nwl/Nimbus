@@ -35,6 +35,7 @@ import { Engine, deriveSetupObservation } from '../optimization/engine.mjs';
 import type { SetupObservation, ManualPlacementOptions } from '../optimization/engine.mjs';
 import { Persistence } from './persistence.mjs';
 import { createDragGate } from './drag-state.mjs';
+import { edgeScrollStep, initialXShiftPx, EDGE_ARM_MS } from './drag-edge-scroll.mjs';
 import { Table, Inspector, ContextMenu, notifyResidualFirming } from './orders.mjs';
 import type { AgGridRowNode } from './orders.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertCategory, AlertSev, UtilSevBucket, TimelineItemKind } from '../platform/types.mjs';
@@ -400,6 +401,7 @@ export const Timeline = {
       onMoving: (item: TimelineVisItem, callback: (item: TimelineVisItem | null) => void) => {
         // Drag-time row dim hangs here (a per-frame vis callback), NOT on `timechange` (custom-time-bar events only).
         Interaction._beginItemDrag();   // first frame of an item drag: makes Interaction._isDragging truthful (timechange never fires for items)
+        try { Interaction._captureDragSet(); } catch (e) { ErrorLog.warn('timeline', 'drag set capture failed: ' + String(e)); }   // freeze who moves (first frame only)
         try { Timeline.onItemMoving(String(item.id)); } catch (e) { ErrorLog.warn('timeline', 'row dim failed: ' + String(e)); }
         // Never strip `subgroup` here: vis runs _moveToGroup BEFORE it assigns the new data, so the
         // hovered row would register the old lane and a later orderSubgroups throws on the dangling entry.
@@ -425,6 +427,18 @@ export const Timeline = {
 
     Timeline._tl = new vis.Timeline(container, Timeline._visItems, Timeline._groups, options);
 
+    // vis binds Hammer `press` to _onMultiSelectItem; with `multiselect` unset it REPLACES vis's selection with the
+    // pressed bar, so "grab, hold, then move" would drag one bar while Selection still holds N. Nothing in NIMBUS
+    // uses press on items (the context menu is contextmenu / Shift+F10), so switch the recogniser off. Deliberate
+    // vis-private touch (itemSet.hammer), null-guarded: if the shape is missing the 'select' resync below is the net.
+    try {
+      (Timeline._tl as unknown as VisInternalTimeline).itemSet?.hammer?.get?.('press')?.set?.({ enable: false });
+    } catch (e) { ErrorLog.warn('timeline', 'could not disable the item press recogniser: ' + String(e)); }
+    // Defensive: if some other vis path collapses vis's selection away from Selection (a press, a tap-less
+    // select), put it back through the same setSelection sync the Selection listener uses. A tap is left alone:
+    // Interaction._onClick owns click selection.
+    Timeline._tl.on('select', (p: unknown) => Interaction._resyncVisSelection(p));
+
     // Prime the viewport window immediately so the DataView filter is ready.
     const _initW = Timeline._tl.getWindow();
     Timeline._viewWindow = { start: _initW.start.getTime(), end: _initW.end.getTime() };
@@ -444,7 +458,12 @@ export const Timeline = {
     // rendered; fringe items outside the buffer are evicted/loaded once pan settles.
     // The non-working shading re-diffs first (hysteresis: usually a no-op) so the
     // refresh below sees the final item set.
-    const _refreshView = Util.debounce(() => { Timeline._syncNonWorking(false); Timeline._refreshViewNow(); }, 120);
+    // A drag edge-scroll fires rangechanged while bars are in flight; a DataView re-filter then resets them, so the
+    // handler defers to drag end (Interaction._flushDragDeferred) instead.
+    const _refreshView = Util.debounce(() => {
+      if (Interaction._deferWhileDragging('range')) return;
+      Timeline._syncNonWorking(false); Timeline._refreshViewNow();
+    }, 120);
     Timeline._tl.on('rangechanged', _refreshView);
 
     // Alert-profile highlight: re-apply the className diff on every AlertProfileMatches fanout (profile,
@@ -570,8 +589,13 @@ export const Timeline = {
           }
           const prev = Timeline._frozenBandIds;
           if (prev) {
-            for (const id of prev) if (!next.has(id)) Timeline._applyTaskPatch(id);
-            for (const id of next) if (!prev.has(id)) Timeline._applyTaskPatch(id);
+            // A patch mid-drag would reset the dragged bar to its stored position: queue it for drag end.
+            const patch = (id: string): void => {
+              if (Interaction._deferWhileDragging('lock')) Interaction._deferredLockIds.add(id);
+              else Timeline._applyTaskPatch(id);
+            };
+            for (const id of prev) if (!next.has(id)) patch(id);
+            for (const id of next) if (!prev.has(id)) patch(id);
           }
         } finally { Timeline._clockMemo = null; Timeline._frozenEndMemo = null; }
         Timeline._frozenBandIds = next;
@@ -1237,6 +1261,7 @@ export const Timeline = {
    *  pattern): only items whose classes changed are written, in one batch inside _suppressEvents. */
   _applyProfileMatchClasses(): void {
     if (!Timeline._items) return;
+    if (Interaction._deferWhileDragging('profile')) return;   // a mid-drag item write resets the dragged bars; flushed at drag end
     const updates: Array<{ id: string; className: string }> = [];
     const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : [];
     const focus = AlertProfileMatches.current().focusIds;
@@ -1525,19 +1550,6 @@ export const Timeline = {
   },
 
   _dragSetupLines: new Set<string>(),
-  /** Presentation-only: called from vis' per-frame drag callback. */
-  dimSetupForDrag(lines: ReadonlySet<string>): void {
-    if (!Timeline._items || typeof Timeline._items.getIds !== 'function') return;
-    const newlyAffected = new Set([...lines].filter(line => !Timeline._dragSetupLines.has(line)));
-    if (!newlyAffected.size) return;
-    for (const line of newlyAffected) Timeline._dragSetupLines.add(line);
-    const updates = Timeline._setupItemsOnLines(newlyAffected).map(item =>
-      ({ id: String(item.id), className: `${item.className || 'setup-item'} setup-drag-dim`, style: 'opacity:0.18;' }));
-    if (!updates.length) return;
-    Timeline._suppressEvents = true;
-    try { Timeline._items.update(updates); } finally { Timeline._suppressEvents = false; }
-  },
-
   finishSetupDrag(extraLines: ReadonlySet<string> = new Set()): void {
     const lines = new Set(Timeline._dragSetupLines);
     for (const line of extraLines) lines.add(line);
@@ -1590,6 +1602,10 @@ export const Timeline = {
    *  and emit minimal add/update/remove operations. Preserves selection and
    *  avoids the clear/add flicker of a wholesale replacement.               */
   rebuild(): void {
+    // Mid-drag, vis's item.setData would reset every dragged bar to its stored position. Defer the whole pass to
+    // drag end (flushed through _scheduleRebuild). The drop's own _scheduleRebuild calls run after _endItemDrag,
+    // so the spring-back is unchanged.
+    if (Interaction._deferWhileDragging('rebuild')) return;
     // U26: every order of this pass reads its plant's clock; resolve each plant once, not once per order.
     // A coalesced rebuild already queued is overtaken by this direct pass (the state it was queued for is
     // being painted now); drop it so one user action makes one pass, not two. A later schedule queues afresh.
@@ -2840,10 +2856,10 @@ export function lineFilterIsActive(sel: ReadonlySet<string> | null | undefined):
 export function lineFilterPredicate(sel: ReadonlySet<string> | null | undefined): (line: string) => boolean {
   return lineFilterIsActive(sel) ? (line => sel!.has(line)) : (() => true);
 }
-/** Hour/Day/Week window anchored on local midnight of a "now" instant (the plant's clock, S2-1). */
+/** Hour/Day/Week/Month window anchored on local midnight of a "now" instant (the plant's clock, S2-1). */
 export function plantViewWindow(mode: string, nowMs: number): { startMs: number; endMs: number } {
   const d = new Date(nowMs); d.setHours(0, 0, 0, 0);
-  const days = mode === 'hour' ? 1 : mode === 'day' ? 3 : 7;
+  const days = mode === 'hour' ? 1 : mode === 'day' ? 3 : mode === 'month' ? 30 : 7;
   const e = new Date(d); e.setDate(e.getDate() + days);   // calendar days, DST-safe
   return { startMs: d.getTime(), endMs: e.getTime() };
 }
@@ -4682,19 +4698,6 @@ interface InteractionTraceEntry {
   [key: string]: unknown;
 }
 
-/** vis-timeline's 'timechange' event payload (fires at up to 60fps *during* an
- *  item drag, before the drag commits as a DataSet 'update') — distinct from
- *  NimbusVendor.VisEventProperties (the getEventProperties/'click' shape):
- *  'timechange' carries `id`/`time`/`group` directly, not `item`/`what`. See
- *  Interaction._onTimeChange. `time` is defensively typed as Date|string|number
- *  because the handler itself normalizes it (`instanceof Date` check) rather
- *  than trusting a single shape. */
-interface VisTimeChangeProps {
-  id: string | number;
-  time: Date | string | number;
-  group?: string | number | null;
-}
-
 /** vis-data DataSet 'update' event payload, narrowed to the non-null shape
  *  Interaction._onDataSetUpdate actually receives (its caller in install()
  *  already guards `!props || !props.items`) — see NimbusVendor.VisDataSet.on
@@ -4720,9 +4723,18 @@ interface PvDropCapture {
  *  documents only the real, STABLE public API) since these are internals that
  *  could change on any vis-timeline upgrade without a version bump signal. */
 interface VisInternalTimeline {
-  body?: { domProps?: { center?: { width?: number } } };
+  body?: { domProps?: { center?: { width?: number } }; emitter?: { emit?(event: string, ...args: unknown[]): void } };
   props?: { centerContainer?: { height?: number } };
   itemSet?: {
+    /** Hammer manager on the item set (press recogniser is disabled after construction). */
+    hammer?: { get?(name: string): { set?(opts: Record<string, unknown>): unknown } | null | undefined };
+    /** Live item-drag state: one `itemProps` entry per dragged item, each with the pointer x it started from. */
+    touchParams?: {
+      itemProps?: Array<{ initialX?: number; data?: unknown; item?: { id?: string | number; setData?(data: unknown): void } }> | null;
+      itemIsDragging?: boolean;
+    };
+    /** ItemSet._onDrag(panmove event): recomputes every dragged bar from `event.center` against the live window. */
+    _onDrag?(event: { center: { x: number; y: number }; stopPropagation(): void; srcEvent?: unknown }): void;
     items?: Record<string, {
       dom?: { box?: HTMLElement };
       data?: { type?: string; group?: string | null; start?: Date; end?: Date };
@@ -4825,8 +4837,8 @@ export const Interaction = {
 
   _justDoubleClicked: false,
   _alertcellDelegated: false,
-  _edgeScrollTrackBound: null as ((e: MouseEvent) => void) | null,
-  _dimPointerEndBound: null as (() => void) | null,
+  _edgeScrollTrackBound: null as ((e: PointerEvent) => void) | null,
+  _dimPointerEndBound: null as ((e?: Event) => void) | null,
   /** Multi-drag line-lock toast latch: every selected item fires its own DataSet update for one gesture. */
   _multiLockToast: null as { key: string; ts: number } | null,
   _hideTooltipBound: null as (() => void) | null,
@@ -5032,22 +5044,22 @@ export const Interaction = {
       Interaction._onDataSetUpdate(props);
     });
 
-    /* ----- Multi-drag ghost preview via timechange ----------------------- */
-    // NOTE: browser-verified 2026-11: vis-timeline emits NO timechange/timechanged for ITEM drags (custom-time bars
-    // only), so these two bindings are dead for item drags: the ghost previews and edge auto-scroll never run. Left
-    // as is on purpose; _isDragging is driven by onMoving + pointerup instead (see _beginItemDrag/_endItemDrag).
-    Timeline._tl.on('timechange', props => Interaction._onTimeChange(props as VisTimeChangeProps));
-    Timeline._tl.on('timechanged', ()   => Interaction._clearGhosts());
-
-    /* ----- Track mouse X for edge-scroll during order drag --------------- */
+    /* ----- Track the pointer (X and Y) for edge-scroll during an order drag ---- */
+    // vis-timeline emits NO timechange/timechanged for ITEM drags (browser-verified 2026-11; those are custom-time-bar
+    // events), so the gesture is bracketed by onMoving + document pointerup (see _beginItemDrag/_endItemDrag) and the
+    // edge-scroll loop reads the last pointer position from here. pointermove, not mousemove, so touch drags track too.
     // Named + stored (not an inline arrow) so uninstall() can remove it.
-    this._edgeScrollTrackBound = (e: MouseEvent) => {
-      if (Interaction._isDragging) Interaction._dragMouseX = e.clientX;
+    this._edgeScrollTrackBound = (e: PointerEvent) => {
+      if (Interaction._isDragging) Interaction._dragPointer = e;
     };
-    document.addEventListener('mousemove', this._edgeScrollTrackBound);
+    document.addEventListener('pointermove', this._edgeScrollTrackBound);
 
     /* ----- End of any pointer gesture: clear the drag-time row dim (vis has no cancel event for item drags) ---- */
-    this._dimPointerEndBound = () => { Timeline.undimRowsForDrag(); Interaction._endItemDrag(); };
+    // Hammer's pointerup is bound on `window`, so these document listeners run BEFORE vis's panend -> _onDragEnd ->
+    // DataSet updates. Ending the gate (and flushing the deferred writers) on a macrotask lets the whole pointerup
+    // dispatch and vis's drop finish first, with `_dragSetIds` still set. A cancel has no drop: restore vis's
+    // drag state (vis binds no pancancel) and end now.
+    this._dimPointerEndBound = (e?: Event) => Interaction._onDocPointerEnd(e?.type);
     document.addEventListener('pointerup', this._dimPointerEndBound);
     document.addEventListener('pointercancel', this._dimPointerEndBound);
 
@@ -5154,7 +5166,7 @@ export const Interaction = {
     // flips true, and nothing else clears them individually.
     document.removeEventListener('keydown', this._onKeyDownBound!);
     document.removeEventListener('keydown', this._hoverDismissBound!);
-    document.removeEventListener('mousemove', this._edgeScrollTrackBound!);
+    document.removeEventListener('pointermove', this._edgeScrollTrackBound!);
     if (this._dimPointerEndBound) {
       document.removeEventListener('pointerup', this._dimPointerEndBound);
       document.removeEventListener('pointercancel', this._dimPointerEndBound);
@@ -5784,6 +5796,7 @@ export const Interaction = {
   _distSiblingItemIds: new Set<string>(),
   _applyDistSiblingHighlight(selectedIds: string[]): void {
     if (!Timeline._items) return;
+    if (Interaction._deferWhileDragging('sibling')) return;   // re-derived from Selection.ids() at drag end
     const parents = new Set<string>();
     for (const id of selectedIds) {
       const t = Store.tasks[id];
@@ -5826,8 +5839,13 @@ export const Interaction = {
    *  comment above; CQ-1 Phase 3 Task 5). */
   _onDataSetUpdate(props: InteractionDataSetUpdateProps, opts: ManualPlacementOptions = {}): void {
     // The drop ends the drag: clear the row dim before any branch (and every `continue`) below.
-    Timeline.undimRowsForDrag();
-    Interaction._endItemDrag();   // defensive: the drop's update normally lands before/with pointerup
+    // Only an update that reaches a business order is a drop. The 1 s zone ticker (and any other non-order write)
+    // also lands here and must not flip the drag gate mid-gesture. `_dragSetIds` stays readable for the commit and
+    // is cleared with the deferred-work flush right after this synchronous pass (see _flushDragDeferred).
+    if (props.items.some(rawId => Interaction._businessOrderIdForItem(String(rawId)))) {
+      Timeline.undimRowsForDrag();   // the drop ends the drag: clear the row dim before any branch (and `continue`) below
+      Interaction._endItemDrag();   // defensive: the drop's update normally lands before/with pointerup
+    }
     for (const rawId of props.items) {
       const itemId = String(rawId);
       const id = Interaction._businessOrderIdForItem(itemId);
@@ -5836,6 +5854,15 @@ export const Interaction = {
       if (!v) continue;
       const t = Store.tasks[id];
       if (!t) continue;
+      // Same-gesture duplicate: vis fires one DataSet update per selected item and its loop overwrites the
+      // companions with raw drag positions AFTER the first update committed them. Put the Store's rows back.
+      const handled = Interaction._multiDropHandled;
+      if (handled && handled.ids.has(id) && Date.now() - handled.ts < 1000) {
+        this._log('update:ignored', { id, reason: 'same-gesture duplicate' });
+        if (companionWritesDeferred(Timeline._expandedLine)) Timeline._scheduleRebuild();
+        else Timeline._writePatches(Timeline._itemsForTask(t).map(item => Timeline._decorateLane(item)));
+        continue;
+      }
       const expectedItem = Timeline._itemsForTask(t).find(item => item.id === itemId)
         || Timeline._itemForTask(t);
 
@@ -5916,26 +5943,31 @@ export const Interaction = {
       // manualSchedulePatchFor(t, newLine, newStart) call sites for the
       // dragged item, so a locked task can never reach either one on a
       // rejected drag.
-      if (t.PARENT_ORDER && lineMoved) {
+      // The companion set is frozen at grab time when the drag recorded it (A2), else the live selection.
+      // Running orders count as firmed for a drag: left in place and counted in a toast.
+      const dragSet = Interaction._dragSetIds ?? Selection.ids();
+      const selIds = dragSet.filter(sid => sid !== id && !Store.isFirmed(sid) && !Engine.isInProgress(Store.tasks[sid]));
+      const isMulti = selIds.length > 0;
+
+      if (t.PARENT_ORDER && lineMoved && !isMulti) {
         Interaction._rejectDistMachineMove(t);
         Timeline._scheduleRebuild();
         continue;
       }
 
-      const selIds = Selection.ids().filter(sid => sid !== id && !Store.isFirmed(sid));
-
-      if (selIds.length > 0 && (Math.abs(deltaMs) > 0 || lineMoved)) {
-        // D5/D14 (all plants): a multi-drag shifts time and may span lines but never changes any order's line.
-        // A drag that lands the dragged item on another row is rejected whole, with one toast per gesture
-        // (every selected item fires its own DataSet update).
-        if (lineMoved) {
-          Interaction._noteMultiDragLineLocked(id, selIds);
+      if (isMulti && (Math.abs(deltaMs) > 0 || lineMoved)) {
+        // D5/D14 (all plants): a multi-drag changes times only. A drop that lands the dragged item on another
+        // row keeps every line (the row is ignored) with one info toast per gesture (every selected item
+        // fires its own DataSet update).
+        const placeLine = t.MACHINE || 'Unknown';
+        if (lineMoved) Interaction._noteMultiDragLinesKept(id, selIds);
+        if (Math.abs(deltaMs) === 0) {
+          // Pure row change: nothing to move. Put the bar back; the companions' updates are swallowed too.
+          Interaction._guardDragSet(dragSet, id);
           Timeline._scheduleRebuild();
           continue;
         }
-        // Snapshot all affected tasks for undo
         const allIds = [id, ...selIds];
-        const snap = UndoStack.snapshotTasks(allIds);
 
         // Apply the dragged item — routed through manualSchedulePatchFor so an
         // already-split order (>=2 scheduleSegments) is shifted rather than
@@ -5952,8 +5984,9 @@ export const Interaction = {
         // one toast, same revert mechanism as every other failure below. Gated
         // by _routingRuntimeEnabled so a plant that hasn't turned the feature
         // on sees no behavior change (see that helper's own comment).
-        if (Interaction._routingRuntimeEnabled(t.PLANT) && !Runtime.eligible(t, newLine)) {
-          Interaction._rejectRuntimeMove(t, newLine);
+        if (Interaction._routingRuntimeEnabled(t.PLANT) && !Runtime.eligible(t, placeLine)) {
+          Interaction._guardDragSet(dragSet, id);
+          Interaction._rejectRuntimeMove(t, placeLine);
           Timeline._scheduleRebuild();
           continue;
         }
@@ -5961,8 +5994,9 @@ export const Interaction = {
         const batchPlant = t.PLANT || Store.getPlantForLine(t.MACHINE || 'Unknown') || Store.selectedPlant;
         Calendar._beginRun(batchPlant);
         try {
-          const draggedPatch = Engine.manualRoutingSchedulePatchFor(t, newLine, requestedFinish, opts);
+          const draggedPatch = Engine.manualRoutingSchedulePatchFor(t, placeLine, requestedFinish, opts);
           if (!draggedPatch?.start_date || !draggedPatch.end_date) {
+            Interaction._guardDragSet(dragSet, id);
             Interaction._rejectManualPlacement(t, itemId);
             continue;
           }
@@ -5980,54 +6014,37 @@ export const Interaction = {
           // Store or Timeline mutation happens here, since a later companion
           // failing must leave earlier companions (and the dragged item)
           // untouched too.
-          const skippedFirmed = Selection.ids().filter(sid => sid !== id && Store.isFirmed(sid));
+          const skippedFirmed = dragSet.filter(sid => sid !== id && Store.isFirmed(sid));
+          const skippedRunning = dragSet.filter(sid => sid !== id && !Store.isFirmed(sid) && Engine.isInProgress(Store.tasks[sid]));
           const companionPatches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
           const companionItemUpdates: Array<{ id: string; start: Date; end: Date; group: string }> = [];
-          let companionFailed = false;
-          let companionLockedTask: NimbusTask | null = null;
-          let companionRuntimeIneligible: { task: NimbusTask; line: string } | null = null;
+          // A companion whose placement is refused is skipped and reported; the drop still moves the rest.
+          const skipped: Array<{ id: string; reason: string }> = [];
           for (const sid of selIds) {
             const st = Store.tasks[sid];
             if (!st || !st.start_date) continue;
-            const sNewLine  = st.MACHINE || 'Unknown';   // a multi-drag never changes a line (lineMoved was rejected above)
-            // Machine lock (decision C): a locked companion fails the whole
-            // multi-drag atomically — nothing has been committed to Store or
-            // Timeline for this drag yet, so breaking here reverts cleanly.
-            if (st.PARENT_ORDER && sNewLine !== st.MACHINE) {
-              companionFailed = true;
-              companionLockedTask = st;
-              break;
-            }
-            // Routing-runtime eligibility (ROUTING_RUNTIME_DESIGN.md §8.3): same
-            // atomic-abort treatment as the machine lock above — the first
-            // ineligible companion fails the whole drag before any patch is
-            // computed for it. Gated by _routingRuntimeEnabled (see its comment).
+            const sNewLine  = st.MACHINE || 'Unknown';   // a multi-drag never changes a line
+            // Routing-runtime eligibility (ROUTING_RUNTIME_DESIGN.md §8.3), gated by _routingRuntimeEnabled.
             if (Interaction._routingRuntimeEnabled(st.PLANT) && !Runtime.eligible(st, sNewLine)) {
-              companionFailed = true;
-              companionRuntimeIneligible = { task: st, line: sNewLine };
-              break;
+              skipped.push({ id: sid, reason: 'ineligible' });
+              continue;
             }
             const sRequestedFinish = new Date((st.end_date || st.start_date).getTime() + deltaMs);
-            const changes = Engine.manualRoutingSchedulePatchFor(st, sNewLine, sRequestedFinish);
+            const changes = Engine.manualRoutingSchedulePatchFor(st, sNewLine, sRequestedFinish, { quiet: true });
             if (!changes?.start_date || !changes.end_date) {
-              companionFailed = true;
-              break;
+              skipped.push({ id: sid, reason: st.PARENT_ORDER ? 'locked' : (Engine.lastManualRefusal || 'refused') });
+              continue;
             }
             companionPatches.push({ id: sid, changes });
             companionItemUpdates.push({ id: sid, start: changes.start_date, end: changes.end_date, group: sNewLine });
           }
-          if (companionFailed) {
-            if (companionLockedTask) Interaction._rejectDistMachineMove(companionLockedTask);
-            else if (companionRuntimeIneligible) Interaction._rejectRuntimeMove(companionRuntimeIneligible.task, companionRuntimeIneligible.line);
-            else if (Engine.lastManualRefusal !== 'finish_cannot_hold') Toast.show(Util.t('toast.commit_failed'), 'error');
-            Timeline._scheduleRebuild();
-            continue;
-          }
+          const movedIds = [id, ...companionPatches.map(p => p.id)];
+          const snap = UndoStack.snapshotTasks(movedIds);
 
           // Every patch validated — commit atomically: dragged item, then
           // companions, then their Timeline item mirrors.
           // Source lines are read BEFORE the commit (the Store write can move the task objects' MACHINE).
-          const dropSourceLines = [t.MACHINE || 'Unknown', ...selIds.map(sid => Store.tasks[sid]?.MACHINE || 'Unknown')];
+          const dropSourceLines = [t.MACHINE || 'Unknown', ...companionPatches.map(p => Store.tasks[p.id]?.MACHINE || 'Unknown')];
           Store.updateTask(id, draggedPatch, 'timeline');
           if (companionPatches.length) Store.updateMany(companionPatches, 'timeline');
           // With a row expanded the write is skipped (companionWritesDeferred): vis's drag-end overwrites it
@@ -6041,16 +6058,22 @@ export const Interaction = {
               ? Timeline._decorateLane({ ...cur, start: upd.start, end: upd.end, group: upd.group })
               : { id: upd.id, start: upd.start, end: upd.end, group: upd.group } as TimelineVisItem]);
           }
-          Timeline.finishSetupDrag(new Set([t.MACHINE || 'Unknown', newLine]));
+          Timeline.finishSetupDrag(new Set([t.MACHINE || 'Unknown', placeLine]));
           Timeline.noteDropLines(
-            new Set([...dropSourceLines, newLine, ...companionItemUpdates.map(u => u.group)]),
-            new Set([newLine, ...companionItemUpdates.map(u => u.group)]));
+            new Set([...dropSourceLines, placeLine, ...companionItemUpdates.map(u => u.group)]),
+            new Set([placeLine, ...companionItemUpdates.map(u => u.group)]));
 
-          if (skippedFirmed.length) Toast.show(Util.t('toast.firmed_count_not_moved', { count: skippedFirmed.length }), 'warn');
+          // The guard covers the WHOLE drag set, firmed and running companions included: vis still drags those bars
+          // and fires their update after this commit, which must not run as a new drag leader.
+          Interaction._multiDropHandled = { ids: new Set([...allIds, ...dragSet]), ts: Date.now() };
+          Interaction._reportBatchMove({
+            moved: movedIds.length, total: allIds.length + skippedFirmed.length + skippedRunning.length,
+            skipped: skipped.map(x => Store.tasks[x.id]).filter((x): x is NimbusTask => !!x),
+            firmed: skippedFirmed.length, running: skippedRunning.length,
+          });
 
-          UndoStack.push(Util.t('undo.move_orders', { count: allIds.length }),
-            () => { UndoStack.restoreTasks(snap); Alerts.scheduleRecompute(); }, allIds);
-          this._clearGhosts();
+          UndoStack.push(Util.t('undo.move_orders', { count: movedIds.length }),
+            () => { UndoStack.restoreTasks(snap); Alerts.scheduleRecompute(); }, movedIds);
           return;
         } finally { Calendar._endRun(); }
       }
@@ -6159,199 +6182,295 @@ export const Interaction = {
     });
   },
 
-  /** One toast per multi-drag gesture: each selected item fires its own DataSet update, so latch on the
+  /** One info toast per multi-drag gesture: each selected item fires its own DataSet update, so latch on the
    *  gesture's item set within a short window (a rebuild also clears the latch). */
-  _noteMultiDragLineLocked(id: string, selIds: string[]): void {
+  _noteMultiDragLinesKept(id: string, selIds: string[]): void {
     const key = [id, ...selIds].sort().join('|');
     const now = Date.now();
     const last = Interaction._multiLockToast;
     if (last && last.key === key && now - last.ts < 2000) return;
     Interaction._multiLockToast = { key, ts: now };
-    Toast.show(Util.t('toast.multi_drag_line_locked'), 'warn', 4000);
+    Toast.show(Util.t('toast.multi_drag_lines_kept'), 'info', 4000);
   },
 
-  _ghostDragId: null as string | null,
+  /** Same-gesture duplicate guard (see _onDataSetUpdate): ids the last multi commit already handled. */
+  _multiDropHandled: null as { ids: Set<string>; ts: number } | null,
+  /** A refused dragged order aborts the drop: swallow the rest of the drag set's updates (their bars are restored
+   *  from the Store) so no companion becomes the leader. The leader is left out so an overtime-confirm re-entry for
+   *  it still runs. */
+  _guardDragSet(dragSet: string[], leaderId: string): void {
+    this._multiDropHandled = { ids: new Set(dragSet.filter(s => s !== leaderId)), ts: Date.now() };
+  },
+  /** One report for a batch move (multi-drop and Move by): the firmed and running counts, then
+   *  "N of M moved. Not moved: ..." when an order was skipped. */
+  _reportBatchMove(r: { moved: number; total: number; skipped: NimbusTask[]; firmed: number; running: number }): void {
+    if (r.firmed) Toast.show(Util.t('toast.firmed_count_not_moved', { count: r.firmed }), 'warn');
+    if (r.running) Toast.show(Util.t('toast.running_count_not_moved', { count: r.running }), 'warn');
+    if (!r.skipped.length) return;
+    const names = r.skipped.slice(0, 5).map(x => Util.orderNumber(x));
+    const more = r.skipped.length - names.length;
+    const orders = names.join(', ') + (more > 0 ? ` +${more}` : '');
+    Toast.show(Util.t('toast.multi_drag_partial', { moved: r.moved, total: r.total, orders }), 'warn', 6000);
+  },
+
+  /** Move the given orders' finishes by `ms` (any sign) without a drag: the Move-by command. Returns the
+   *  number moved. Firmed, frozen, running and unholdable orders stay put and are reported. */
+  moveSelectedBy(ids: string[], ms: number): number {
+    const tasks = ids.map(i => Store.tasks[i]).filter((x): x is NimbusTask => !!x);
+    if (!tasks.length || !ms) return 0;
+    const patches = Engine.pushFinishPatches(tasks, ms);
+    const movedSet = new Set(patches.map(p => p.id));
+    const running = tasks.filter(x => Engine.isInProgress(x));
+    const firmed = tasks.filter(x => Store.isFirmed(x.id) && !Engine.isInProgress(x));
+    const skipped = tasks.filter(x => !movedSet.has(x.id) && !Store.isFirmed(x.id) && !Engine.isInProgress(x));
+    if (patches.length) {
+      const moveIds = patches.map(p => p.id);
+      const snap = UndoStack.snapshotTasks(moveIds);
+      Store.updateMany(patches, 'interaction');
+      UndoStack.push(Util.t('undo.move_orders_by', { count: moveIds.length, delta: Interaction._moveByLabel(ms) }),
+        () => { UndoStack.restoreTasks(snap); Alerts.scheduleRecompute(); }, moveIds);
+      Alerts.scheduleRecompute();
+    }
+    Interaction._reportBatchMove({ moved: patches.length, total: tasks.length, skipped, firmed: firmed.length, running: running.length });
+    return patches.length;
+  },
+
+  /** Short signed label for a Move-by delta, e.g. "-1 w", "+2 h". */
+  _moveByLabel(ms: number): string {
+    const sign = ms < 0 ? '-' : '+';
+    const a = Math.abs(ms);
+    if (a % (7 * Config.MS_DAY) === 0) return `${sign}${a / (7 * Config.MS_DAY)} w`;
+    if (a % Config.MS_DAY === 0) return `${sign}${a / Config.MS_DAY} d`;
+    return `${sign}${a / Config.MS_HOUR} h`;
+  },
+
+  /** The Move-by dialog, then apply. Cancel is a no-op. */
+  async promptMoveBy(ids: string[]): Promise<void> {
+    const live = ids.filter(i => Store.tasks[i]);
+    if (!live.length) return;
+    const H = Config.MS_HOUR, D = Config.MS_DAY;
+    const opts: Array<[string, string, number]> = [
+      ['-2w', 'ui.move_by_opt_m2w', -14 * D], ['-1w', 'ui.move_by_opt_m1w', -7 * D],
+      ['-1d', 'ui.move_by_opt_m1d', -D], ['-1h', 'ui.move_by_opt_m1h', -H],
+      ['+1h', 'ui.move_by_opt_p1h', H], ['+1d', 'ui.move_by_opt_p1d', D],
+      ['+1w', 'ui.move_by_opt_p1w', 7 * D], ['+2w', 'ui.move_by_opt_p2w', 14 * D],
+    ];
+    const pick = await Modal.choose({
+      title: Util.t('ui.move_by_title'),
+      message: Util.t('ui.move_by_message', { count: live.length }),
+      options: opts.map(([value, key]) => ({ value, label: Util.t(key) })),
+    });
+    if (pick == null) return;
+    const ms = opts.find(o => o[0] === pick)?.[2];
+    if (ms == null) return;
+    Interaction.moveSelectedBy(live, ms);
+  },
+
   _edgeScrollRAF: null as number | null,
   _isDragging: false,
   _dragGate: createDragGate(),
-  /** First `onMoving` frame of an item drag (idempotent): _isDragging goes true. */
+  /** Last pointermove while a gesture is in flight (the edge-scroll loop reads X and Y from it). */
+  _dragPointer: null as PointerEvent | null,
+  _dragStartTs: 0,
+  _edgeScrollLastTs: null as number | null,
+  /** Business order ids moved by the current (or just-finished) drag gesture, frozen on its first `onMoving` frame
+   *  from vis's own `touchParams.itemProps` (fallback `Selection.ids()`), so a selection change mid-gesture cannot
+   *  change who moves. Stays readable through the drop's synchronous `_onDataSetUpdate` pass (commit code reads
+   *  `Interaction._dragSetIds ?? Selection.ids()`); `_flushDragDeferred` clears it right after that pass. */
+  _dragSetIds: null as string[] | null,
+  /** Writers that were asked to touch vis items mid-drag (a write resets dragged bars to their stored position):
+   *  keys 'rebuild' | 'profile' | 'sibling' | 'range' | 'lock'. Flushed once at drag end. */
+  _deferredWhileDragging: new Set<string>(),
+  _deferredLockIds: new Set<string>(),
+
+  /** First `onMoving` frame of an item drag (idempotent): _isDragging goes true and the edge-scroll loop starts. */
   _beginItemDrag(): void {
-    if (this._dragGate.begin()) this._isDragging = true;
+    if (!this._dragGate.begin()) return;
+    this._isDragging = true;
+    this._dragPointer = null;
+    this._dragSetIds = null;
+    this._multiDropHandled = null;   // a fresh gesture: a second multi-drop of the same ids within 1 s must not be swallowed
+    this._dragStartTs = typeof performance !== 'undefined' ? performance.now() : 0;
+    this._edgeScrollLastTs = null;
+    this._startEdgeScroll();
   },
-  /** pointerup / pointercancel / dropped item's DataSet update (idempotent). On the real end edge, run any
-   *  calendar / tool-inventory refresh that the drag blocked (Persistence._calendarRefreshBlocked). */
+  /** pointerup / pointercancel / dropped item's DataSet update (idempotent). On the real end edge, stop the
+   *  edge-scroll loop, queue the deferred mid-drag work, and run any calendar / tool-inventory refresh that the
+   *  drag blocked (Persistence._calendarRefreshBlocked). */
   _endItemDrag(): void {
     if (!this._dragGate.end()) return;
     this._isDragging = false;
+    if (this._edgeScrollRAF) {
+      if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this._edgeScrollRAF);
+      this._edgeScrollRAF = null;
+    }
+    this._dragPointer = null;
+    const tip = typeof document !== 'undefined' ? document.querySelector('.vis-tooltip') as HTMLElement | null : null;
+    if (tip) tip.style.display = '';
+    // After the drop's synchronous DataSet-update pass (vis fires one update per moved item in one task), so the
+    // commit sees `_dragSetIds` and the flushed writers see the committed Store rows.
+    queueMicrotask(() => Interaction._flushDragDeferred());
     try { Persistence.runDeferredRefreshes().then(changed => { if (changed) Timeline._scheduleRebuild(); }, () => {}); }
     catch (e) { ErrorLog.warn('timeline', 'deferred refresh after drag failed: ' + String(e)); }
   },
-  _lastDragEndTs: 0,          // ms of the last committed drag; gates CENTER_ON_CLICK auto-center
-  _dragMouseX: null as number | null,
-
-  _startEdgeScroll(): void {
-    if (this._edgeScrollRAF) return;
-    const tick = () => {
-      if (!Interaction._isDragging) { Interaction._edgeScrollRAF = null; return; }
-      const tl   = Timeline._tl;
-      const rect = document.querySelector('#vis-timeline')!.getBoundingClientRect();
-      const ZONE = 100;
-      const MAX_SPEED = 0.004;
-      let fraction = 0;
-      if (Interaction._dragMouseX != null) {
-        if (Interaction._dragMouseX < rect.left + ZONE) {
-          fraction = -((rect.left + ZONE - Interaction._dragMouseX) / ZONE);
-        } else if (Interaction._dragMouseX > rect.right - ZONE) {
-          fraction =  (Interaction._dragMouseX - (rect.right - ZONE)) / ZONE;
+  /** Document pointerup / pointercancel (see the listener's comment in install). */
+  _onDocPointerEnd(type?: string): void {
+    Timeline.undimRowsForDrag();
+    if (type === 'pointercancel') Interaction._cancelItemDrag();
+    else setTimeout(() => Interaction._endItemDrag(), 0);
+  },
+  /** pointercancel mid-drag: vis binds no pancancel, so `itemIsDragging` stays true and the bars stay at the raw drag
+   *  position (the deferred rebuild's equality diff would then write nothing). Put each dragged bar back to the data
+   *  it was grabbed with and clear vis's drag state (private fields, every read null-guarded like
+   *  _purgeItemSetGhosts), then end the gate. */
+  _cancelItemDrag(): void {
+    if (this._isDragging) {
+      try {
+        const tl = Timeline._tl as unknown as VisInternalTimeline | null;
+        const tp = tl?.itemSet?.touchParams;
+        if (tp) {
+          if (Array.isArray(tp.itemProps)) {
+            for (const p of tp.itemProps) {
+              if (p?.item && typeof p.item.setData === 'function' && p.data !== undefined) p.item.setData(p.data);
+            }
+          }
+          tp.itemProps = null;
+          tp.itemIsDragging = false;
+          tl?.body?.emitter?.emit?.('_change');
         }
+      } catch (e) { ErrorLog.warn('timeline', 'drag cancel restore failed: ' + String(e)); }
+    }
+    this._endItemDrag();
+  },
+  _lastDragEndTs: 0,          // ms of the last committed drag; gates CENTER_ON_CLICK auto-center
+
+  /** A writer calls this first: while a drag is in flight it records `key` and returns true (skip the write). */
+  _deferWhileDragging(key: string): boolean {
+    if (!this._isDragging) return false;
+    this._deferredWhileDragging.add(key);
+    return true;
+  },
+
+  /** Run everything `_deferWhileDragging` queued, once, plus the drag-set bookkeeping. Skipped while a newer gesture
+   *  is in flight (it flushes at its own end). */
+  _flushDragDeferred(): void {
+    if (this._isDragging) return;
+    const set = this._dragSetIds;
+    this._dragSetIds = null;
+    const keys = new Set(this._deferredWhileDragging);
+    const lockIds = [...this._deferredLockIds];
+    this._deferredWhileDragging.clear();
+    this._deferredLockIds.clear();
+    try {
+      // Re-assert the grabbed set if the selection drifted during the gesture.
+      if (set && set.length > 1) {
+        const live = set.filter(id => Store.tasks[id]);
+        const cur = Selection.ids();
+        if (live.length > 1 && (cur.length !== live.length || live.some(id => !cur.includes(id)))) Selection.set(live);
       }
-      if (fraction !== 0) {
-        const w = tl!.getWindow();
-        const spanMs = w.end.getTime() - w.start.getTime();
-        const shiftMs = fraction * MAX_SPEED * spanMs;
-        tl!.setWindow(
-          new Date(w.start.getTime() + shiftMs),
-          new Date(w.end.getTime()  + shiftMs),
-          { animation: false }
-        );
+      if (keys.has('rebuild')) Timeline._scheduleRebuild();
+      if (keys.has('profile')) Timeline._applyProfileMatchClasses();
+      if (keys.has('sibling')) Interaction._applyDistSiblingHighlight(Selection.ids());
+      for (const id of lockIds) Timeline._applyTaskPatch(id);
+      if (keys.has('range')) { Timeline._syncNonWorking(false); Timeline._refreshViewNow(); }
+    } catch (e) { ErrorLog.warn('interaction', 'deferred drag work failed: ' + String(e)); }
+  },
+
+  /** Freeze the drag set on the first `onMoving` frame (idempotent per gesture). */
+  _captureDragSet(): void {
+    if (this._dragSetIds) return;
+    const ids: string[] = [];
+    const props = (Timeline._tl as unknown as VisInternalTimeline | null)?.itemSet?.touchParams?.itemProps;
+    if (Array.isArray(props)) {
+      for (const p of props) {
+        const itemId = p?.item?.id;
+        if (itemId == null) continue;
+        const bid = Interaction._businessOrderIdForItem(String(itemId));
+        if (bid && !ids.includes(bid)) ids.push(bid);
       }
+    }
+    this._dragSetIds = ids.length ? ids : Selection.ids().map(String);
+  },
+
+  /** vis 'select' safety net (the press recogniser is disabled, so this should not fire): when vis's selection no
+   *  longer matches `Selection`, put it back through the same suppressed setSelection the Selection listener uses.
+   *  A tap is left alone (Interaction._onClick owns click selection); an empty Selection asserts nothing. */
+  _resyncVisSelection(p: unknown): void {
+    if ((p as { event?: { type?: string } } | null)?.event?.type === 'tap') return;
+    const tl = Timeline._tl;
+    if (!tl || Timeline._suppressEvents) return;
+    const want = Selection.ids().flatMap(id => Timeline.itemIdsForTask(id));
+    if (!want.length) return;
+    const have = ((tl as unknown as { getSelection?(): Array<string | number> }).getSelection?.() ?? []).map(String);
+    if (have.length === want.length && want.every(i => have.includes(i))) return;
+    const prior = Timeline._suppressEvents;
+    Timeline._suppressEvents = true;
+    try { tl.setSelection(want); } finally { Timeline._suppressEvents = prior; }
+  },
+
+  /** rAF loop for the duration of an item drag; the per-frame work is `_edgeScrollTick`. */
+  _startEdgeScroll(): void {
+    if (this._edgeScrollRAF || typeof requestAnimationFrame !== 'function') return;
+    const tick = (ts: number): void => {
+      if (!Interaction._isDragging) { Interaction._edgeScrollRAF = null; return; }
       Interaction._edgeScrollRAF = requestAnimationFrame(tick);
+      try { Interaction._edgeScrollTick(ts); }
+      catch (e) { ErrorLog.warn('interaction', 'edge scroll tick failed: ' + String(e)); }
     };
     this._edgeScrollRAF = requestAnimationFrame(tick);
   },
 
-  /** Fires at 60fps during drag — show ghost positions for companion items. */
-  _onTimeChange(props: VisTimeChangeProps): void {
-    if (!props || !props.id || Timeline._suppressEvents) return;
-    const dragItemId = String(props.id);
-    const dragId = Interaction._businessOrderIdForItem(dragItemId);
-    if (!dragId) return;
-
-    this._isDragging = true;
-    this._startEdgeScroll();
-
-    const _tip = document.querySelector('.vis-tooltip') as HTMLElement | null;
-    if (_tip) _tip.style.display = 'none';
-
-    const dragTask = Store.tasks[dragId];
-    if (dragTask) Timeline.dimSetupForDrag(new Set([
-      dragTask.MACHINE || 'Unknown',
-      props.group == null ? (dragTask.MACHINE || 'Unknown') : String(props.group),
-    ]));
-    const selIds = Selection.ids().filter(sid => sid !== dragId);
-    if (!selIds.length) return;
-
-    // A segmented parent regenerates its full aggregate on drop. Do not show
-    // a wall-clock ghost that implies its old nonproductive gaps will move.
-    if (Timeline.hasMultipleItemsForTask(dragId) || selIds.some(id => Timeline.hasMultipleItemsForTask(id))) return;
-
-    const t = Store.tasks[dragId];
-    if (!t || !t.start_date) return;
-    // The commit translates companions by the dragged piece's FINISH delta (OQ1/OQ17 b), so the preview takes
-    // the same basis: vis keeps the live edges of the item being dragged on its internal item data (a body drag
-    // moves both edges, a right-edge resize moves only the end). `props.time` is the item's start, so without
-    // the live end it can only describe a body drag: start plus the stored width.
-    const dragMs = (props.time instanceof Date ? props.time : new Date(props.time)).getTime();
-    const liveEnd = (Timeline._tl as unknown as VisInternalTimeline | null)?.itemSet?.items?.[dragItemId]?.data?.end;
-    const liveEndMs = liveEnd instanceof Date ? liveEnd.getTime() : Number(liveEnd);
-    const dragEndMs = Number.isFinite(liveEndMs)
-      ? liveEndMs
-      : dragMs + (t.end_date ? t.end_date.getTime() - t.start_date.getTime() : 0);
-    const deltaMs = dragEndMs - (t.end_date ? t.end_date.getTime() : t.start_date.getTime());
-
-    this._ghostDragId = dragId;
-    const updates: Array<Partial<TimelineVisItem> & { id: string }> = [];
-
-    // Pre-bucket non-selected, datable tasks by line ONCE per frame (R19) — the old
-    // code re-scanned all of Store.tasksArr for every selected companion, i.e.
-    // O(selected × allTasks) per 60fps frame. Selection (drag id + companions) is
-    // excluded up front so the per-companion check is just an overlap test.
-    const selSet = new Set(Selection.ids().map(String));
-    const peersByLine = new Map<string, NimbusTask[]>();
-    for (const peer of Store.tasksArr) {
-      if (selSet.has(String(peer.id))) continue;
-      if (!peer.start_date || !peer.end_date) continue;
-      const pl = peer.MACHINE || 'Unknown';
-      let arr = peersByLine.get(pl);
-      if (!arr) peersByLine.set(pl, arr = []);
-      arr.push(peer);
+  /** One frame: scroll the window (and, for a single-order drag, the content) when the pointer is in an edge zone,
+   *  and keep the dragged bars under the pointer. vis computes a drag offset as
+   *  toTime(pointerX) - toTime(initialX) against the CURRENT window, so moving the window alone leaves the bars at
+   *  the same absolute time: every dragged item's `initialX` is moved by the scrolled pixels and vis's own
+   *  `ItemSet._onDrag` is re-run with the still pointer. DELIBERATE vis-private touch (itemSet.touchParams,
+   *  itemSet._onDrag): if any of it is missing the loop silently scrolls nothing (pattern: _purgeItemSetGhosts). */
+  _edgeScrollTick(ts: number): void {
+    const last = this._edgeScrollLastTs;
+    this._edgeScrollLastTs = ts;
+    const tip = document.querySelector('.vis-tooltip') as HTMLElement | null;
+    if (tip) tip.style.display = 'none';
+    if (ts - this._dragStartTs < EDGE_ARM_MS) return;
+    const ptr = this._dragPointer;
+    const tl = Timeline._tl;
+    const itl = tl as unknown as VisInternalTimeline | null;
+    const itemSet = itl?.itemSet;
+    const props = itemSet?.touchParams?.itemProps;
+    if (!ptr || !tl || !itemSet || !Array.isArray(props) || !props.length || typeof itemSet._onDrag !== 'function') return;
+    const panel = Timeline._visEl?.querySelector('.vis-panel.vis-center') as HTMLElement | null;
+    if (!panel) return;
+    const r = panel.getBoundingClientRect();
+    const w = tl.getWindow();
+    const startMs = w.start.getTime();
+    const spanMs = w.end.getTime() - startMs;
+    const widthPx = itl?.body?.domProps?.center?.width || panel.clientWidth;
+    const multi = (this._dragSetIds?.length ?? props.length) > 1;
+    const step = edgeScrollStep({
+      x: ptr.clientX, y: ptr.clientY,
+      rect: { left: r.left, right: r.right, top: r.top, bottom: r.bottom },
+      spanMs, widthPx, dtMs: last == null ? 16 : ts - last, multi,
+    });
+    let moved = false;
+    if (step.vPx) {
+      const before = Timeline._getVScroll();
+      Timeline._setVScroll(before - step.vPx);   // vis scrollTop is <= 0: scrolling DOWN decreases it
+      const after = Timeline._getVScroll();
+      if (after !== before) { Timeline._vScrollTop = after; moved = true; }
     }
-
-    const ghostPlant = t.PLANT || Store.getPlantForLine(t.MACHINE || 'Unknown') || Store.selectedPlant;
-    Calendar._beginRun(ghostPlant);   // one calendar cache for every companion's derivation this frame
-    try {
-    for (const sid of selIds) {
-      const st = Store.tasks[sid];
-      if (!st || !st.start_date) continue;
-      // U27: the drop derives each companion's start by the backward walk from its translated finish, so the
-      // ghost does too (its width then matches the dropped bar across a closed day or a shift boundary). The
-      // translated stored edges stay as the fallback when no placement derives.
-      let ghostStart = new Date(st.start_date.getTime() + deltaMs);
-      let ghostEnd   = st.end_date ? new Date(st.end_date.getTime() + deltaMs) : ghostStart;
-      if (st.end_date) {
-        // A multi-drag never changes a line (D5): every companion previews on its OWN line.
-        const derived = Engine.manualRoutingSchedulePatchFor(st, st.MACHINE || 'Unknown',
-          new Date(st.end_date.getTime() + deltaMs), { quiet: true });
-        if (derived?.start_date && derived.end_date) { ghostStart = derived.start_date; ghostEnd = derived.end_date; }
-      }
-      const item = Timeline._items!.get(sid) as TimelineVisItem | null;
-      if (!item) continue;
-
-      // Check for ghost collisions with non-selected tasks on same line.
-      const line = st.MACHINE || 'Unknown';
-      const peers = peersByLine.get(line) || [];
-      const hasConflict = peers.some((peer) =>
-        ghostStart < peer.end_date! && ghostEnd > peer.start_date!
-      );
-
-      const baseCls = (item.className || '').replace(/\s*(ghost|ghost-conflict)\s*/g, '').trim();
-      updates.push({
-        id: sid,
-        start: ghostStart,
-        end: ghostEnd,
-        className: baseCls + (hasConflict ? ' ghost ghost-conflict' : ' ghost')
-      });
-    }
-    } finally { Calendar._endRun(); }
-
-    if (updates.length) {
-      Timeline._suppressEvents = true;
-      try { Timeline._items!.update(updates); }
-      finally { Timeline._suppressEvents = false; }
-    }
-  },
-
-  /** Clear ghost states from all companion items after drag ends. */
-  _clearGhosts(): void {
-    this._dragGate.end();
-    this._isDragging = false;
-    if (this._edgeScrollRAF) { cancelAnimationFrame(this._edgeScrollRAF); this._edgeScrollRAF = null; }
-
-    const _tip = document.querySelector('.vis-tooltip') as HTMLElement | null;
-    if (_tip) _tip.style.display = '';
-
-    const updates: Array<Partial<TimelineVisItem> & { id: string }> = [];
-    for (const sid of Selection.ids()) {
-      const item = Timeline._items!.get(sid) as TimelineVisItem | null;
-      if (!item) continue;
-      const newCls = (item.className || '').replace(/\s*(ghost|ghost-conflict)\s*/g, '').trim();
-      if (newCls !== item.className) {
-        const t = Store.tasks[sid];
-        updates.push({
-          id: sid,
-          start: t?.start_date || item.start,
-          end:   t?.end_date   || item.end,
-          className: newCls
-        });
+    if (step.shiftMs) {
+      tl.setWindow(new Date(startMs + step.shiftMs), new Date(w.end.getTime() + step.shiftMs), { animation: false });
+      // vis clamps to its min/max: compensate by what the window REALLY moved.
+      const actual = tl.getWindow().start.getTime() - startMs;
+      const px = initialXShiftPx(actual, spanMs, widthPx);
+      if (px) {
+        for (const p of props) if (p && typeof p.initialX === 'number') p.initialX -= px;
+        moved = true;
       }
     }
-    if (updates.length) {
-      Timeline._suppressEvents = true;
-      try { Timeline._items!.update(updates); }
-      finally { Timeline._suppressEvents = false; }
+    if (moved) {
+      itemSet._onDrag({ center: { x: ptr.clientX, y: ptr.clientY }, stopPropagation() { /* synthetic */ }, srcEvent: ptr });
     }
-    this._ghostDragId = null;
-    Timeline.finishSetupDrag();
   },
 
   _onKeyDown(e: KeyboardEvent): void {
@@ -6512,6 +6631,7 @@ export const Interaction = {
         <div style="display:flex;flex-direction:column;gap:6px;">
           ${plan.firm.length ? `<button class="btn btn-ghost" data-action="firm">${Util.t('btn.firm_all')}</button>` : ''}
           ${plan.unfirm.length ? `<button class="btn btn-ghost" data-action="unfirm">${Util.t('btn.unfirm_all')}</button>` : ''}
+          <button class="btn btn-ghost" data-action="move-by">${Util.t('btn.move_selected_by')}</button>
           <button class="btn btn-ghost" data-action="unschedule">${Util.t('btn.unschedule_all')}</button>
           <button class="btn btn-ghost" data-action="clear">${Util.t('btn.clear_selection')}</button>
         </div>
@@ -6524,6 +6644,7 @@ export const Interaction = {
     // code and converted the same way).
     panel.querySelector('[data-action="firm"]')?.addEventListener('click', () => Interaction._bulkFirm(true));
     panel.querySelector('[data-action="unfirm"]')?.addEventListener('click', () => Interaction._bulkFirm(false));
+    panel.querySelector('[data-action="move-by"]')?.addEventListener('click', () => { void Interaction.promptMoveBy(Selection.ids()); });
     panel.querySelector('[data-action="unschedule"]')?.addEventListener('click', () => Interaction._unscheduleSelected());
     panel.querySelector('[data-action="clear"]')?.addEventListener('click', () => Selection.clear());
   },

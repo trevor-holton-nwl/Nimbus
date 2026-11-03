@@ -111,7 +111,7 @@ The frozen-horizon far edge is now resolved once per rebuild pass instead of per
 - Demo mode REMOVED (see Wave 2).
 - Note version bump accepted and documented: a note save bumps the order's version and can bounce a colleague's unsaved edit of the same order. Only the failure toast was added.
 - Requiring `base_version` on bulk update (S8-2) and deleting the dead dependency overlay (S3-3) are both left alone, deferred.
-- Drag ghosts and edge auto-scroll are NOT enabled. The owner call is pending.
+- Owner decided 2026-11-03: item-drag edge auto-scroll is implemented and the drag ghost preview code is deleted.
 
 ## 4. Deferred, not done
 
@@ -128,7 +128,6 @@ The frozen-horizon far edge is now resolved once per rebuild pass instead of per
 | S8-2 | Require `base_version` on bulk update; unknown external callers could break. |
 | S8-11 | Notes side table (needs a migration). |
 | S8-10 | Rejected: unauthenticated `GET /tasks` is the documented pilot posture, Entra pending. |
-| Drag ghosts / edge scroll | Owner decision pending (section 3). |
 | `frontend/types/api-generated.d.mts` | The committed file is far behind the backend (6,665-line diff); `TaskVersionRow` was hand-edited. Regenerate in its own change. |
 
 ## 5. Disputed, rejected and corrected findings
