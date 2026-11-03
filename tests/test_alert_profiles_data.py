@@ -99,12 +99,24 @@ def test_ack_upsert_list_expire_delete():
         future = datetime.now() + timedelta(days=1)
         ap.upsert_alert_ack(plant=plant, alert_id="a1", reason="r", until=None, actor="a@x.com")
         ap.upsert_alert_ack(plant=plant, alert_id="a2", reason="r", until=future, actor="a@x.com")
-        ap.upsert_alert_ack(plant=plant, alert_id="a3", reason="r", until=datetime.now() - timedelta(days=1), actor="a@x.com")
+        with pytest.raises(ValueError, match="in the future"):
+            ap.upsert_alert_ack(plant=plant, alert_id="a3", reason="r", until=datetime.now() - timedelta(days=1), actor="a@x.com")
+        with ap._pool.connection() as conn, conn.cursor() as cur:  # an expired row left behind by time passing
+            cur.execute("INSERT INTO alert_ack (plant, alert_id, acknowledged_by, reason, until) VALUES (%s, 'a3', 'a@x.com', 'r', %s)",
+                        (plant, datetime.now() - timedelta(days=2)))
+            conn.commit()
         assert sorted(a["alert_id"] for a in ap.list_alert_acks(plant)) == ["a1", "a2"]
         ap.upsert_alert_ack(plant=plant, alert_id="a1", reason="again", until=None, actor="a@x.com")
         assert [a["reason"] for a in ap.list_alert_acks(plant) if a["alert_id"] == "a1"] == ["again"]
+        # someone else's ack: change refused (owner compared case-insensitively), admin may take over
+        with pytest.raises(ap.AckNotOwner):
+            ap.upsert_alert_ack(plant=plant, alert_id="a1", reason="hijack", until=None, actor="b@x.com")
+        assert ap.upsert_alert_ack(plant=plant, alert_id="a1", reason="mine", until=None, actor="A@X.com")["reason"] == "mine"
+        with pytest.raises(ap.AckNotOwner):
+            ap.delete_alert_ack(plant, "a1", actor="b@x.com")
         assert ap.delete_alert_ack(plant, "a1", actor="a@x.com") is True
         assert ap.delete_alert_ack(plant, "a1", actor="a@x.com") is False
+        assert ap.delete_alert_ack(plant, "a2", actor="b@x.com", is_admin=True) is True
         with ap._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("SELECT count(*) FROM alert_ack WHERE plant=%s AND alert_id='a3'", (plant,))
             assert cur.fetchone()[0] == 0  # expired row purged by a later upsert
@@ -123,8 +135,11 @@ def test_ack_bulk_upsert_round_trip():
         ap.ensure_alert_profile_tables()
         out = ap.upsert_alert_acks(plant=plant, alert_ids=["a3", "a1", "a2", "a1"], reason="first", until=None, actor="a@x.com")
         assert sorted(a["alert_id"] for a in out) == ["a1", "a2", "a3"]
+        with pytest.raises(ap.AckNotOwner):  # a1/a2 belong to a@x.com: nothing is written, not even the new id
+            ap.upsert_alert_acks(plant=plant, alert_ids=["a1", "a2", "a9"], reason="hijack", until=None, actor="b@x.com")
+        assert sorted(a["alert_id"] for a in ap.list_alert_acks(plant)) == ["a1", "a2", "a3"]
         out2 = ap.upsert_alert_acks(plant=plant, alert_ids=["a1", "a2"], reason="second",
-                                    until="2099-01-01T23:59:59", actor="b@x.com")
+                                    until="2099-01-01T23:59:59", actor="A@x.com")
         assert sorted(a["alert_id"] for a in out2) == ["a1", "a2"] and all(a["reason"] == "second" for a in out2)
         listed = {a["alert_id"]: a["reason"] for a in ap.list_alert_acks(plant)}
         assert listed == {"a1": "second", "a2": "second", "a3": "first"}

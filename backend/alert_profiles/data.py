@@ -6,7 +6,8 @@ Datetimes cross this API as naive ISO strings (columns are TIMESTAMP, not TIMEST
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from psycopg import errors as pg_errors
 from psycopg.types.json import Jsonb
@@ -37,12 +38,25 @@ PALETTE: frozenset[str] = frozenset({
 RANKINGS: frozenset[str] = frozenset({"impact", "time", "severity", "orders"})
 MAX_RULES = 20
 MAX_NAME_LEN = 60
+MAX_DESCRIPTION_LEN = 2000
+MAX_REASON_LEN = 200
+MAX_ALERT_ID_LEN = 200
+MAX_BULK_ACK_IDS = 500
 DAY_BOUND = 365
 _SEVERITIES = (None, "warn", "err")
 
 
 class DuplicateName(ValueError):
     """A profile with this name already exists for the plant."""
+
+
+class StaleProfile(ValueError):
+    """`expected_updated_at` no longer matches the stored row (someone else saved first)."""
+
+
+class AckNotOwner(Exception):
+    """The alert is acknowledged by someone else and the actor is not an admin. Deliberately not a ValueError:
+    routes map it to 403, never 400."""
 
 
 def ensure_alert_profile_tables() -> None:
@@ -177,7 +191,8 @@ def validate_rules(rules, allow_empty: bool = False) -> list[dict]:
 
 
 def validate_ranking(ranking) -> str:
-    if ranking not in RANKINGS:
+    # isinstance first: an unhashable JSON value (list/object) would raise TypeError in the frozenset lookup.
+    if not (isinstance(ranking, str) and ranking in RANKINGS):
         raise ValueError(f"ranking must be one of {sorted(RANKINGS)}")
     return ranking
 
@@ -189,6 +204,18 @@ def _validate_name(name) -> str:
     if len(name) > MAX_NAME_LEN:
         raise ValueError(f"name must be at most {MAX_NAME_LEN} characters")
     return name
+
+
+def _validate_description(description) -> str:
+    """Trimmed text, '' for null; anything but a string or null is a 400, not a 500."""
+    if description is None:
+        return ""
+    if not isinstance(description, str):
+        raise ValueError("description must be text")
+    description = description.strip()
+    if len(description) > MAX_DESCRIPTION_LEN:
+        raise ValueError(f"description must be at most {MAX_DESCRIPTION_LEN} characters")
+    return description
 
 
 def _require_plant(plant) -> str:
@@ -246,7 +273,7 @@ def create_alert_profile(*, plant, name, rules, ranking, description="", actor, 
     ranking = validate_ranking(ranking)
     gantt_colors = validate_gantt_colors(gantt_colors)
     show_acknowledged = validate_show_acknowledged(show_acknowledged)
-    description = (description or "").strip() if isinstance(description, (str, type(None))) else str(description)
+    description = _validate_description(description)
     pid = uuid.uuid4().hex
     try:
         with _pool.connection() as conn, conn.cursor() as cur:
@@ -269,7 +296,9 @@ def update_alert_profile(profile_id, *, name=None, rules=None, ranking=None, des
                          actor, expected_updated_at: str | None = None, categories=_UNSET,
                          gantt_colors=None, show_acknowledged=None) -> dict | None:
     """Patch the supplied fields. Returns None if the profile does not exist; raises
-    ValueError('stale') when expected_updated_at no longer matches the row.
+    StaleProfile when expected_updated_at no longer matches the row. When nothing is supplied (every field None and
+    `categories` omitted) the stored row is returned untouched: no UPDATE, no updated_at bump, no audit row.
+    (The route makes expected_updated_at mandatory; the data layer keeps it optional for internal callers.)
 
     `categories`: omitted keeps the stored value; an explicit None reverts the profile to groups derived from its
     rules (which then needs at least one rule); a map replaces it (and lets `rules` be empty).
@@ -281,6 +310,7 @@ def update_alert_profile(profile_id, *, name=None, rules=None, ranking=None, des
     new_rules = validate_rules(rules, allow_empty=new_categories is not None or new_categories is _UNSET) \
         if rules is not None else None
     new_ranking = validate_ranking(ranking) if ranking is not None else None
+    new_description = _validate_description(description) if description is not None else None
     new_gantt = validate_gantt_colors(gantt_colors) if gantt_colors is not None else None
     new_show_acked = validate_show_acknowledged(show_acknowledged) if show_acknowledged is not None else None
     try:
@@ -291,12 +321,15 @@ def update_alert_profile(profile_id, *, name=None, rules=None, ranking=None, des
                 return None
             current = _profile_row(r)
             if expected_updated_at is not None and current["updated_at"] != expected_updated_at:
-                raise ValueError("stale")
+                raise StaleProfile("stale")
+            if (new_name is None and new_rules is None and new_ranking is None and new_description is None
+                    and new_categories is _UNSET and new_gantt is None and new_show_acked is None):
+                return current
             merged = {
                 "name": new_name if new_name is not None else current["name"],
                 "rules": new_rules if new_rules is not None else current["rules"],
                 "ranking": new_ranking if new_ranking is not None else current["ranking"],
-                "description": (description or "").strip() if description is not None else current["description"],
+                "description": new_description if new_description is not None else current["description"],
                 "categories": current["categories"] if new_categories is _UNSET else new_categories,
                 "gantt_colors": new_gantt if new_gantt is not None else current["gantt_colors"],
                 "show_acknowledged": new_show_acked if new_show_acked is not None else current["show_acknowledged"],
@@ -336,12 +369,54 @@ def delete_alert_profile(profile_id, *, actor) -> dict | None:
 
 _ACK_COLS = "plant, alert_id, acknowledged_by, reason, until, created_at"
 
-# `until` is a naive plant-local wall-clock end-of-day (the client sends `YYYY-MM-DDT23:59:59`), so expiry is judged
-# against the plant's local "now", not the DB session zone (UTC on Azure). The plant's IANA zone comes from
-# `plants.timezone` (one value per plant; blank or unset falls back to UTC, the same convention as the SAP views).
-# One bind parameter: the plant.
-_PLANT_NOW_SQL = ("(NOW() AT TIME ZONE COALESCE("
-                  "NULLIF((SELECT MIN(timezone) FROM plants WHERE plant = %s), ''), 'UTC'))")
+
+def validate_reason(reason) -> str:
+    """Required, trimmed, at most MAX_REASON_LEN characters."""
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("reason is required")
+    reason = reason.strip()
+    if len(reason) > MAX_REASON_LEN:
+        raise ValueError(f"reason must be at most {MAX_REASON_LEN} characters")
+    return reason
+
+
+def validate_alert_id(alert_id) -> str:
+    if not isinstance(alert_id, str) or not alert_id.strip():
+        raise ValueError("alert_id is required")
+    if len(alert_id) > MAX_ALERT_ID_LEN:
+        raise ValueError(f"alert_id must be at most {MAX_ALERT_ID_LEN} characters")
+    return alert_id
+
+
+def validate_alert_ids(alert_ids) -> list:
+    """1..MAX_BULK_ACK_IDS non-empty strings, each at most MAX_ALERT_ID_LEN. Returned as given: the writer sorts and
+    de-duplicates."""
+    if not isinstance(alert_ids, (list, tuple)) or not alert_ids:
+        raise ValueError("alert_ids must be a non-empty list")
+    if len(alert_ids) > MAX_BULK_ACK_IDS:
+        raise ValueError(f"alert_ids must have at most {MAX_BULK_ACK_IDS} entries")
+    if any(not isinstance(a, str) or not a.strip() for a in alert_ids):
+        raise ValueError("alert_ids must be non-empty strings")
+    if any(len(a) > MAX_ALERT_ID_LEN for a in alert_ids):
+        raise ValueError(f"alert_ids must be at most {MAX_ALERT_ID_LEN} characters each")
+    return alert_ids
+
+
+def _plant_now(cur, plant: str) -> datetime:
+    """The plant's local wall-clock "now" as a naive datetime.
+
+    `until` is a naive plant-local wall-clock end-of-day (the client sends `YYYY-MM-DDT23:59:59`), so expiry is judged
+    against the plant's local "now", not the DB session zone (UTC on Azure). The IANA zone comes from
+    `plants.timezone` (one value per plant). Blank, unset, or an unknown/invalid name falls back to UTC (the same
+    convention as the SAP views) instead of failing every ack read and write for the plant."""
+    cur.execute("SELECT MIN(timezone) FROM plants WHERE plant = %s", (plant,))
+    r = cur.fetchone()
+    name = ((r[0] if r else None) or "").strip()
+    try:
+        tz = ZoneInfo(name) if name else timezone.utc
+    except Exception:  # unknown key, malformed name, missing tzdata: never let a bad zone 500 the acks
+        tz = timezone.utc
+    return datetime.now(tz).replace(tzinfo=None)
 
 
 def _ack_row(r) -> dict:
@@ -352,85 +427,125 @@ def _ack_row(r) -> dict:
 def list_alert_acks(plant: str) -> list[dict]:
     """Active acknowledgements only (no expiry, or expiry in the future)."""
     with _pool.connection() as conn, conn.cursor() as cur:
+        now = _plant_now(cur, plant)
         cur.execute(
-            f"SELECT {_ACK_COLS} FROM alert_ack WHERE plant = %s AND (until IS NULL OR until > {_PLANT_NOW_SQL})"
-            " ORDER BY alert_id", (plant, plant))
+            f"SELECT {_ACK_COLS} FROM alert_ack WHERE plant = %s AND (until IS NULL OR until > %s)"
+            " ORDER BY alert_id", (plant, now))
         return [_ack_row(r) for r in cur.fetchall()]
 
 
 def _parse_until(until):
-    if until is None or isinstance(until, datetime):
-        return until
+    """Naive plant-local datetime or None. Offsets / `Z` and date-only strings are rejected: the value is a wall
+    clock in the plant's zone, and a bare date would silently mean midnight."""
+    if until is None:
+        return None
     if isinstance(until, str):
+        text = until.strip()
+        if "T" not in text and " " not in text:
+            raise ValueError("until must be a date and time (YYYY-MM-DDTHH:MM:SS) or null")
         try:
-            return datetime.fromisoformat(until)
+            until = datetime.fromisoformat(text)
         except ValueError as e:
             raise ValueError("until must be an ISO datetime or null") from e
-    raise ValueError("until must be an ISO datetime or null")
+    elif not isinstance(until, datetime):
+        raise ValueError("until must be an ISO datetime or null")
+    if until.tzinfo is not None:
+        raise ValueError("until must be the plant's local time without a time zone offset")
+    return until
 
 
-def upsert_alert_ack(*, plant, alert_id, reason="", until=None, actor) -> dict:
+def _require_future(until, now: datetime) -> None:
+    if until is not None and until <= now:
+        raise ValueError("until must be in the future")
+
+
+# An existing ack may be overwritten by its owner (any case) or by an admin (`%s::boolean`); anyone else gets no row.
+_OWNER_OR_ADMIN_SQL = "(lower(alert_ack.acknowledged_by) = lower(EXCLUDED.acknowledged_by) OR %s::boolean)"
+
+
+def upsert_alert_ack(*, plant, alert_id, reason="", until=None, actor, is_admin: bool = False) -> dict:
+    """Acknowledge one alert. If an active ack by another user exists and the actor is not an admin, raises
+    AckNotOwner (nothing written); the same owner may re-ack to change the reason or `until`."""
     plant = _require_plant(plant)
-    if not isinstance(alert_id, str) or not alert_id.strip():
-        raise ValueError("alert_id is required")
+    alert_id = validate_alert_id(alert_id)
+    reason = validate_reason(reason)
     until = _parse_until(until)
-    reason = reason or ""
     with _pool.connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            f"DELETE FROM alert_ack WHERE plant = %s AND until IS NOT NULL AND until <= {_PLANT_NOW_SQL}",
-            (plant, plant))
+        now = _plant_now(cur, plant)
+        _require_future(until, now)
+        cur.execute("DELETE FROM alert_ack WHERE plant = %s AND until IS NOT NULL AND until <= %s", (plant, now))
         cur.execute(
             "INSERT INTO alert_ack (plant, alert_id, acknowledged_by, reason, until)"
             " VALUES (%s, %s, %s, %s, %s)"
             " ON CONFLICT (plant, alert_id) DO UPDATE SET acknowledged_by = EXCLUDED.acknowledged_by,"
             " reason = EXCLUDED.reason, until = EXCLUDED.until, created_at = NOW()"
+            f" WHERE {_OWNER_OR_ADMIN_SQL}"
             f" RETURNING {_ACK_COLS}",
-            (plant, alert_id, actor, reason, until),
+            (plant, alert_id, actor, reason, until, bool(is_admin)),
         )
-        row = _ack_row(cur.fetchone())
+        r = cur.fetchone()
+        if r is None:  # the conflicting row belongs to someone else: the guarded DO UPDATE touched nothing
+            raise AckNotOwner("This alert is already acknowledged by someone else")
+        row = _ack_row(r)
         _audit(cur, "alert_ack", "ack", {"plant": plant, "alert_id": alert_id, "name": alert_id}, actor)
         conn.commit()
         return row
 
 
-def upsert_alert_acks(*, plant, alert_ids, reason="", until=None, actor) -> list[dict]:
+def upsert_alert_acks(*, plant, alert_ids, reason="", until=None, actor, is_admin: bool = False) -> list[dict]:
     """Acknowledge many alerts of one plant in a single transaction (one purge, one multi-row upsert, one audit
     row). Duplicate ids collapse and ids are written in sorted order. Returns the active acks for those ids, ordered by alert_id (the
-    `list_alert_acks` shape)."""
+    `list_alert_acks` shape). If any id already has an active ack by another user and the actor is not an admin,
+    raises AckNotOwner and nothing is written (the transaction rolls back)."""
     plant = _require_plant(plant)
-    if not isinstance(alert_ids, (list, tuple)) or not alert_ids:
-        raise ValueError("alert_ids must be a non-empty list")
-    if any(not isinstance(a, str) or not a.strip() for a in alert_ids):
-        raise ValueError("alert_ids must be non-empty strings")
     # Sorted (and de-duplicated) so concurrent overlapping bulk acks take row locks in one global order (no deadlock).
-    ids = sorted(set(alert_ids))
+    ids = sorted(set(validate_alert_ids(alert_ids)))
+    reason = validate_reason(reason)
     until = _parse_until(until)
-    reason = reason or ""
     with _pool.connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            f"DELETE FROM alert_ack WHERE plant = %s AND until IS NOT NULL AND until <= {_PLANT_NOW_SQL}",
-            (plant, plant))
+        now = _plant_now(cur, plant)
+        _require_future(until, now)
+        cur.execute("DELETE FROM alert_ack WHERE plant = %s AND until IS NOT NULL AND until <= %s", (plant, now))
+        if not is_admin:  # check before writing anything; locks the contested rows in id order
+            cur.execute(
+                "SELECT alert_id FROM alert_ack WHERE plant = %s AND alert_id = ANY(%s)"
+                " AND lower(acknowledged_by) <> lower(%s) ORDER BY alert_id FOR UPDATE", (plant, ids, actor))
+            if cur.fetchall():
+                raise AckNotOwner("Some of these alerts are already acknowledged by someone else")
         cur.execute(
             "INSERT INTO alert_ack (plant, alert_id, acknowledged_by, reason, until)"
             " SELECT %s, x, %s, %s, %s FROM unnest(%s::text[]) AS x"
             " ON CONFLICT (plant, alert_id) DO UPDATE SET acknowledged_by = EXCLUDED.acknowledged_by,"
-            " reason = EXCLUDED.reason, until = EXCLUDED.until, created_at = NOW()",
-            (plant, actor, reason, until, ids))
+            " reason = EXCLUDED.reason, until = EXCLUDED.until, created_at = NOW()"
+            f" WHERE {_OWNER_OR_ADMIN_SQL}",
+            (plant, actor, reason, until, ids, bool(is_admin)))
+        if cur.rowcount != len(ids):  # a rival ack landed after the check: undo the batch
+            raise AckNotOwner("Some of these alerts are already acknowledged by someone else")
         cur.execute(
             f"SELECT {_ACK_COLS} FROM alert_ack WHERE plant = %s AND alert_id = ANY(%s)"
-            f" AND (until IS NULL OR until > {_PLANT_NOW_SQL}) ORDER BY alert_id",
-            (plant, ids, plant))
+            " AND (until IS NULL OR until > %s) ORDER BY alert_id",
+            (plant, ids, now))
         rows = [_ack_row(r) for r in cur.fetchall()]
         _audit(cur, "alert_ack", "ack", {"plant": plant, "count": len(ids), "alert_ids": ids[:50]}, actor)
         conn.commit()
         return rows
 
 
-def delete_alert_ack(plant, alert_id, *, actor) -> bool:
+def delete_alert_ack(plant, alert_id, *, actor, is_admin: bool = False) -> bool:
+    """Remove one active ack by primary key. True if removed; False if there is no active ack (missing or already
+    expired); raises AckNotOwner when it exists but belongs to someone else and the actor is not an admin."""
     with _pool.connection() as conn, conn.cursor() as cur:
-        cur.execute("DELETE FROM alert_ack WHERE plant = %s AND alert_id = %s", (plant, alert_id))
-        removed = cur.rowcount > 0
-        if removed:
+        now = _plant_now(cur, plant)
+        cur.execute(
+            "DELETE FROM alert_ack WHERE plant = %s AND alert_id = %s AND (until IS NULL OR until > %s)"
+            " AND (lower(acknowledged_by) = lower(%s) OR %s::boolean) RETURNING alert_id",
+            (plant, alert_id, now, actor, bool(is_admin)))
+        if cur.fetchone() is not None:
             _audit(cur, "alert_ack", "unack", {"plant": plant, "alert_id": alert_id, "name": alert_id}, actor)
-        conn.commit()
-        return removed
+            conn.commit()
+            return True
+        cur.execute("SELECT 1 FROM alert_ack WHERE plant = %s AND alert_id = %s AND (until IS NULL OR until > %s)",
+                    (plant, alert_id, now))
+        if cur.fetchone() is not None:
+            raise AckNotOwner("Only the acknowledger or an admin can remove this acknowledgement")
+        return False
