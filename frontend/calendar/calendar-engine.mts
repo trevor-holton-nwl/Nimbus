@@ -363,8 +363,10 @@ export const Calendar = {
     return globalThis.NimbusComputeCore!.effectiveFromCapacity(line, full, Store.lineSettings as any);
   },
 
-  effectiveCapacityHours(line: string, date: Date): number {
-    return Calendar.effectiveFromCapacity(line, Calendar.dailyCapacityHours(line, date));
+  /** Pass `idx` (from `_indexCapacityBlocks()`, built once per pass) from a (line x day) loop so the blocks are
+   *  parsed once instead of per call; the result is identical to the no-idx path. */
+  effectiveCapacityHours(line: string, date: Date, idx?: CapacityBlockIndex): number {
+    return Calendar.effectiveFromCapacity(line, Calendar.dailyCapacityHours(line, date, idx));
   },
 
   /** Advances `from` forward until a contiguous block of `durationMs` is
