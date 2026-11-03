@@ -6817,3 +6817,19 @@ test('P0-9: a setup-incompatible line emits no missing_setup finding or schedule
   assert.equal(result.missingEdges.some(edge => edge.reason === 'scheduled-without-setup'), false);
   assert.ok(result.missingEdges.some(edge => edge.line === 'L1' && edge.reason === 'setup-compatibility-disabled'));
 });
+
+test('P0-10: repairCandidate queues a patch-less scheduled incumbent that has a setup error, within a bounded pass count', () => {
+  const snap = TF.toolSnapshot([
+    { id: 'A', line: 'L1', run: 1.5, tools: ['T1'], start: '2035-08-06T09:00:00', end: '2035-08-06T10:30:00', color: 'GREEN' },
+    { id: 'B', line: 'L1', run: 1, tools: ['T2'], due: '2035-08-09T08:00:00', start: '2035-08-06T11:00:00', end: '2035-08-06T12:00:00', color: 'RED' },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }, { tool_id: 'T2', total_qty: 1 }] });
+  snap.setupSnapshot.plant_rows = [{ machine: '', signature_version: 1, from_key: setupState('GREEN'), to_key: setupState('RED'), setup_min: 60 }];
+  snap.tasks.find(t => t.id === 'A').COLOR = 'GREEN';
+  const bounds = TF.toolBounds(snap);
+  const cand = toolCandidate([sched('A', '2035-08-06T09:00:00', '2035-08-06T10:30:00')], [dispOf('A', 'L1'), dispOf('B', 'L1')]);
+  const out = SetupScheduler.resolveToolOverflow(snap, bounds, cand);
+  const b = out.patches.find(p => p.id === 'B');
+  assert.ok(b, 'B is queued by a patch');
+  assert.equal(b.changes.planning_status, 'needs_planning');
+  assert.deepEqual((out.validationFindings ?? []).filter(f => f.severity === 'error'), []);
+});

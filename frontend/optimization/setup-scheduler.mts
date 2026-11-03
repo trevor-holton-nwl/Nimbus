@@ -7873,8 +7873,21 @@ function repairCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<
       const ceiling = task ? notAfterFor(bounds, task) : null;
       return task && end !== null && ceiling && +end > +ceiling ? pushLimitAware(bounds, task, generic) : generic;
     };
-    const repairPatches = result.patches.map(patch => reasonBy.has(patch.id) ? { id: patch.id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning' as const, planning_reason: queueReason(patch.id) } } : patch);
+    const queueChanges = (id: string): SchedulePatch => ({ id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning' as const, planning_reason: queueReason(id) } });
+    const repairPatches = result.patches.map(patch => reasonBy.has(patch.id) ? queueChanges(patch.id) : patch);
+    // An unchanged scheduled incumbent has no patch to rewrite: queue it with a new one (protected orders never queue).
+    const patchedIds = new Set(result.patches.map(patch => patch.id));
+    let queuedNew = false;
+    for (const d of result.dispositions ?? []) {
+      if (reasonBy.has(d.id) && d.status === 'scheduled' && !patchedIds.has(d.id)) { repairPatches.push(queueChanges(d.id)); queuedNew = true; }
+    }
     const repaired = (result.dispositions ?? []).map(d => reasonBy.has(d.id) && d.status !== 'protected' ? { ...d, status: 'needs_planning' as const, reason: queueReason(d.id) } : d);
+    // Nothing to queue or relabel this pass: re-validating would only repeat the same findings.
+    const sameReason = (a: { code: string; message: string } | null | undefined, b: { code: string; message: string }): boolean => !!a && a.code === b.code && a.message === b.message;
+    const changedAny = queuedNew
+      || result.patches.some(patch => reasonBy.has(patch.id) && (patch.changes.planning_status !== 'needs_planning' || !sameReason(patch.changes.planning_reason, queueReason(patch.id))))
+      || (result.dispositions ?? []).some(d => reasonBy.has(d.id) && d.status !== 'protected' && (d.status !== 'needs_planning' || !sameReason(d.reason, queueReason(d.id))));
+    if (!changedAny) break;
     result = { ...result, patches: repairPatches, dispositions: repaired };
     result = { ...result, validationFindings: validateCandidate(snapshot, bounds, result) };
   }
