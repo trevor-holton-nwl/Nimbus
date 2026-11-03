@@ -82,6 +82,7 @@ declare global {
           _api?: NimbusVendor.AgGridApi;
           _openOverrideModalForId?(id: string): void;
           _applyChipFilter?(patch: any): void;
+          filterToOrders?(orderNumbers: string[]): boolean;
         };
         Store?: {
           tasks?: Record<string, NimbusTask>;
