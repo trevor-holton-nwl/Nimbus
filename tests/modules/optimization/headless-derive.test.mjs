@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import { wireWithUnplaced, PLANT, SERVER_NOW } from '../helpers/headless-wire-fixture.mjs';
 
 const { hydrateStoreLikeBrowser } = await import('../helpers/browser-store-hydrate.mjs');
-const { snapshotSchedule } = await import('../../../frontend/optimization/engine.mjs');
+const { Engine, snapshotSchedule } = await import('../../../frontend/optimization/engine.mjs');
+const { Store } = await import('../../../frontend/platform/store.mjs');
 const { buildScheduleSnapshot } = await import('../../../frontend/optimization/headless-snapshot.mjs');
 const { deriveDisplayStarts } = await import('../../../frontend/optimization/headless-runtime.mjs');
 
@@ -58,3 +59,26 @@ test('the input snapshot is not modified by the derivation', () => withClock(() 
   deriveDisplayStarts(base, { plant: PLANT, serverNow: SERVER_NOW });
   assert.deepEqual(base, before);
 }));
+
+// P0-21: derive reads one pinned clock. Store.serverNow drifts with wall time since the wire was received, so a minute
+// boundary crossed mid-derive (serverNow hh:mm:59.9) would read two different "now"s inside one reconcile.
+test('P0-21: the clock the reconcile reads is the injected instant, however long the derive takes', () => {
+  const serverNow = new Date(SERVER_NOW.getTime() + 59_900);
+  let tick = 0;
+  const realNow = Date.now;
+  Date.now = () => serverNow.getTime() + (tick += 400);   // wall time advances 400 ms per read
+  const priorReconcile = Engine.reconcileRuntimeSchedules;
+  const seen = [];
+  Engine.reconcileRuntimeSchedules = function (plant) {
+    seen.push(Store.serverNow().getTime());
+    seen.push(Store.serverNow().getTime());
+    return priorReconcile.call(this, plant);
+  };
+  try {
+    deriveDisplayStarts(buildScheduleSnapshot(wireWithUnplaced(), { plant: PLANT, serverNow }), { plant: PLANT, serverNow });
+  } finally {
+    Engine.reconcileRuntimeSchedules = priorReconcile;
+    Date.now = realNow;
+  }
+  assert.deepEqual(seen, [serverNow.getTime(), serverNow.getTime()]);
+});

@@ -73,9 +73,17 @@ export function deriveDisplayStarts(snapshot: ScheduleSnapshot, opts: DeriveOpti
   // The reconcile reports through toasts and the derive-paused banner; a headless run has neither.
   const toast = Toast.show;
   Toast.show = (): void => undefined;
+  // One clock for the whole pass. `Store.serverNow()` drifts with wall time since the wire was received, so a derive
+  // that straddles a minute boundary would otherwise read two different "now"s (and differ run to run).
+  const pinned = opts.serverNow.getTime();
+  const store = Store as unknown as { serverNow: () => Date };
+  const hadOwn = Object.prototype.hasOwnProperty.call(store, 'serverNow');
+  const ownServerNow = store.serverNow;
+  store.serverNow = (): Date => new Date(pinned);
   try {
     Engine.reconcileRuntimeSchedules(opts.plant);
   } finally {
+    if (hadOwn) store.serverNow = ownServerNow; else delete (store as Partial<typeof store>).serverNow;
     Toast.show = toast;
   }
   return snapshotSchedule(opts.plant);
