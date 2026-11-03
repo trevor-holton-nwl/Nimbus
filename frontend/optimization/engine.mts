@@ -69,7 +69,7 @@ import { Runtime } from '../routing/runtime-client.mjs';
 import { Calendar, candidateAllDayWorkHours, candidateDefaultWorkHours } from '../calendar/calendar-engine.mjs';
 import { CalendarSync } from '../calendar/calendar-sync.mjs';
 import { Persistence } from '../scheduling/persistence.mjs';
-import { Alerts, scheduleAlertsForPatches, taskCarriesTool, taskCarriesDistribution } from '../insights/services.mjs';
+import { Alerts, taskCarriesTool, taskCarriesDistribution } from '../insights/services.mjs';
 import {
   chargedSetupMinutesFor,
   placeWithSetup as placeWithSetupPure,
@@ -1116,19 +1116,6 @@ function detachedCandidateResult(
    see the comment inline in runAndApply below).
    ========================================================================== */
 export const Engine = {
-  /** Structured result from the latest explicit Remove Backlog trial. The
-   * preview consumes it immediately after `runAndApply`; all other modes clear
-   * it so stale diagnostics cannot leak into their shared preview. */
-  lastBacklogResult: null as RemoveBacklogResult | null,
-
-  /** Full `CandidateResult` from the latest applied setup-aware run (mirrors
-   * `lastBacklogResult`). Lets the preview / diagnostics UI inspect the same
-   * `missingEdges`/`unchangedLines` the live toast summary was derived from,
-   * without re-running the evaluator. Only set on a live (non-candidateRun)
-   * setup-aware apply — never cleared by other modes since it is read
-   * on-demand, not consumed-and-wiped like `lastBacklogResult`. */
-  lastSetupAwareResult: null as CandidateResult | null,
-
   /** Evaluate the detached forward placement path (the optimizer's retained forward placement) against a deep,
    * detached snapshot. This is synchronous, so the private source selector is
    * always cleared before another caller can observe it. */
@@ -1142,8 +1129,7 @@ export const Engine = {
     _candidateDiagnostics = [];
     const _pmT0es = performance.now();
     try {
-      return Engine.runAndApply(mode, { ...opts, __candidateRun: true })
-        ?? detachedCandidateResult([], _pmT0es);
+      return Engine._evaluateDetached(mode, opts);
     } finally {
       _candidateSnapshot = null;
       _candidateDiagnostics = null;
@@ -2759,90 +2745,71 @@ export const Engine = {
     return fields;
   },
 
-  /** Main optimiser. Groups by line, optionally respects firmed + calendar.
-   *  Writes results through Store.
+  /** The detached optimizer body behind `evaluateSchedule` (the only caller; it
+   *  installs `_candidateSnapshot` first). Groups by line, optionally respects
+   *  firmed + calendar, and returns a `CandidateResult` of patches: it never
+   *  writes Store, raises toasts or touches Alerts/Undo. Apply is the caller's
+   *  explicit step (`applySchedulePatches`, or the Optimize preview's Apply).
    *  opts.plant restricts to lines belonging to that plant. Priority ranks are
-   *  no longer passed in — _sortTerms resolves them from Store.priorityRankMaps
-   *  (kept current for the selected plant by Persistence.loadPriorityRankMaps),
-   *  and every caller's effective plant IS Store.selectedPlant.
+   *  not passed in: the scheduler reads them from the snapshot's
+   *  `priorityRankMaps`.
    *  opts.deadlineAt (Phase 2, Pkg D): an optional absolute performance.now()
    *  timestamp for the setup-aware evaluators' search deadline, consumed where
    *  DueDateFirstBounds.deadline is built below. Absent it, a fresh
    *  SETUP_AWARE_DEADLINE_MS window is used, unchanged from before. */
-  runAndApply(mode: OptimizerMode = 'changeover', opts: Record<string, unknown> = {}): CandidateResult | void {
+  _evaluateDetached(mode: OptimizerMode = 'changeover', opts: Record<string, unknown> = {}): CandidateResult {
     const _pmT0e = performance.now();
-    const candidateRun = opts.__candidateRun === true;
-    // Mirrors lastBacklogResult's lifecycle: cleared at the top of every real
-    // (non-candidate) run so it never goes stale after a later non-setup-aware
-    // run, and always reflects the most recent live apply (F8).
-    if (!candidateRun) Engine.lastSetupAwareResult = null;
-    if (!sourceTasks().length) {
-      if (!candidateRun) Toast.show(Util.t('toast.no_tasks_to_optimise'), 'error');
-      return candidateRun ? detachedCandidateResult([], _pmT0e) : undefined;
-    }
+    if (!sourceTasks().length) return detachedCandidateResult([], _pmT0e);
     const plant: string | null = (opts.plant as string | null | undefined) ?? sourceSelectedPlant();
-    if (!plant) {
-      if (!candidateRun) Toast.show(Util.t('toast.select_plant_before_opt'), 'warn');
-      return candidateRun ? detachedCandidateResult([], _pmT0e, 'no-plant') : undefined;
-    }
+    if (!plant) return detachedCandidateResult([], _pmT0e, 'no-plant');
     // Remove Backlog is a schedule-repair pass, not an optimizer. Dispatch it
     // before priority-term creation so this path cannot accidentally read rank
     // maps, firmed protection, or the day-integrity resequencer.
     if (mode === 'backlog') {
       const backlogDates = normalizeBacklogRunDates(plant, opts);
       const result = Engine.removeBacklog({ ...opts, plant, runAt: backlogDates.runAt });
-      if (candidateRun) {
-        const baselineSnapshot = _candidateSnapshot ?? snapshotSchedule(plant);
-        const validationSetup = Engine._syntheticZeroCostSetupSnapshot(plant, baselineSnapshot);
-        const maxPatchedEnd = result.patches.reduce((latest, patch) => {
-          const end = finiteDate(patch.changes.end_date)?.getTime() ?? NaN;
-          return Number.isFinite(end) ? Math.max(latest, end) : latest;
-        }, backlogDates.to.getTime());
-        const validationHorizon = new Date(Math.min(8_640_000_000_000_000, maxPatchedEnd + 1));
-        const allowedLines = Array.isArray(opts.lines) && opts.lines.length
-          ? new Set((opts.lines as unknown[]).map(String)) : null;
-        const backlogScope = backlogValidationScope(
-          baselineSnapshot, plant, allowedLines, backlogDates.from, backlogDates.to, new Set(result.diagnostics.runningHeldIds ?? []),
-        );
-        const placementStart = new Date(Math.max(backlogDates.from.getTime(), backlogDates.now.getTime()));
-        const backlogBounds: DueDateFirstBounds = {
-          setup: validationSetup,
-          exactSearchThreshold: SETUP_AWARE_EXACT_SEARCH_THRESHOLD,
-          iterationCap: SETUP_AWARE_ITERATION_CAP,
-          clock: () => performance.now(),
-          deadline: (opts.deadlineAt as number | undefined) ?? performance.now() + SETUP_AWARE_DEADLINE_MS,
-          now: placementStart,
-          planningStart: backlogDates.from,
-          runNow: backlogDates.now,
-          placementStart,
-          horizonEnd: validationHorizon,
-          lines: Array.isArray(opts.lines) ? (opts.lines as unknown[]).map(String) : undefined,
-          scopeTaskIds: backlogScope.scopeTaskIds,
-          boundaryTaskIds: backlogScope.boundaryTaskIds,
-          respectCalendar: true,
-          notBefore: () => null,
-          notAfter: () => null,
-          // X3: Backlog removal is exempt from the plant's pull/push window (candidate time and Apply time).
-          ignorePlantWindow: true,
-          // Tool Inventory: Remove Backlog is exempt from the tool rule (no pass, no finding, no static defect).
-          ignoreToolRule: true,
-        };
-        return attachDetachedValidationContext(
-          detachedCandidateResult(result.patches, _pmT0e, 'completed', result),
-          baselineSnapshot,
-          backlogBounds,
-          new Set(),
-        );
-      }
-      Engine.lastBacklogResult = result;
-      if (result.patches.length) Store.updateMany(result.patches, 'engine-backlog');
-      Store.setLastOptimize(new Date(), 'engine-backlog');
-      Alerts.clearDismissed();
-      Alerts.scheduleRecompute();
-      PerfMonitor.record('Engine.runAndApply', performance.now() - _pmT0e);
-      return;
+      const baselineSnapshot = _candidateSnapshot ?? snapshotSchedule(plant);
+      const validationSetup = Engine._syntheticZeroCostSetupSnapshot(plant, baselineSnapshot);
+      const maxPatchedEnd = result.patches.reduce((latest, patch) => {
+        const end = finiteDate(patch.changes.end_date)?.getTime() ?? NaN;
+        return Number.isFinite(end) ? Math.max(latest, end) : latest;
+      }, backlogDates.to.getTime());
+      const validationHorizon = new Date(Math.min(8_640_000_000_000_000, maxPatchedEnd + 1));
+      const allowedLines = Array.isArray(opts.lines) && opts.lines.length
+        ? new Set((opts.lines as unknown[]).map(String)) : null;
+      const backlogScope = backlogValidationScope(
+        baselineSnapshot, plant, allowedLines, backlogDates.from, backlogDates.to, new Set(result.diagnostics.runningHeldIds ?? []),
+      );
+      const placementStart = new Date(Math.max(backlogDates.from.getTime(), backlogDates.now.getTime()));
+      const backlogBounds: DueDateFirstBounds = {
+        setup: validationSetup,
+        exactSearchThreshold: SETUP_AWARE_EXACT_SEARCH_THRESHOLD,
+        iterationCap: SETUP_AWARE_ITERATION_CAP,
+        clock: () => performance.now(),
+        deadline: (opts.deadlineAt as number | undefined) ?? performance.now() + SETUP_AWARE_DEADLINE_MS,
+        now: placementStart,
+        planningStart: backlogDates.from,
+        runNow: backlogDates.now,
+        placementStart,
+        horizonEnd: validationHorizon,
+        lines: Array.isArray(opts.lines) ? (opts.lines as unknown[]).map(String) : undefined,
+        scopeTaskIds: backlogScope.scopeTaskIds,
+        boundaryTaskIds: backlogScope.boundaryTaskIds,
+        respectCalendar: true,
+        notBefore: () => null,
+        notAfter: () => null,
+        // X3: Backlog removal is exempt from the plant's pull/push window (candidate time and Apply time).
+        ignorePlantWindow: true,
+        // Tool Inventory: Remove Backlog is exempt from the tool rule (no pass, no finding, no static defect).
+        ignoreToolRule: true,
+      };
+      return attachDetachedValidationContext(
+        detachedCandidateResult(result.patches, _pmT0e, 'completed', result),
+        baselineSnapshot,
+        backlogBounds,
+        new Set(),
+      );
     }
-    if (!candidateRun) Engine.lastBacklogResult = null;
     // CQ-1 Phase 2 Task 3: the pre-migration DOM-read fallback
     // (`document.getElementById('chk-respect-fixed'/'chk-respect-calendar')`)
     // referenced ids that do not exist anywhere in index.html/app.js's
@@ -2872,7 +2839,7 @@ export const Engine = {
       fallback.setSeconds(0, 0);
       return plantWallClockFromInstant(plantTimezone, fallback) ?? fallback;
     };
-    const injectedNow = candidateRun ? readDate(opts.now, 'now', true) : null;
+    const injectedNow = readDate(opts.now, 'now', true);
     const explicitRunNow = hasExplicitDate(opts.runNow) ? readDate(opts.runNow, 'runNow', true)
       : hasExplicitDate(opts.runAt) ? readDate(opts.runAt, 'runAt', true)
         : injectedNow;
@@ -2904,9 +2871,7 @@ export const Engine = {
           events: [],
         },
       };
-      if (candidateRun) return invalid;
-      Toast.show(invalid.explanation[0].message, 'error');
-      return;
+      return invalid;
     }
     if (horizonEnd <= placementStart) {
       const invalid: CandidateResult = {
@@ -2920,9 +2885,7 @@ export const Engine = {
           events: [],
         },
       };
-      if (candidateRun) return invalid;
-      Toast.show('The optimizer horizon must end after the effective placement start.', 'error');
-      return;
+      return invalid;
     }
 
     // "Include Setup Times in Optimizer" (plants.setup_active, surfaced as
@@ -3062,134 +3025,7 @@ export const Engine = {
         }),
       };
     }
-    if (candidateRun) return result;
-    if (result.validationFindings?.some(finding => finding.severity === 'error')) {
-      Engine.lastSetupAwareResult = result;
-      return result;
-    }
-    if (result.patches.length) {
-      const patchIds = new Set(result.patches.map(patch => patch.id));
-      const undoTasks = structuredClone(snapshot.tasks.filter(task => patchIds.has(String(task.id))));
-      UndoStack.push(`Optimization (${mode})`, () => UndoStack.restoreTasks(undoTasks), patchIds);
-    }
-    applySchedulePatches(result.patches);
-    Engine.lastSetupAwareResult = result;
-    Store.setLastOptimize(new Date(), 'engine');
-    const hadDismissed = Alerts.clearDismissed();
-    // Phase 3 (Pkg E): scope the recompute to the lines these patches actually
-    // touched instead of a full-plant recompute. `byId` (built above from the
-    // pre-apply snapshot) resolves each patch id to its line/MACHINE; patches
-    // never change MACHINE, so pre- and post-apply line membership match.
-    // If any alert was dismissed before this apply, a scoped merge would
-    // retain untouched lines' stale (dismissal-filtered) alert lists as-is —
-    // those cleared dismissals would never re-surface until some later full
-    // recompute. A pending full recompute already wins over a scoped one by
-    // design, so force it whenever there was something to clear.
-    if (hadDismissed) Alerts.scheduleRecompute();
-    else scheduleAlertsForPatches(result.patches, id => byId.get(String(id))?.MACHINE || 'Unknown', id => byId.get(String(id)));
-    // Surface the never-freeze fallbacks that actually landed in this apply:
-    // orders scheduled without a resolvable setup transition (no changeover
-    // bar) and, separately, any line still guarded off entirely (only
-    // firmed/override protection can do that now — see Part 1f). Both are
-    // derived from the applied patches, never the whole-run diagnostics, so
-    // a line-scoped/excludeFromOpt run only reports what it actually
-    // touched.
-    const patchedIds = new Set(result.patches.filter(patch => patch.changes.planning_status !== 'needs_planning').map(patch => String(patch.id)));
-    const unknownSetupOrderIds = new Set<string>();
-    const unknownSetupLines = new Set<string>();
-    // 'scheduled-without-setup' (F1) is the single dedicated reason for an
-    // order actually placed without a resolvable setup transition — emitted
-    // both by `placeUnknownTail` (tail placement) and, since A1, by
-    // `candidateForSequence`'s in-sequence admission of a known-but-uncovered
-    // transition. Counting this reason instead of the raw
-    // 'successor-state-unknown'/'initial-state-unknown' partition edges
-    // avoids double-counting a rejected permutation's edge that happens to
-    // name the same patched id.
-    for (const edge of result.missingEdges) {
-      if (edge.reason !== 'scheduled-without-setup') continue;
-      if (!edge.successorOrderId || !patchedIds.has(String(edge.successorOrderId))) continue;
-      unknownSetupOrderIds.add(String(edge.successorOrderId));
-      unknownSetupLines.add(edge.line);
-    }
-    // A null successor signature is intentionally kept out of the covered
-    // permutation core. Its deterministic tail placement is a distinct
-    // unresolved-state fact, so include it in the same operator warning
-    // without relabeling the edge as a known uncovered transition.
-    for (const reason of result.explanation) {
-      if (reason.code !== 'unknown-setup-tail-placement' || !reason.taskId || !patchedIds.has(String(reason.taskId))) continue;
-      unknownSetupOrderIds.add(String(reason.taskId));
-      unknownSetupLines.add(reason.line ?? byId.get(String(reason.taskId))?.MACHINE ?? 'Unknown');
-    }
-    // B3a: a synthetic (fabricated zero-cost) snapshot's matrix is always
-    // empty by construction, so its uncovered-but-admitted edges are an
-    // artifact of routing an inactive/never-configured plant through this
-    // evaluator at all — never a real data gap the plant needs to fix.
-    // Suppress ONLY this missing-setup-summary toast for a synthetic run.
-    // The two toasts below (orders left in place / lines guarded) are NOT
-    // setup-specific — they report genuine unplaced orders or untouched
-    // lines for reasons that have nothing to do with setup data (e.g. a
-    // permanently-uncalendarable order), so they must fire regardless of
-    // `synthetic`. Blanket-suppressing them for every setup-inactive plant
-    // would silently violate the never-freeze invariant's own "drops can't
-    // happen silently" guarantee for the majority of NIMBUS plants — those
-    // that haven't activated setup tracking. A genuinely active-and-
-    // matching snapshot (synthetic undefined/false) is unaffected either way.
-    if (unknownSetupOrderIds.size && !effectiveSetupSnapshot.synthetic) {
-      Toast.show(Util.t('toast.optimize_missing_setup_summary', {
-        orders: unknownSetupOrderIds.size,
-        lines: unknownSetupLines.size,
-      }), 'warn');
-    }
-    // Sub-order distribution separation (SAP aggregate work center -> per-
-    // machine sub-orders): report parents whose siblings landed in
-    // different calendar buckets, same post-hoc pattern as the push-
-    // forward cap above and NOT gated on `synthetic` — separation is a
-    // scheduling-outcome fact, not a setup-data fact, so it applies to
-    // every plant regardless of setup-tracking activation.
-    const distributionSeparationCount = result.validationFindings?.filter(f => f.code === 'distribution_separation').length ?? 0;
-    if (distributionSeparationCount) {
-      Toast.show(Util.t('toast.optimize_distribution_separation', { parents: distributionSeparationCount }), 'warn');
-    }
-    // B3: derive the unplaced set by difference, in this one place, rather
-    // than threading an unplacedOrderIds field through CandidateResult —
-    // the worst drops (plant/line mismatch, this same opts.lines/
-    // excludeFromOpt post-filter, a firmed order the setup-aware path never
-    // touches) produce no diagnostic object at all, so there is nothing for
-    // a threaded field to collect. An order that places successfully
-    // always yields a patch — even when its dates are unchanged — so
-    // "in scope, not firmed, not patched" is exactly "not scheduled".
-    // Scoping uses the SAME plant resolution as B7 (`t.PLANT ||
-    // sourceGetPlantForLine(t.MACHINE)`) so this reporting and the
-    // setup-aware evaluators' own scoping agree on which orders exist for
-    // this plant. "Firmed" here means membership in `effectiveFirmedIds` —
-    // the SAME effectively-folded set (manual firms, gated by
-    // respectFirmed, plus the unconditional running/frozen fold; see
-    // effectiveFirmedIdSet) actually handed to the evaluator above, not
-    // just a manual `sourceIsFirmed` check — so a running or
-    // frozen-horizon order the evaluator deliberately left untouched is
-    // never miscounted here as "left in place".
-    const unplacedLines = new Set<string>();
-    let unplacedCount = 0;
-    for (const task of snapshot.tasks) {
-      const id = String(task.id);
-      if (patchedIds.has(id)) continue;
-      if (effectiveFirmedIds.has(id)) continue;
-      const taskPlant = task.PLANT || sourceGetPlantForLine(task.MACHINE);
-      if (taskPlant !== plant) continue;
-      const line = task.MACHINE || 'Unknown';
-      if (allowedLines && !allowedLines.has(line)) continue;
-      if (sourceLineSettings()[line]?.excludeFromOpt) continue;
-      unplacedCount += 1;
-      unplacedLines.add(line);
-    }
-    if (unplacedCount) {
-      Toast.show(`${unplacedCount} order(s) on ${unplacedLines.size} line(s) need planning. These orders have no committed schedule dates.`, 'warn');
-    }
-    if (result.unchangedLines.length) {
-      Toast.show(Util.t('toast.optimize_lines_guarded', { count: result.unchangedLines.length }), 'warn');
-    }
-    PerfMonitor.record('Engine.runAndApply', performance.now() - _pmT0e);
-    return;
+    return result;
   },
 
   /** After a manual edit to one task, re-flow subsequent unfirmed orders on the

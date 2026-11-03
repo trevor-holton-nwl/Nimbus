@@ -12,7 +12,7 @@
 //             (deterministic clock, never-expiring deadline, tiny search caps)
 //   engine  - Engine.evaluateSchedule on the same snapshot (adds gap-fill)
 //   worker  - buildOptimizerWorkerResponse, compared with the engine pass
-//   live    - Engine.runAndApply against a real Store, in ONE spawnSync child
+//   live    - evaluate-and-apply against a real Store, in ONE spawnSync child
 //             so Store/Toast/Persistence state stays out of this process
 // and judged by checkInvariants() below, which derives every bound from the
 // scenario inputs alone. It never calls Engine.earliestAllowedStart,
@@ -467,7 +467,7 @@ for (const testCase of CASES) {
   }
 }
 
-// Live runAndApply: ONE child process loops over every (case, mode), applying
+// Live evaluate-and-apply (helpers/run-and-apply.mjs): ONE child process loops over every (case, mode), applying
 // into a real Store, and prints the resulting tasks as JSON.
 let liveResults = null;
 function liveRun() {
@@ -480,6 +480,7 @@ function liveRun() {
     globalThis.document = { getElementById: () => null };
     const { Store } = await import('./frontend/platform/store.mjs');
     const { Engine } = await import('./frontend/optimization/engine.mjs');
+    const { runAndApply } = await import('./tests/modules/helpers/run-and-apply.mjs');
     const F = await import('./tests/modules/helpers/order-rules-fixture.mjs');
     const jobs = JSON.parse(process.env.ORDER_RULES_JOBS);
     const out = {};
@@ -494,7 +495,7 @@ function liveRun() {
       Store.replaceBlocks(snapshot.blocks, 'child-test');
       Store.replaceFirmedIds(new Set(spec.firmed), 'child-test');
       Store.setTasks(snapshot.tasks, 'child-test');
-      Engine.runAndApply(job.mode, {
+      runAndApply(job.mode, {
         plant: 'P1', respectFirmed: true, respectCalendar: true,
         runNow: F.at(spec.now), startDate: F.at(spec.now), endDate: F.at(spec.horizonEnd),
       });
@@ -511,8 +512,8 @@ function liveRun() {
     cwd: process.cwd(), encoding: 'utf8', timeout: 20000,
     env: { ...process.env, ORDER_RULES_JOBS: JSON.stringify(jobs) },
   });
-  assert.equal(run.error, undefined, `live runAndApply probe did not complete: ${run.error?.message || run.stderr}`);
-  assert.equal(run.status, 0, run.stderr || 'live runAndApply probe exited unsuccessfully');
+  assert.equal(run.error, undefined, `live evaluate-and-apply probe did not complete: ${run.error?.message || run.stderr}`);
+  assert.equal(run.status, 0, run.stderr || 'live evaluate-and-apply probe exited unsuccessfully');
   const line = run.stdout.split('\n').find(text => text.startsWith('@@RESULT@@'));
   assert.ok(line, `live probe printed no result: ${run.stdout.slice(-400)}`);
   liveResults = JSON.parse(line.slice('@@RESULT@@'.length));
@@ -521,7 +522,7 @@ function liveRun() {
 
 CASES.forEach((testCase, index) => {
   for (const { mode, label } of MODES) {
-    test(`live Engine.runAndApply ${label}: ${testCase.name}`, options(testCase, 'live', mode), () => {
+    test(`live evaluate-and-apply ${label}: ${testCase.name}`, options(testCase, 'live', mode), () => {
       const spec = normalizeScenario(testCase.spec);
       judge(testCase, normalizeRows(spec, fromStoreTasks(liveRun()[`${index}:${mode}`])), 'live', mode);
     });
@@ -676,6 +677,7 @@ function liveToolRun() {
     globalThis.document = { getElementById: () => null };
     const { Store } = await import('./frontend/platform/store.mjs');
     const { Engine } = await import('./frontend/optimization/engine.mjs');
+    const { runAndApply } = await import('./tests/modules/helpers/run-and-apply.mjs');
     const F = await import('./tests/modules/helpers/order-rules-fixture.mjs');
     const jobs = JSON.parse(process.env.ORDER_RULES_TOOL_JOBS);
     const out = {};
@@ -690,7 +692,7 @@ function liveToolRun() {
       Store.replaceBlocks(snapshot.blocks, 'child-test');
       Store.replaceFirmedIds(new Set(spec.firmed), 'child-test');
       Store.setTasks(snapshot.tasks, 'child-test');
-      Engine.runAndApply(job.mode, {
+      runAndApply(job.mode, {
         plant: 'P1', respectFirmed: true, respectCalendar: true,
         runNow: F.at(spec.now), startDate: F.at(spec.now), endDate: F.at(spec.horizonEnd),
       });
@@ -719,7 +721,7 @@ function liveToolRun() {
 CASES.forEach((testCase, index) => {
   for (const { mode, label } of MODES) {
     for (const tool of TOOL_VARIANTS) {
-      test(`tooling ${tool} parity, live Engine.runAndApply ${label}: ${testCase.name}`, options(testCase, 'live', mode), () => {
+      test(`tooling ${tool} parity, live evaluate-and-apply ${label}: ${testCase.name}`, options(testCase, 'live', mode), () => {
         const all = liveToolRun();
         const strip = rows => JSON.stringify(rows.map(r => ({ ...r, planning_reason: r.planning_reason && { code: r.planning_reason.code, message: r.planning_reason.message } })));
         assert.equal(strip(all[`${index}:${mode}:${tool}`]), strip(all[`${index}:${mode}:`]), 'live result identical to the snapshot with no inventory');

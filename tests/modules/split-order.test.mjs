@@ -5,6 +5,7 @@ import { Calendar } from '../../frontend/calendar/calendar-engine.mjs';
 import { CalendarSync } from '../../frontend/calendar/calendar-sync.mjs';
 import { Engine } from '../../frontend/optimization/engine.mjs';
 import { Store } from '../../frontend/platform/store.mjs';
+import { runAndApply } from './helpers/run-and-apply.mjs';
 
 const require = createRequire(import.meta.url);
 const Core = require('../../frontend/nimbus-compute-core.js');
@@ -304,7 +305,7 @@ test('standard scheduling regenerates an in-window logical parent as one split a
     end_date: new Date(horizonStart.getTime() + 60 * 60 * 1000),
   }], 'test');
 
-  Engine.runAndApply('spt', {
+  runAndApply('spt', {
     plant, lines: [line], startDate: horizonStart, endDate: horizonEnd,
     respectFirmed: true, respectCalendar: true,
   });

@@ -16,6 +16,7 @@ import { Session } from '../../../frontend/security/session.mjs';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { Engine } from '../../../frontend/optimization/engine.mjs';
+import { runAndApply } from '../helpers/run-and-apply.mjs';
 import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
 import { buildOptimizerWorkerResponse } from '../../../frontend/optimization/optimizer-worker.mjs';
 
@@ -1029,7 +1030,10 @@ test('SandboxAdapter restores optimizer side effects on What-If discard before a
 
     confidence.score = 41;
     confidence.history.push({ ts: 2, score: 41 });
-    Engine.runAndApply('spt', { plant, respectFirmed: true, respectCalendar: false });
+    runAndApply('spt', { plant, respectFirmed: true, respectCalendar: false });
+    // The Optimize preview's Apply (not the detached engine) stamps these two; do the same so the What-If state changes.
+    Store.setLastOptimize(new Date(), 'engine');
+    Alerts.clearDismissed();
     assert.notDeepEqual(Store.tasksArr, beforeTasks,
       'the optimizer run must change the What-If schedule before discard restores it');
     assert.notEqual(Store.lastOptimize?.getTime(), baselineLastOptimize.getTime(),

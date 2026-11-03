@@ -247,9 +247,9 @@ test('Alerts publishes scoped setup observations without invoking Engine, includ
     machine_states: [{ machine: 'L-ALERT', state_key: state('GREEN'), signature_version: 1, source: 'manual', reason: 'unit test' }],
     overrides: [],
   }, 'unit-test');
-  const originalRun = Engine.runAndApply;
+  const originalRun = Engine.evaluateSchedule;
   let engineRuns = 0;
-  Engine.runAndApply = (...args) => { engineRuns++; return originalRun.apply(Engine, args); };
+  Engine.evaluateSchedule = (...args) => { engineRuns++; return originalRun.apply(Engine, args); };
   try {
     Alerts._recomputeSync({ lines: new Set(['L-ALERT']) });
     const setupAlert = Store.alerts.find(alert => alert.type === 'setup-uncovered');
@@ -258,7 +258,7 @@ test('Alerts publishes scoped setup observations without invoking Engine, includ
     Alerts._recomputeSync({ lines: new Set(['L-ALERT']) });
     assert.equal(engineRuns, 0, 'setup observation alerts must never invoke Engine, even after explicit Fix It');
   } finally {
-    Engine.runAndApply = originalRun;
+    Engine.evaluateSchedule = originalRun;
   }
 });
 
@@ -470,11 +470,11 @@ test('gate 23 b: the overload auto-fix (detached candidate, Wave 5) leaves exact
 test('VM6: the overload auto-fix refuses a plant with no valid time zone and runs no optimizer', () => {
   const plant = 'NOTZ-PLANT', line = 'NOTZ-LINE';
   const priorPlant = Store.selectedPlant, priorAlerts = structuredClone(Store.alerts), priorMasterData = Store.masterData;
-  const priorRun = Engine.runAndApply, priorShow = Toast.show;
+  const priorRun = Engine.evaluateSchedule, priorShow = Toast.show;
   const shown = [];
   Toast.show = (msg, type) => { shown.push(type); };
   let ran = false;
-  Engine.runAndApply = () => { ran = true; };
+  Engine.evaluateSchedule = () => { ran = true; return { patches: [] }; };
   Store.setSelectedPlant(plant, 'unit-test');
   Store.setMasterData({ plants: [{ plant }], lines: [{ machine: line, plant }] }, 'unit-test');
   Store.setAlerts([{ id: 'notz-alert', type: 'overload', line, time: new Date('2026-08-25T00:00:00') }], 'unit-test');
@@ -483,7 +483,7 @@ test('VM6: the overload auto-fix refuses a plant with no valid time zone and run
     assert.equal(ran, false);
     assert.ok(shown.includes('error'), 'the Optimize-dialog refusal toast is shown (plantNow adds its own one-time warn)');
   } finally {
-    Engine.runAndApply = priorRun; Toast.show = priorShow;
+    Engine.evaluateSchedule = priorRun; Toast.show = priorShow;
     Store.setAlerts(priorAlerts, 'unit-test'); Store.setSelectedPlant(priorPlant, 'unit-test'); Store.setMasterData(priorMasterData, 'unit-test');
   }
 });
