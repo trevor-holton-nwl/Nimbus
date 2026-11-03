@@ -1,15 +1,18 @@
 /* =============================================================================
    N.I.M.B.U.S. Intelligence Layer  (nimbus-intelligence.js)
-   Loaded after app.js — extends window.NIMBUS with 10 intelligence modules.
+   Loaded after app.js — a classic script (it reads NIMBUS as a bare identifier) that
+   extends NIMBUS with the intelligence modules below. Plain statements, not the
+   exact module list of any other doc: line counts and module counts are not
+   repeated here because they go stale (see frontend/shell/CLAUDE.md).
 
    Modules:
-     IntelDB         — IndexedDB store backing history/patterns
+     IntelDB         — IndexedDB store backing the Time Machine history
      NeedsEngine     — "needs attention" suggestions
      DarkMode        — theme toggle
      LangSwitcher    — language selector
      CommandPalette  — Cmd+K fuzzy search overlay
      TimeMachine     — IndexedDB-backed history scrubber
-     Confidence      — live 0-100 schedule health score + sparkline
+     Confidence      — live 0-100 schedule health score (badge ring + breakdown dialog)
      (Alert cells are now native vis-timeline background items — see app.js)
      RipplePreview   — Alt-hover downstream-shift preview
      Diff            — snapshot diff viewer
@@ -149,10 +152,6 @@
 .ni-cp-input { flex:1; border:none; outline:none; background:transparent;
   font-size:15px; font-family:inherit; color:var(--fg); caret-color:var(--accent); }
 .ni-cp-input::placeholder { color:var(--fg-faint); }
-.ni-cp-kbd-badge { font-size:10px; font-weight:700; letter-spacing:0.06em;
-  background:var(--bg-subtle); border:1px solid var(--line-strong);
-  border-radius:6px; padding:2px 8px; color:var(--fg-mute);
-  flex-shrink:0; box-shadow:0 1px 0 var(--line-strong); }
 
 .ni-cp-results { flex:1; min-height:0; overflow-y:auto; padding:6px 0; }
 .ni-cp-results::-webkit-scrollbar { width:4px; }
@@ -249,12 +248,6 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 /* ── Language Switcher Pill ──────────────────────────────── */
 #ni-lang-pill{width:100px;min-width:70px;height:28px;padding:3px 6px;border-radius:var(--r-sm);background:var(--bg-elev);border:1px solid var(--line-strong);cursor:pointer;font-size:11px;font-weight:600;color:var(--fg);}
 #ni-lang-pill:hover{border-color:var(--accent);}
-.ni-lang-caret{font-size:9px;opacity:.7;}
-.ni-lang-dropdown{display:none;position:absolute;bottom:calc(100% + 6px);left:0;min-width:160px;background:var(--bg-elev);border:1px solid var(--line-strong);border-radius:8px;overflow:hidden;box-shadow:0 4px 16px rgba(0,0,0,.18);z-index:9999;}
-.ni-lang-dropdown.ni-lang-open{display:block;}
-.ni-lang-opt{display:block;width:100%;padding:7px 12px;background:none;border:none;text-align:left;font-size:12px;color:var(--fg);cursor:pointer;}
-.ni-lang-opt:hover{background:var(--bg-hover,rgba(255,255,255,.06));}
-.ni-lang-opt.ni-lang-active{color:var(--accent);font-weight:600;}
 
 /* ── Command palette close button ───────────────────────── */
 .ni-cp-close-btn {
@@ -399,7 +392,6 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
   background:var(--amber,#c68f24); margin-right:5px; vertical-align:middle;
   animation:ni-need-pulse 1.8s ease-in-out infinite; }
 @keyframes ni-need-pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.45;transform:scale(0.7)} }
-.ni-cp-hint kbd { font-family:inherit; }
 `;
     document.head.appendChild(s);
   })();
@@ -521,26 +513,6 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         const req = tx.objectStore(store).get(key);
         req.onsuccess = e => res(e.target.result || null);
         req.onerror   = e => rej(e.target.error);
-      });
-    },
-
-    getAll(store) {
-      if (!IntelDB._db) return Promise.resolve([]);
-      return new Promise((res, rej) => {
-        const tx  = IntelDB._db.transaction(store, 'readonly');
-        const req = tx.objectStore(store).getAll();
-        req.onsuccess = e => res(e.target.result || []);
-        req.onerror   = e => rej(e.target.error);
-      });
-    },
-
-    deleteRecord(store, key) {
-      if (!IntelDB._db) return Promise.resolve();
-      return new Promise((res, rej) => {
-        const tx = IntelDB._db.transaction(store, 'readwrite');
-        tx.objectStore(store).delete(key);
-        tx.oncomplete = res;
-        tx.onerror    = e => rej(e.target.error);
       });
     },
 
@@ -1865,11 +1837,6 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           Confidence._lastRev = null;
           const scoreEl = document.getElementById('ni-conf-score');
           if (scoreEl) { scoreEl.textContent = '—'; scoreEl.style.color = ''; }
-          // Vestigial: #ni-conf-spark no longer exists (sparkline retired for the
-          // conic-gradient ring below) — this optional-chains to a no-op and is
-          // left as dead code rather than removed (see task-5-report.md).
-          const sparkCtx = document.getElementById('ni-conf-spark')?.getContext('2d');
-          if (sparkCtx) sparkCtx.clearRect(0, 0, 48, 20);
           // Reset the ring to a neutral/empty state for the reset window — _score
           // is already forced to 100 above, so calling _updateRing() here would
           // briefly flash a full green ring before the debounced recompute below
@@ -1997,8 +1964,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       Confidence._updateRing();
     },
 
-    // Conic-gradient ring — REPLACES the old canvas sparkline (_sparkline(),
-    // retired; it drew into a #ni-conf-spark canvas that no longer exists).
+    // Conic-gradient ring (it replaced the old canvas sparkline).
     // Color thresholds are the exact mockup hex values, deliberately NOT the
     // --ok/--warn/--err tokens: the ring is a distinct, fixed-hex color
     // treatment from the breakdown popover's own chart (_drawChart below),
@@ -2386,15 +2352,6 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     }
   };
 
-  /* Alert-cell highlights are now native vis-timeline background items, built
-     inside Timeline.rebuild() (app.js). This module was a canvas overlay that
-     couldn't layer correctly behind foreground items — removed in favor of the
-     library's native .vis-background channel. Cleanup any stale canvas the old
-     version may have left in the DOM. */
-  (function _cleanupLegacyAlertCanvas() {
-    document.querySelectorAll('#ni-alert-cells, #ni-stress-canvas').forEach(n => n.remove());
-  })();
-
   /* ==========================================================================
      RIPPLE PREVIEW — Alt+hover shows downstream task shift ghosts
      ========================================================================== */
@@ -2541,12 +2498,6 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
   const DIFF_ROW_CAP = 200;
 
   const Diff = {
-    _fmtDate(ms) {
-      if (!ms) return '—';
-      const d = new Date(ms);
-      return Util.fmtDayLabelPref(d) + ' ' + Util._fmtTimePref(d);
-    },
-
     _fmtShort(ms) {
       if (!ms) return '—';
       const d = new Date(ms);
@@ -2638,10 +2589,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       added.forEach(a => bump(a.MACHINE, 'added'));
       removed.forEach(r => bump(r.MACHINE, 'removed'));
 
-      return {
-        moved, added, removed, lineImpact,
-        summary: `${moved.length} moved · ${added.length} added · ${removed.length} removed`,
-      };
+      return { moved, added, removed, lineImpact };
     },
 
     // Renders at most `limit` rows (rescheduled first, largest shift first, then added, then removed); the rest sit
@@ -2898,13 +2846,6 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         if (pairs[key] === Patterns._THRESHOLD)
           Toast.show(t('toast.pattern_detected', { key }), 'info', 4500);
       }
-    },
-
-    getSuggestions() {
-      return Object.entries(Patterns._pairs)
-        .filter(([,c]) => c >= Patterns._THRESHOLD)
-        .sort((a,b) => b[1] - a[1])
-        .map(([key, count]) => ({ key, count }));
     }
   };
 

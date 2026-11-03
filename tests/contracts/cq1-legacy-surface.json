@@ -581,7 +581,6 @@
     "Util.escapeHtml",
     "Util.fmtDTShortPref",
     "Util.fmtDateShortPref",
-    "Util.fmtDayLabelPref",
     "Util.norm",
     "Util.scheduleIntervals",
     "Util.startOfDay",
