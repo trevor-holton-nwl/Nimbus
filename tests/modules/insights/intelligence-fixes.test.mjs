@@ -213,6 +213,22 @@ test('_readState: a day filled exactly to capacity is not overloaded; the overlo
   } finally { Utilization.computeMatrix = prior; }
 });
 
+test('_readState: a fully buffered day (full capacity > 0, effective 0) is an overload need; a closed day is not (B4)', () => {
+  const prior = Utilization.computeMatrix;
+  try {
+    withPlant('RN-P', [], () => {
+      Utilization.computeMatrix = () => ({ L1: { '2026-11-03': { scheduled: 3, effectiveCapacity: 0, capacity: 0 } } });
+      let s = NeedsEngine._readState();
+      assert.equal(s.overloadedLine, null, 'capacity 0 is a closed day, not a buffered one');
+      Utilization.computeMatrix = () => ({ L1: { '2026-11-03': { scheduled: 3, effectiveCapacity: 0, capacity: 8 } } });
+      s = NeedsEngine._readState();
+      assert.equal(s.overloadedLine, 'L1');
+      assert.equal(s.overloadedDay, '2026-11-03');
+      assert.ok(Number.isFinite(s.maxUtil) && s.maxUtil >= 1, 'a finite ratio, never Infinity');
+    });
+  } finally { Utilization.computeMatrix = prior; }
+});
+
 test('_readState: an order with a finish and no stored start is not "unscheduled" (C6)', () => {
   const day = Date.now();
   withPlant('RN-P', [

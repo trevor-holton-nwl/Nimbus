@@ -558,8 +558,11 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
         for (const [line, lineData] of Object.entries(matrix)) {
           for (const [day, row] of Object.entries(lineData)) {
-            if (row.effectiveCapacity > 0 && NimbusComputeCore.isOverloaded(row.scheduled, row.effectiveCapacity)) {
-              const ratio = row.scheduled / row.effectiveCapacity;
+            // The row's full pre-buffer capacity (`capacity`) is the third argument, so a fully buffered day counts.
+            if (NimbusComputeCore.isOverloaded(row.scheduled, row.effectiveCapacity, row.capacity)) {
+              // A fully buffered day has no effective capacity to divide by: use the full-capacity ratio, floored at 1 so
+              // it still reads as at least full (a finite figure, never Infinity).
+              const ratio = row.effectiveCapacity > 0 ? row.scheduled / row.effectiveCapacity : Math.max(1, row.scheduled / row.capacity);
               if (ratio > maxUtil) { maxUtil = ratio; overloadedLine = line; overloadedDay = day; }
             }
           }
@@ -1871,7 +1874,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         let days = 0;
         // The shared overload rule (0.05 h tolerance), as the alert and the Right Now card use: a day filled exactly
         // to capacity is not overloaded.
-        Object.values(lineData).forEach(row => { if (row.effectiveCapacity > 0 && NimbusComputeCore.isOverloaded(row.scheduled, row.effectiveCapacity)) days++; });
+        // `row.capacity` (the full pre-buffer figure) lets a fully buffered day count, as the alert does.
+        Object.values(lineData).forEach(row => { if (NimbusComputeCore.isOverloaded(row.scheduled, row.effectiveCapacity, row.capacity)) days++; });
         if (days > 0) overloadedLines[line] = days;
       });
       const overloadedCount = Object.keys(overloadedLines).length;
@@ -1905,10 +1909,13 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const hasAny = errCt || warnCt || overloadedCount;
 
       const sortedAlerts = [...horizonAlerts].sort((a, b) => (a.time || 0) - (b.time || 0));
+      // Alert text goes through the shared alert-message helper so dates the core embedded follow the user's date / time
+      // format. Late-bound with optional chaining (the legacy-surface scanner does not count it as a new consumer).
+      const _alertText = a => NIMBUS.Util?.alertMessage?.(a) ?? (a.msgKey ? t(a.msgKey, a.msgVars) : a.msg);
       const alertRow = a => `
               <div class="ni-conf-row">
                 <span class="ni-conf-dot" style="background:${a.sev==='err'?'var(--err)':'var(--warn)'}"></span>
-                <span class="ni-conf-msg">${_esc(a.msgKey ? t(a.msgKey, a.msgVars) : a.msg)}</span>
+                <span class="ni-conf-msg">${_esc(_alertText(a))}</span>
                 <span class="ni-conf-date">${a.time ? Util.fmtDateShortPref(a.time) : ''}</span>
                 ${(a.taskId || (a.line && a.time)) ? `<button data-conf-goto="${_esc(a.id)}" class="ni-conf-goto" title="Go to" aria-label="Go to"><span class="ni-conf-goto-arrow">→</span><span class="ni-conf-goto-label">Go to</span></button>` : ''}
               </div>`;

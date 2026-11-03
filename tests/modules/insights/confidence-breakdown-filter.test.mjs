@@ -163,3 +163,39 @@ test('the overloaded tile lists lines with days over capacity, most days first, 
     assert.match(html, /<details class="ni-conf-alerts" open/);
   });
 });
+
+test('the alert list shows embedded dates in the user format and still escapes the text (msgDates)', async () => {
+  await withBreakdown(async ({ dlg, setMatrix }) => {
+    setMatrix({});
+    const priorFmt = nimbus.Util.fmtDTReadable;
+    nimbus.Util.fmtDTReadable = () => 'USER-FMT <b>';
+    const ms = Date.now() + 86400000;
+    Store.setAlerts([
+      { id: 'd1', type: 'firmed-out-of-hours', sev: 'warn', line: 'L1', taskId: 't1', time: new Date(ms),
+        msg: 'Order starts 11/04/2026 08:00 outside hours', msgDates: [{ text: '11/04/2026 08:00', ms }] },
+    ], 'test');
+    try {
+      await Confidence.showBreakdown();
+      const html = dlg.region();
+      assert.match(html, /Order starts USER-FMT &lt;b&gt; outside hours/, 'default-format text swapped for the user format, then escaped');
+      assert.doesNotMatch(html, /11\/04\/2026 08:00/);
+      assert.doesNotMatch(html, /<b>/, 'the swapped text is still escaped');
+    } finally { nimbus.Util.fmtDTReadable = priorFmt; }
+  });
+});
+
+test('the overloaded-lines count includes a fully buffered day (capacity > 0, effective capacity 0)', async () => {
+  await withBreakdown(async ({ dlg, setMatrix }) => {
+    setMatrix({
+      'BUF-LINE':    { d1: { scheduled: 3, effectiveCapacity: 0, capacity: 8 } },     // fully buffered: counts
+      'CLOSED-LINE': { d1: { scheduled: 3, effectiveCapacity: 0, capacity: 0 } },     // closed day: the 'closed' alert's business
+      'EMPTY-BUF':   { d1: { scheduled: 0, effectiveCapacity: 0, capacity: 8 } },     // nothing scheduled: fine
+      'FULL-LINE':   { d1: { scheduled: 8.04, effectiveCapacity: 8, capacity: 8 } },  // inside the tolerance
+    });
+    await Confidence.showBreakdown();
+    dlg.click('data-conf-filter', 'overload');
+    const html = dlg.region();
+    assert.match(html, /BUF-LINE/);
+    assert.doesNotMatch(html, /CLOSED-LINE|EMPTY-BUF|FULL-LINE/);
+  });
+});
