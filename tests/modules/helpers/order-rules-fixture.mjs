@@ -138,7 +138,7 @@ export function rulesSnapshot(tasks, rules = {}, { firmedIds = [], calendars, pl
 // ── Scenario specs ─────────────────────────────────────────────────────────
 // A scenario is plain JSON (strings and numbers only) so the same spec can be
 // built in the test process (direct evaluators, Engine.evaluateSchedule, the
-// worker) and rebuilt inside a spawnSync child (live runAndApply).
+// worker) and rebuilt inside a spawnSync child (live evaluate-and-apply, helpers/run-and-apply.mjs).
 
 export const DEFAULT_SETUP_ROWS = [
   ['GREEN', 'GREEN', 0], ['GREEN', 'BLUE', 5], ['BLUE', 'GREEN', 5], ['BLUE', 'BLUE', 0], ['RED', 'RED', 0],

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { Engine } from '../../../frontend/optimization/engine.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
+import { runAndApply } from '../helpers/run-and-apply.mjs';
 
 const require = createRequire(import.meta.url);
 globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
@@ -55,7 +56,7 @@ function startDay(tasks) {
 }
 
 function optimize(mode) {
-  Engine.runAndApply(mode, {
+  runAndApply(mode, {
     plant, respectFirmed: true, respectCalendar: true,
     runNow: when('06', '08:00'), startDate: when('06', '08:00'), endDate: when('07', '18:00'),
   });

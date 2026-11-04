@@ -31,7 +31,7 @@ import {
   Engine, snapshotSchedule, deriveSetupObservation,
   MIN_PRODUCTIVE_SEGMENT_MINUTES, effectiveFirmedIdSet,
 } from '../../../frontend/optimization/engine.mjs';
-import { capAwareSequence } from '../../../frontend/optimization/scheduler-contract.mjs';
+import { capAwareSequence, PRIORITY_FIELD_DEFAULTS } from '../../../frontend/optimization/scheduler-contract.mjs';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Calendar } from '../../../frontend/calendar/calendar-engine.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
@@ -40,11 +40,12 @@ import { Toast, Util, Config, ErrorLog } from '../../../frontend/platform/founda
 import { App } from '../../../frontend/shell/application-shell.mjs';
 import { evaluateOptimizerWorkerRequest } from '../../../frontend/optimization/optimizer-worker.mjs';
 import { validateCandidateForApply } from '../../../frontend/optimization/setup-scheduler.mjs';
+import { runAndApply } from '../helpers/run-and-apply.mjs';
 
 const require = createRequire(import.meta.url);
 globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
 
-// Engine.runAndApply's early-return guards (no tasks / no plant selected) call
+// runAndApply's early-return guards (no tasks / no plant selected) call
 // Toast.show(Util.t(...)) — platform/foundation.mjs's Toast/Util reference
 // bare `window`/`document`, same split-realm quirk documented in
 // tests/modules/helpers/load-legacy-app.mjs. A minimal stub (matching that
@@ -456,7 +457,7 @@ test('Engine.firmingStatus reports each reason alone, a combination, and none', 
 });
 
 
-test('Engine.runAndApply("spt") leaves an order finishing inside the frozen window untouched and never lets another order FINISH inside it (Step 8: setup-aware path; finish floor 2026-10-27)', () => {
+test('runAndApply("spt") leaves an order finishing inside the frozen window untouched and never lets another order FINISH inside it (Step 8: setup-aware path; finish floor 2026-10-27)', () => {
   const plant = 'FZ-SPT-PLANT';
   const line = 'FZ-SPT-LINE';
   const priorPlant = Store.selectedPlant;
@@ -490,7 +491,7 @@ test('Engine.runAndApply("spt") leaves an order finishing inside the frozen wind
   ], 'unit-test');
 
   try {
-    Engine.runAndApply('spt', { plant, respectFirmed: true, respectCalendar: true, startDate: horizonStart, runNow: horizonStart });
+    runAndApply('spt', { plant, respectFirmed: true, respectCalendar: true, startDate: horizonStart, runNow: horizonStart });
     assert.equal(Store.tasks['spt-frozen-in-place'].start_date.getTime(), frozenStart.getTime(),
       'an order already starting inside the frozen window is left EXACTLY where it was -- never rescheduled into or through the window');
     assert.equal(Store.tasks['spt-frozen-in-place'].end_date.getTime(), frozenTaskEnd.getTime());
@@ -732,17 +733,18 @@ test('changeover leaves a permanently-uncalendarable order unplaced (surfaced, n
 
 
 test('Engine exposes the documented public API and no DOM-dependent surprises', () => {
-  assert.equal(typeof Engine.runAndApply, 'function');
+  assert.equal(typeof Engine.evaluateSchedule, 'function');
+  assert.equal('runAndApply' in Engine, false, 'the live runAndApply tail is gone: the optimizer is detached and Apply is explicit');
   assert.equal(typeof Engine.autoReflow, 'function');
   assert.equal(typeof Engine.constraintEnabled, 'function');
   assert.ok(Array.isArray(Engine.CONSTRAINT_CATALOG));
 });
 
 
-test('Engine.runAndApply no-ops with a toast when there are no tasks', () => {
+test('runAndApply no-ops with a toast when there are no tasks', () => {
   Store.setTasks([], 'unit-test');
   Store.setSelectedPlant('5512', 'unit-test');
-  assert.doesNotThrow(() => Engine.runAndApply('spt'));
+  assert.doesNotThrow(() => runAndApply('spt'));
 });
 
 
@@ -1131,7 +1133,7 @@ test('running orders never move: changeover and autoReflow leave an in-progress 
 
     // Setup-aware changeover path.
     Store.setTasks(base(), 'unit-test');
-    Engine.runAndApply('changeover', { ...runOpts, startDate: runNow });
+    runAndApply('changeover', { ...runOpts, startDate: runNow });
     assert.equal(Store.tasks['run-sap'].start_date.getTime(), runStart.getTime(), 'changeover must not move a running order');
     assert.equal(Store.tasks['run-sap'].end_date.getTime(), runEnd.getTime());
 
@@ -1910,7 +1912,7 @@ test('Engine.evaluateSchedule preserves changeover-mode placement from the live 
   const options = { startDate, respectFirmed: true, respectCalendar: false };
   const candidate = Engine.evaluateSchedule('changeover', options);
 
-  Engine.runAndApply('changeover', options);
+  runAndApply('changeover', options);
   const committed = candidate.patches.map(patch => ({
     id: patch.id,
     start: patch.changes.start_date?.getTime(),
@@ -1926,18 +1928,18 @@ test('Engine.evaluateSchedule preserves changeover-mode placement from the live 
 });
 
 
-test('Engine.runAndApply(\'spt\') sorts a single line\'s free tasks by ascending run-hours', () => {
+test('runAndApply(\'spt\') sorts a single line\'s free tasks by ascending run-hours', () => {
   // PLANT (uppercase) is the real field name — db.py's query_orders aliases
   // `o.plant AS "PLANT"`, and Store.rebuildPlantIndex()/tasksByPlant() key off
   // `t.PLANT`, not a lowercase `plant`. Using the real casing is what makes
-  // Store.tasksByPlant('5512') (which Engine.runAndApply groups from) actually
+  // Store.tasksByPlant('5512') (which runAndApply groups from) actually
   // return these tasks instead of silently grouping zero tasks.
   Store.setTasks([
     { id: 'e1', MACHINE: 'L1', PLANT: '5512', RUN_TIME: '5', start_date: null, end_date: null },
     { id: 'e2', MACHINE: 'L1', PLANT: '5512', RUN_TIME: '1', start_date: null, end_date: null },
   ], 'unit-test');
   Store.setSelectedPlant('5512', 'unit-test');
-  Engine.runAndApply('spt', { respectFirmed: true, respectCalendar: false });
+  runAndApply('spt', { respectFirmed: true, respectCalendar: false });
   const e1 = Store.tasks['e1'], e2 = Store.tasks['e2'];
   assert.ok(e1.start_date, 'e1 must have been scheduled (proves the line group was non-empty)');
   assert.ok(e2.start_date <= e1.start_date, 'shorter run-time task (e2) must be scheduled first under SPT');
@@ -1966,7 +1968,7 @@ test('Engine.autoReflow pushes an overlapping unfirmed downstream peer forward o
 });
 
 
-test('Engine.runAndApply respects explicit respectFirmed/respectCalendar options without reading any DOM element', () => {
+test('runAndApply respects explicit respectFirmed/respectCalendar options without reading any DOM element', () => {
   // Regression test for the DOM-read fix in Step 4: call runAndApply with both
   // flags explicit and confirm `document.getElementById` is never invoked.
   // The shared harness stub installed at the top of this file
@@ -1982,17 +1984,16 @@ test('Engine.runAndApply respects explicit respectFirmed/respectCalendar options
   try {
     Store.setTasks([{ id: 'e3', MACHINE: 'L1', plant: '5512', RUN_TIME: '1' }], 'unit-test');
     Store.setSelectedPlant('5512', 'unit-test');
-    assert.doesNotThrow(() => Engine.runAndApply('changeover', { respectFirmed: true, respectCalendar: true }));
-    assert.equal(calls, 0, 'Engine.runAndApply must not call document.getElementById when respectFirmed/respectCalendar are both passed explicitly');
+    assert.doesNotThrow(() => runAndApply('changeover', { respectFirmed: true, respectCalendar: true }));
+    assert.equal(calls, 0, 'runAndApply must not call document.getElementById when respectFirmed/respectCalendar are both passed explicitly');
   } finally {
     globalThis.document = priorDocument;
   }
 });
 
 // ---------------------------------------------------------------------------
-// Stage 3 seam 3 — Engine.flattenConstraints + the _sortTerms term factory.
-// These are _sortTerms' first-ever direct coverage (Task 0's audit confirmed no
-// test anywhere referenced _sortTerms / _comparator / colorMap before this).
+// Stage 3 seam 3 — Engine.flattenConstraints + constraintEnabled (the rank
+// terms themselves are the detached scheduler's, covered below via evaluateSchedule).
 //
 // NOTE on `Store.setMasterData(...)` vs. the plan's illustrative
 // `Store.masterData = {...}`: `masterData` is a getter-ONLY accessor on Store
@@ -2032,8 +2033,7 @@ test('flattenConstraints falls back to CONSTRAINT_CATALOG order when plant has n
 // through to the `key === 'colorWheel'` default. Its one real consumer is
 // OptimizeDialog's pre-run "no color wheel configured" confirm
 // (frontend/schedule-workbench.mts) — a UI nag, never a sequencing decision
-// (_sortTerms goes through flattenConstraints, which has always walked the
-// tree). Semantics must stay identical to flattenConstraints': a disabled node
+// (sequencing reads the tree through flattenConstraints / activePriorityKeys). Semantics must stay identical to flattenConstraints': a disabled node
 // takes its whole subtree with it, and any reachable enabled occurrence counts.
 
 
@@ -2165,81 +2165,118 @@ test('constraintEnabled preserves the never-configured default (colorWheel ON, r
 });
 
 
-test('_sortTerms resolves rank via Store.priorityRankMaps, line override winning over plant-wide', () => {
-  Store.setMasterData({ plants: [{ plant: 'P3', constraints: [{ key: 'colorWheel', enabled: true, order: 1 }] }], lines: [] }, 'unit-test');
-  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 5 } }, L01: { colorWheel: { RED: 1 } } }, 'unit-test');
-  const terms = Engine._sortTerms('changeover', { plant: 'P3' });
-  const key = terms[0].get({ COLOR: 'red', MACHINE: 'L01' });
-  assert.equal(key, '0000001|RED');  // line override (rank 1), not plant-wide (rank 5)
-  const keyNoLine = terms[0].get({ COLOR: 'red', MACHINE: 'L99' });
-  assert.equal(keyNoLine, '0000005|RED');  // falls back to plant-wide for an unmapped line
+// Priority-rank resolution now lives in the detached scheduler (setup-scheduler's
+// rankForTask / policyKeyForTask); Engine's old _sortTerms/_comparator/_taskFieldFor
+// were deleted with the live runAndApply tail (P3-3a). These cases are pinned through
+// the observable result: the order Engine.evaluateSchedule('changeover') sequences a
+// line's orders in, with zero setup cost and no due dates so policy rank decides.
+function rankedOrderByLine({ plant, constraints, rankMaps, tasks }) {
+  Store.setMasterData({ plants: [{ plant, constraints }], lines: [] }, 'unit-test');
+  Store.setPriorityRankMaps(rankMaps, 'unit-test');
+  Store.setTasks(tasks.map(t => ({ PLANT: plant, start_date: null, end_date: null, ...t })), 'unit-test');
+  Store.setSelectedPlant(plant, 'unit-test');
+  const result = Engine.evaluateSchedule('changeover', { plant, respectFirmed: true, respectCalendar: false });
+  const byLine = {};
+  const lineOf = id => tasks.find(t => t.id === id).MACHINE;
+  for (const patch of result.patches.filter(patch => patch.changes.start_date)) {
+    (byLine[lineOf(patch.id)] ??= []).push({ id: patch.id, start: +new Date(patch.changes.start_date) });
+  }
+  return Object.fromEntries(Object.entries(byLine).map(([line, rows]) => [line, rows.sort((x, y) => x.start - y.start).map(r => r.id)]));
+}
+
+
+test('priority rank resolves via Store.priorityRankMaps, line override winning over plant-wide', () => {
+  const order = rankedOrderByLine({
+    plant: 'P3',
+    constraints: [{ key: 'colorWheel', enabled: true, order: 1 }],
+    rankMaps: { '': { colorWheel: { RED: 5, BLUE: 2 } }, L01: { colorWheel: { RED: 1, BLUE: 2 } } },
+    tasks: [
+      { id: 'a-blue', MACHINE: 'L01', RUN_TIME: '1', COLOR: 'blue' }, { id: 'a-red', MACHINE: 'L01', RUN_TIME: '3', COLOR: 'red' },
+      { id: 'b-blue', MACHINE: 'L99', RUN_TIME: '1', COLOR: 'blue' }, { id: 'b-red', MACHINE: 'L99', RUN_TIME: '3', COLOR: 'red' },
+    ],
+  });
+  assert.deepEqual(order.L01, ['a-red', 'a-blue'], 'line override (RED rank 1) beats plant-wide (RED rank 5)');
+  assert.deepEqual(order.L99, ['b-blue', 'b-red'], 'an unmapped line falls back to the plant-wide list (BLUE rank 2 before RED rank 5)');
 });
 
 
-test('_sortTerms groups unranked values together, after ranked ones, instead of interleaving (N12)', () => {
-  Store.setMasterData({ plants: [{ plant: 'P4', constraints: [{ key: 'colorWheel', enabled: true, order: 1 }] }], lines: [] }, 'unit-test');
-  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 1 } } }, 'unit-test');
-  const terms = Engine._sortTerms('changeover', { plant: 'P4' });
-  const redKey    = terms[0].get({ COLOR: 'RED',    MACHINE: 'L1' });
-  const blueKey   = terms[0].get({ COLOR: 'BLUE',   MACHINE: 'L1' });   // unranked
-  const greenKey  = terms[0].get({ COLOR: 'GREEN',  MACHINE: 'L1' });   // unranked
-  assert.ok(redKey < blueKey);            // ranked sorts before unranked
-  assert.notEqual(blueKey, greenKey);     // both rank 999999 but keys still differ by value
-  assert.ok(blueKey.startsWith('0999999|') && greenKey.startsWith('0999999|'));  // grouped under the same rank prefix
+test('ranked values sequence before unranked ones (N12)', () => {
+  const order = rankedOrderByLine({
+    plant: 'P4',
+    constraints: [{ key: 'colorWheel', enabled: true, order: 1 }],
+    rankMaps: { '': { colorWheel: { RED: 1 } } },
+    tasks: [
+      { id: 'blue', MACHINE: 'L1', RUN_TIME: '1', COLOR: 'BLUE' },
+      { id: 'green', MACHINE: 'L1', RUN_TIME: '1', COLOR: 'GREEN' },
+      { id: 'red', MACHINE: 'L1', RUN_TIME: '5', COLOR: 'RED' },
+    ],
+  });
+  assert.equal(order.L1[0], 'red', 'the only ranked value sequences first even though it is the longest job');
+  assert.equal(order.L1.length, 3);
 });
 
 
-test('_sortTerms keeps the rank half exactly 7 digits for fractional and oversized ranks', () => {
-  // Ranks are floats end to end (brain.py persists float(rank); JSON round-trips
-  // 1.4 verbatim), so the padded-key encoding has to survive a non-integer.
-  // Unguarded, String(1.4).padStart(7,'0') === '00001.4' — already 7 chars, so
-  // NOTHING is padded — and it compares AFTER '0000003' on the 4th character,
-  // silently putting rank 1.4 behind rank 3. Same class of break above 1e7,
-  // where the rank half overflows to 8 digits.
-  Store.setMasterData({ plants: [{ plant: 'P7', constraints: [{ key: 'colorWheel', enabled: true, order: 1 }] }], lines: [] }, 'unit-test');
-  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 1.4, BLUE: 3, HUGE: 99999999 } } }, 'unit-test');
-  const terms = Engine._sortTerms('changeover', { plant: 'P7' });
-  const redKey  = terms[0].get({ COLOR: 'RED',  MACHINE: 'L1' });
-  const blueKey = terms[0].get({ COLOR: 'BLUE', MACHINE: 'L1' });
-  const hugeKey = terms[0].get({ COLOR: 'HUGE', MACHINE: 'L1' });
-  assert.match(redKey,  /^\d{7}\|RED$/,  'a fractional rank must still yield a 7-digit rank half');
-  assert.match(hugeKey, /^\d{7}\|HUGE$/, 'an oversized rank must be clamped to a 7-digit rank half');
-  assert.equal(redKey, '0000001|RED');   // 1.4 rounds to 1
-  assert.equal(hugeKey, '9999999|HUGE'); // clamped at the 7-digit ceiling
-  assert.ok(redKey < blueKey,
-    'fractional rank 1.4 must still sort before integer rank 3 — the unguarded encoding inverted this');
+test('priority rank stays ordinal for fractional and oversized ranks', () => {
+  // Ranks are floats end to end (brain.py persists float(rank)); a fractional or >= 1e7 rank must not break the
+  // fixed-width key: 1.4 rounds to 1 and still sequences before 3, and 99999999 clamps to 9999999 (after unranked 999999).
+  const order = rankedOrderByLine({
+    plant: 'P7',
+    constraints: [{ key: 'colorWheel', enabled: true, order: 1 }],
+    rankMaps: { '': { colorWheel: { RED: 1.4, BLUE: 3, HUGE: 99999999 } } },
+    tasks: [
+      { id: 'huge', MACHINE: 'L1', RUN_TIME: '1', COLOR: 'HUGE' },
+      { id: 'orange', MACHINE: 'L1', RUN_TIME: '1', COLOR: 'ORANGE' },
+      { id: 'blue', MACHINE: 'L1', RUN_TIME: '1', COLOR: 'BLUE' },
+      { id: 'red', MACHINE: 'L1', RUN_TIME: '9', COLOR: 'RED' },
+    ],
+  });
+  assert.deepEqual(order.L1, ['red', 'blue', 'orange', 'huge']);
 });
 
 
-test('_sortTerms with no rank map for the field falls back to 999999 for every value (no crash)', () => {
-  Store.setMasterData({ plants: [{ plant: 'P5', constraints: [{ key: 'prt01', enabled: true, order: 1 }] }], lines: [] }, 'unit-test');
-  Store.setPriorityRankMaps({}, 'unit-test');
-  const terms = Engine._sortTerms('changeover', { plant: 'P5' });
-  assert.equal(terms[0].get({ PRT_01: 'DOG', MACHINE: 'L1' }), '0999999|DOG');
+test('priority rank with no rank map for the field leaves every order unranked (no crash)', () => {
+  const order = rankedOrderByLine({
+    plant: 'P5',
+    constraints: [{ key: 'prt01', enabled: true, order: 1 }],
+    rankMaps: {},
+    tasks: [{ id: 'dog', MACHINE: 'L1', RUN_TIME: '1', PRT_01: 'DOG' }, { id: 'cat', MACHINE: 'L1', RUN_TIME: '1', PRT_01: 'CAT' }],
+  });
+  assert.equal(order.L1.length, 2, 'both orders are still placed');
 });
 
 
-test('_sortTerms maps every registered priority key to its REAL task field, not key.toUpperCase()', () => {
-  // Task 0's audit defect 4a: 'prt01' -> 'PRT_01' (not 'PRT01'),
-  // 'productionVersion' -> 'PRODUCTION_VERSION' (not 'PRODUCTIONVERSION'). A
-  // toUpperCase() guess would read an undefined field and rank every order
-  // 999999 — configured, inert, silent. Assert the mapping directly AND that a
-  // real rank resolves off the real field name.
-  assert.equal(Engine._taskFieldFor('colorWheel'), 'COLOR');
-  assert.equal(Engine._taskFieldFor('prt01'), 'PRT_01');
-  assert.equal(Engine._taskFieldFor('prt02'), 'PRT_02');
-  assert.equal(Engine._taskFieldFor('productionVersion'), 'PRODUCTION_VERSION');
-  Store.setMasterData({ plants: [{ plant: 'P6', constraints: [
-    { key: 'prt01', enabled: true, order: 1 },
-    { key: 'productionVersion', enabled: true, order: 2 },
-  ] }], lines: [] }, 'unit-test');
-  Store.setPriorityRankMaps({ '': {
-    prt01: { 'TOOL-A': 2 },
-    productionVersion: { V1: 3 },
-  } }, 'unit-test');
-  const terms = Engine._sortTerms('changeover', { plant: 'P6' });
-  assert.equal(terms[0].get({ PRT_01: 'tool-a', MACHINE: 'L1' }), '0000002|TOOL-A');
-  assert.equal(terms[1].get({ PRODUCTION_VERSION: 'v1', MACHINE: 'L1' }), '0000003|V1');
+test("priority rank reads each registered key's REAL task field, not key.toUpperCase()", () => {
+  // 'prt01' -> PRT_01 (not PRT01), 'productionVersion' -> PRODUCTION_VERSION (not PRODUCTIONVERSION). A toUpperCase()
+  // guess reads an undefined field and ranks every order 999999: configured, inert, silent.
+  assert.deepEqual({ ...PRIORITY_FIELD_DEFAULTS }, {
+    colorWheel: 'COLOR', prt01: 'PRT_01', prt02: 'PRT_02', productionVersion: 'PRODUCTION_VERSION',
+  });
+  const prt = rankedOrderByLine({
+    plant: 'P6',
+    constraints: [{ key: 'prt01', enabled: true, order: 1 }],
+    rankMaps: { '': { prt01: { 'TOOL-A': 2, 'TOOL-B': 1 } } },
+    tasks: [{ id: 'a', MACHINE: 'L1', RUN_TIME: '1', PRT_01: 'tool-a' }, { id: 'b', MACHINE: 'L1', RUN_TIME: '3', PRT_01: 'tool-b' }],
+  });
+  assert.deepEqual(prt.L1, ['b', 'a'], 'PRT_01 drives the rank');
+  const pv = rankedOrderByLine({
+    plant: 'P6',
+    constraints: [{ key: 'productionVersion', enabled: true, order: 1 }],
+    rankMaps: { '': { productionVersion: { V1: 3, V2: 1 } } },
+    tasks: [{ id: 'a', MACHINE: 'L1', RUN_TIME: '1', PRODUCTION_VERSION: 'v1' }, { id: 'b', MACHINE: 'L1', RUN_TIME: '3', PRODUCTION_VERSION: 'v2' }],
+  });
+  assert.deepEqual(pv.L1, ['b', 'a'], 'PRODUCTION_VERSION drives the rank');
+});
+
+
+test('priority rank: an EMPTY line-scoped map falls through to the plant-wide list', () => {
+  // Reachable state: the generic upload route rejects only a row-less file, so an override whose value column is
+  // entirely blank persists as {}. It must not shadow the plant-wide list (every order on the line used to rank 999999).
+  const tasks = [{ id: 'blue', MACHINE: 'L01', RUN_TIME: '1', COLOR: 'BLUE' }, { id: 'red', MACHINE: 'L01', RUN_TIME: '3', COLOR: 'RED' }];
+  const constraints = [{ key: 'colorWheel', enabled: true, order: 1 }];
+  const empty = rankedOrderByLine({ plant: 'SH1', constraints, tasks, rankMaps: { '': { colorWheel: { RED: 1, BLUE: 2 } }, L01: { colorWheel: {} } } });
+  assert.deepEqual(empty.L01, ['red', 'blue'], 'an empty override must not shadow the plant-wide rank (shadowing would sequence BLUE first by value)');
+  const real = rankedOrderByLine({ plant: 'SH1', constraints, tasks, rankMaps: { '': { colorWheel: { RED: 1, BLUE: 2 } }, L01: { colorWheel: { BLUE: 1, RED: 2 } } } });
+  assert.deepEqual(real.L01, ['blue', 'red'], 'a real line override still beats the plant-wide list');
 });
 
 // ---------------------------------------------------------------------------
@@ -2341,9 +2378,24 @@ test('setFieldTaskFields with an empty/falsy fields array is a no-op', () => {
 });
 
 
+test('setFieldTaskFields feeds changeoverTaskFields (its one remaining consumer) and never mutates PRIORITY_FIELD_DEFAULTS', () => {
+  const before = { ...Engine._fieldTaskFields };
+  try {
+    Store.setMasterData({ plants: [{ plant: 'SF1', constraints: [{ key: 'colorWheel', enabled: true, order: 1 }, { key: 'legacyNew', enabled: true, order: 2 }] }], lines: [] }, 'unit-test');
+    assert.deepEqual(Engine.changeoverTaskFields('SF1'), ['COLOR', 'FORM_SIZE'], 'an unregistered key contributes nothing and does not throw');
+    Engine.setFieldTaskFields([{ field_key: 'legacyNew', task_field: 'NEW_FIELD' }, { field_key: 'colorWheel', task_field: 'COLOR_X' }]);
+    assert.deepEqual(Engine.changeoverTaskFields('SF1'), ['COLOR_X', 'NEW_FIELD', 'FORM_SIZE'], 'registry entries (new and overriding) are picked up');
+    assert.equal(PRIORITY_FIELD_DEFAULTS.colorWheel, 'COLOR', 'the shared default table is copied, never mutated');
+    assert.equal(PRIORITY_FIELD_DEFAULTS.legacyNew, undefined);
+  } finally {
+    Engine._fieldTaskFields = before;
+  }
+});
+
+
 test('runAndApply with NO explicit plant/map resolves real ranks from Store state (alert auto-fix path)', () => {
   // The one call site Task 0's audit flagged as silently breakable:
-  // Alerts.applyFix's overload branch calls Engine.runAndApply('changeover', {
+  // Alerts.applyFix's overload branch calls runAndApply('changeover', {
   // lines, startDate, endDate }) with no plant and no rank argument, so it
   // depends entirely on Store.selectedPlant + Store.priorityRankMaps. Assert an
   // end-to-end sequence, not just the term factory in isolation.
@@ -2356,7 +2408,7 @@ test('runAndApply with NO explicit plant/map resolves real ranks from Store stat
     { id: 'cw-red',  MACHINE: 'LC', PLANT: '5512', RUN_TIME: '3', COLOR: 'RED',  start_date: null, end_date: null },
   ], 'unit-test');
   Store.setSelectedPlant('5512', 'unit-test');
-  Engine.runAndApply('changeover', { respectFirmed: true, respectCalendar: false });
+  runAndApply('changeover', { respectFirmed: true, respectCalendar: false });
   const red = Store.tasks['cw-red'], blue = Store.tasks['cw-blue'];
   assert.ok(red.start_date && blue.start_date, 'both orders must have been scheduled');
   assert.ok(red.start_date <= blue.start_date,
@@ -2372,8 +2424,8 @@ test('runAndApply with NO explicit plant/map resolves real ranks from Store stat
      - unrankedActiveFields: the generic (all-fields) form of "is this priority
        actually configured?" behind the pre-Run confirm (N11).
      - changeoverTaskFields: what the changeover KPI must measure so it tracks
-       the same fields _sortTerms sequences on.
-   Plus the two contained _sortTerms fixes (dead term, empty-override shadowing).
+       the same fields the scheduler sequences on.
+   Plus the two contained rank-resolution fixes (dead term, empty-override shadowing).
    ------------------------------------------------------------------------ */
 
 
@@ -2490,7 +2542,7 @@ test('changeoverTaskFields tracks active priority fields, defaulting to COLOR+FO
   assert.deepEqual(Engine.changeoverTaskFields('CO1'), ['COLOR', 'FORM_SIZE']);
 
   // PRT-only plant: COLOR drops out (not sequenced on), FORM_SIZE stays because
-  // _sortTerms appends it in both grouping modes regardless.
+  // it is always part of what a run groups on.
   Store.setMasterData({ plants: [{ plant: 'CO2', constraints: [
     { key: 'prt01', enabled: true, order: 1, children: [{ key: 'prt02', enabled: true, order: 1 }] },
   ] }], lines: [] }, 'unit-test');
@@ -2503,45 +2555,13 @@ test('changeoverTaskFields tracks active priority fields, defaulting to COLOR+FO
 });
 
 
-test('_sortTerms skips the term for an unregistered key instead of adding a constant one', () => {
-  Store.setMasterData({ plants: [{ plant: 'DT1', constraints: [
-    { key: 'legacyGone', enabled: true, order: 1 },
-    { key: 'colorWheel', enabled: true, order: 2 },
-  ] }], lines: [] }, 'unit-test');
-  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 1 } } }, 'unit-test');
-  // 'changeover' tail is [FORM_SIZE, MATERIAL_NUMBER, runHours] = 3 terms, so one
-  // priority term (colorWheel only) means 4 — not 5 with a dead one.
-  assert.equal(Engine._sortTerms('changeover', { plant: 'DT1' }).length, 4,
-    'an unregistered key must not contribute a term returning the same string for every task');
-});
-
-
-test('_sortTerms: an EMPTY line-scoped map falls through to the plant-wide list', () => {
-  // Reachable state: the generic upload route rejects only a row-less file, so an
-  // override whose value column is entirely blank persists as {}. `??` does not
-  // bridge an empty object, so this used to rank every order on that line 999999
-  // while every other line ranked correctly.
-  Store.setMasterData({ plants: [{ plant: 'SH1', constraints: [{ key: 'colorWheel', enabled: true, order: 1 }] }], lines: [] }, 'unit-test');
-  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 4 } }, L01: { colorWheel: {} } }, 'unit-test');
-  const term = Engine._sortTerms('changeover', { plant: 'SH1' })[0];
-  assert.equal(term.get({ COLOR: 'RED', MACHINE: 'L01' }), '0000004|RED',
-    'an empty override must not shadow the plant-wide rank');
-  assert.equal(term.get({ COLOR: 'RED', MACHINE: 'L02' }), '0000004|RED',
-    'unmapped line still resolves plant-wide (regression guard)');
-  // A NON-empty override must still win — the fix must not break line scoping.
-  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 4 } }, L01: { colorWheel: { RED: 1 } } }, 'unit-test');
-  const term2 = Engine._sortTerms('changeover', { plant: 'SH1' })[0];
-  assert.equal(term2.get({ COLOR: 'RED', MACHINE: 'L01' }), '0000001|RED',
-    'a real line override must still beat the plant-wide list');
-});
-
 // ---------------------------------------------------------------------------
-// F12 gap 3 (Part 3 integration): Engine.runAndApply's setup-aware live-run
-// surfacing — Engine.lastSetupAwareResult and the toast.optimize_missing_setup_summary
-// warn toast, both landing at F1's dedicated 'scheduled-without-setup' reason.
+// F12 gap 3 (Part 3 integration): runAndApply's setup-aware live-run
+// surfacing — the result carries F1's dedicated 'scheduled-without-setup' edges (the warn toast
+// toast.optimize_missing_setup_summary now lives in the preview Apply).
 
 
-test('Engine.runAndApply surfaces lastSetupAwareResult and a missing-setup toast for a live setup-aware run', () => {
+test('a setup-aware run reports the unknown-signature tail order in its result and applies every order', () => {
   const plant = 'SETUP-LIVE-PLANT';
   const line = 'SETUP-LIVE-LINE';
   const state = value => [{ fieldKey: 'colorWheel', value }];
@@ -2549,7 +2569,6 @@ test('Engine.runAndApply surfaces lastSetupAwareResult and a missing-setup toast
   const priorTasks = structuredClone(Store.tasksArr);
   const priorSetup = Store.setupSnapshot;
   const priorCalendar = Store.calendars[line];
-  const priorLastSetupAware = Engine.lastSetupAwareResult;
 
   Store.setSelectedPlant(plant, 'unit-test');
   Store.setCalendar(line, { 0: [0, 24], 1: [0, 24], 2: [0, 24], 3: [0, 24], 4: [0, 24], 5: [0, 24], 6: [0, 24] }, 'unit-test');
@@ -2578,36 +2597,29 @@ test('Engine.runAndApply surfaces lastSetupAwareResult and a missing-setup toast
     },
   ], 'unit-test');
 
-  const toastCalls = [];
-  const originalShow = Toast.show;
-  Toast.show = (msg, type) => { toastCalls.push({ msg, type }); };
 
   try {
-    Engine.runAndApply('changeover', {
+    const lastResult = runAndApply('changeover', {
       plant, respectFirmed: true, respectCalendar: false,
       startDate: new Date('2026-08-17T00:00:00'), endDate: new Date('2026-08-20T00:00:00'), runNow: new Date('2026-08-17T00:00:00'),
     });
 
-    assert.ok(Engine.lastSetupAwareResult, 'a live setup-aware apply stores its result on Engine.lastSetupAwareResult');
-    assert.ok(Engine.lastSetupAwareResult.missingEdges.some(edge => (
+    assert.ok(lastResult, 'the run returns its candidate result');
+    assert.ok(lastResult.missingEdges.some(edge => (
       edge.reason === 'successor-state-unknown' && edge.successorOrderId === 'setup-live-blank'
     )), 'the blank-signature order remains an unresolved successor-state diagnostic, separate from known uncovered edges');
-    assert.ok(Engine.lastSetupAwareResult.explanation.some(reason => (
+    assert.ok(lastResult.explanation.some(reason => (
       reason.code === 'unknown-setup-tail-placement' && reason.taskId === 'setup-live-blank'
     )), 'the blank-signature order is reported as deterministic unknown-tail placement');
     assert.ok(Store.tasks['setup-live-blue'].start_date, 'the covered order was actually applied to Store');
     assert.ok(Store.tasks['setup-live-blank'].start_date, 'the tail-placed order was also applied to Store, never frozen');
 
-    assert.ok(toastCalls.some(call => call.msg.includes('toast.optimize_missing_setup_summary') && call.type === 'warn'),
-      'the missing-setup-data warn toast fires with the plan-mandated i18n key');
   } finally {
-    Toast.show = originalShow;
     Store.setTasks(priorTasks, 'unit-test');
     Store.replaceSetupSnapshot(priorSetup, 'unit-test');
     if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
     else delete Store.calendars[line];
     Store.setSelectedPlant(priorPlant, 'unit-test');
-    Engine.lastSetupAwareResult = priorLastSetupAware;
   }
 });
 
@@ -2661,7 +2673,7 @@ test('B3a: an inactive plant\'s changeover run produces identical sequencing to 
     // Engine._syntheticZeroCostSetupSnapshot.
     Store.replaceSetupSnapshot(null, 'unit-test');
     Store.setTasks(freshTasks(), 'unit-test');
-    Engine.runAndApply('changeover', opts);
+    runAndApply('changeover', opts);
     const synthetic = positions();
     assert.ok(Number.isFinite(synthetic.a) && Number.isFinite(synthetic.b), 'both orders were placed under the synthetic path');
     assert.ok(synthetic.b < synthetic.a, 'the higher-priority (BLUE, rank 1) order is sequenced first');
@@ -2676,7 +2688,7 @@ test('B3a: an inactive plant\'s changeover run produces identical sequencing to 
       plant_rows: [], machine_rows: [], machine_states: [], overrides: [],
     }, 'unit-test');
     Store.setTasks(freshTasks(), 'unit-test');
-    Engine.runAndApply('changeover', opts);
+    runAndApply('changeover', opts);
     const realEmpty = positions();
 
     assert.deepEqual(synthetic, realEmpty,
@@ -2735,7 +2747,7 @@ test('B3a: \'duedate\' also routes through the setup-aware evaluator via a synth
 
   try {
     Store.setTasks(freshTasks(), 'unit-test');
-    Engine.runAndApply('duedate', opts);
+    runAndApply('duedate', opts);
 
     assert.equal(calls.length, 1, 'evaluateSetupAware must be invoked exactly once for a duedate run');
     assert.equal(calls[0].mode, 'due-date', 'a \'duedate\' run must invoke the evaluator with mode \'due-date\', not \'min-changeover\'');
@@ -2755,14 +2767,13 @@ test('B3a: \'duedate\' also routes through the setup-aware evaluator via a synth
 });
 
 
-test('B3a: an inactive plant\'s changeover run raises zero missing-setup diagnostics (no toast, no reported uncovered edges)', () => {
+test('B3a: an inactive plant\'s changeover run still places every order through the synthetic zero-cost snapshot (the quiet-toast suppression now lives in the Optimize preview Apply)', () => {
   const plant = 'B3A-QUIET-PLANT';
   const line = 'B3A-QUIET-LINE';
   const priorPlant = Store.selectedPlant;
   const priorTasks = structuredClone(Store.tasksArr);
   const priorSetup = Store.setupSnapshot;
   const priorCalendar = Store.calendars[line];
-  const priorLastSetupAware = Engine.lastSetupAwareResult;
 
   Store.setSelectedPlant(plant, 'unit-test');
   Store.setCalendar(line, { 0: [0, 24], 1: [0, 24], 2: [0, 24], 3: [0, 24], 4: [0, 24], 5: [0, 24], 6: [0, 24] }, 'unit-test');
@@ -2780,39 +2791,27 @@ test('B3a: an inactive plant\'s changeover run raises zero missing-setup diagnos
       start_date: null, end_date: null, original_end_date: new Date('2026-09-02T13:00:00') },
   ], 'unit-test');
 
-  const toastCalls = [];
-  const originalShow = Toast.show;
-  Toast.show = (msg, type) => { toastCalls.push({ msg, type }); };
 
   try {
-    Engine.runAndApply('changeover', {
+    const lastResult = runAndApply('changeover', {
       plant, respectFirmed: true, respectCalendar: false,
       startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-08-28T00:00:00'), runNow: new Date('2026-08-25T00:00:00'),
     });
 
     assert.ok(Store.tasks['quiet-red'].start_date && Store.tasks['quiet-blue'].start_date,
       'both orders were actually placed -- the never-freeze invariant still holds for a synthetic run');
-    // The evaluator itself still legitimately reports the uncovered
-    // transition internally (Engine.lastSetupAwareResult is never
-    // suppressed -- only the diagnostic REPORTING built from it is), so this
-    // asserts on the toast layer, which IS the thing that must go quiet.
-    assert.ok(Engine.lastSetupAwareResult, 'a live run still records its result for the preview/diagnostics UI');
-
-    assert.equal(toastCalls.length, 0,
-      `an inactive plant must see zero toasts from this run; got: ${JSON.stringify(toastCalls)}`);
+    assert.ok(lastResult.validationContext, 'the run still returns its full candidate result for the preview/diagnostics UI');
   } finally {
-    Toast.show = originalShow;
     Store.setTasks(priorTasks, 'unit-test');
     Store.replaceSetupSnapshot(priorSetup, 'unit-test');
     if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
     else delete Store.calendars[line];
     Store.setSelectedPlant(priorPlant, 'unit-test');
-    Engine.lastSetupAwareResult = priorLastSetupAware;
   }
 });
 
 
-test('final-review fix 2: an inactive/synthetic plant with a genuinely uncalendarable order still raises "orders left in place", but not "missing setup summary"', () => {
+test('final-review fix 2: an inactive/synthetic plant with a genuinely uncalendarable order leaves it unplaced and queued as Needs Planning', () => {
   // The two suppressions must now be independent: toast.
   // optimize_missing_setup_summary is synthetic-run-only noise (an empty
   // fabricated matrix always reports every transition as "uncovered", which
@@ -2822,7 +2821,7 @@ test('final-review fix 2: an inactive/synthetic plant with a genuinely uncalenda
   // nothing to do with setup data -- here, a line whose calendar is closed
   // EVERY day, forever (same fixture shape as the "changeover leaves a
   // permanently-uncalendarable order unplaced" test above, adapted to run
-  // in-process through Engine.runAndApply so the toast layer is reachable).
+  // in-process through runAndApply so the toast layer is reachable).
   const plant = 'FINAL-FIX2-PLANT';
   const line = 'FINAL-FIX2-LINE';
   const priorPlant = Store.selectedPlant;
@@ -2830,7 +2829,6 @@ test('final-review fix 2: an inactive/synthetic plant with a genuinely uncalenda
   const priorSetup = Store.setupSnapshot;
   const priorCalendar = Store.calendars[line];
   const priorPlantEntry = Store.plants[plant];
-  const priorLastSetupAware = Engine.lastSetupAwareResult;
 
   const ALL_CLOSED = { 0: null, 1: null, 2: null, 3: null, 4: null, 5: null, 6: null };
 
@@ -2845,12 +2843,9 @@ test('final-review fix 2: an inactive/synthetic plant with a genuinely uncalenda
     start_date: null, end_date: null, original_end_date: new Date('2026-09-15T12:00:00'),
   }], 'unit-test');
 
-  const toastCalls = [];
-  const originalShow = Toast.show;
-  Toast.show = (msg, type) => { toastCalls.push({ msg, type }); };
 
   try {
-    Engine.runAndApply('changeover', {
+    const lastResult = runAndApply('changeover', {
       plant, respectFirmed: true, respectCalendar: true,
       startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-10-15T00:00:00'), runNow: new Date('2026-08-25T00:00:00'),
     });
@@ -2858,15 +2853,9 @@ test('final-review fix 2: an inactive/synthetic plant with a genuinely uncalenda
     assert.equal(Store.tasks['final-fix2-order'].start_date, null,
       'sanity: the permanently-closed calendar must leave this order genuinely unplaced');
 
-    const leftInPlaceText = '1 order(s) on 1 line(s) need planning. These orders have no committed schedule dates.';
-    assert.ok(toastCalls.some(c => c.msg === leftInPlaceText && c.type === 'warn'),
-      `expected the "orders left in place" toast to fire for this genuinely unplaced order on a synthetic/inactive plant; got: ${JSON.stringify(toastCalls)}`);
-
-    const missingSetupSummaryText = Util.t('toast.optimize_missing_setup_summary', { orders: 1, lines: 1 });
-    assert.ok(!toastCalls.some(c => c.msg === missingSetupSummaryText),
-      `the missing-setup-summary toast must stay suppressed for a synthetic run; got: ${JSON.stringify(toastCalls)}`);
+    const queued = lastResult.dispositions.find(item => item.id === 'final-fix2-order');
+    assert.equal(queued?.status, 'needs_planning', 'the unplaced order is reported in the result, never a silent drop');
   } finally {
-    Toast.show = originalShow;
     Store.setTasks(priorTasks, 'unit-test');
     Store.replaceSetupSnapshot(priorSetup, 'unit-test');
     if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
@@ -2874,7 +2863,6 @@ test('final-review fix 2: an inactive/synthetic plant with a genuinely uncalenda
     if (priorPlantEntry) Store.plants[plant] = priorPlantEntry;
     else delete Store.plants[plant];
     Store.setSelectedPlant(priorPlant, 'unit-test');
-    Engine.lastSetupAwareResult = priorLastSetupAware;
   }
 });
 
@@ -2909,7 +2897,7 @@ test('B3a Step 6: the synthetic snapshot never reaches Store.setupSnapshot, so a
   ], 'unit-test');
 
   try {
-    Engine.runAndApply('changeover', {
+    runAndApply('changeover', {
       plant, respectFirmed: true, respectCalendar: false,
       startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-08-28T00:00:00'), runNow: new Date('2026-08-25T00:00:00'),
     });
@@ -2966,7 +2954,6 @@ test('Task 6 (B3b): a real active-and-matching plant with one genuinely uncovere
   const priorTasks = structuredClone(Store.tasksArr);
   const priorSetup = Store.setupSnapshot;
   const priorCalendar = Store.calendars[line];
-  const priorLastSetupAware = Engine.lastSetupAwareResult;
   const priorPriorityRankMaps = Store.priorityRankMaps;
 
   Store.setSelectedPlant(plant, 'unit-test');
@@ -3001,18 +2988,15 @@ test('Task 6 (B3b): a real active-and-matching plant with one genuinely uncovere
       start_date: null, end_date: null, original_end_date: new Date('2026-08-21T13:00:00') },
   ], 'unit-test');
 
-  const toastCalls = [];
-  const originalShow = Toast.show;
-  Toast.show = (msg, type) => { toastCalls.push({ msg, type }); };
 
   try {
-    Engine.runAndApply('duedate', {
+    const lastResult = runAndApply('duedate', {
       plant, respectFirmed: true, respectCalendar: false,
       startDate: new Date('2026-08-21T00:00:00'), endDate: new Date('2026-08-24T00:00:00'), runNow: new Date('2026-08-21T00:00:00'),
     });
 
-    assert.ok(Engine.lastSetupAwareResult, 'a live setup-aware apply stores its result on Engine.lastSetupAwareResult');
-    assert.ok(Engine.lastSetupAwareResult.missingEdges.some(edge => (
+    assert.ok(lastResult, 'the run returns its candidate result');
+    assert.ok(lastResult.missingEdges.some(edge => (
       edge.reason === 'scheduled-without-setup'
       && edge.successorOrderId === 'cov-red'
       && edge.predecessorOrderId === 'cov-blue'
@@ -3025,24 +3009,13 @@ test('Task 6 (B3b): a real active-and-matching plant with one genuinely uncovere
     assert.ok(Store.tasks['cov-blue'].start_date.getTime() < Store.tasks['cov-red'].start_date.getTime(),
       'the covered-first sequence won the coverage-tier tie-break, so BLUE is still sequenced ahead of RED');
 
-    // Unlike a synthetic/inactive-plant run (B3a tests above), this plant's
-    // effectiveSetupSnapshot is the genuine Store.setupSnapshot, not
-    // Engine._syntheticZeroCostSetupSnapshot, so the diagnostic-suppression
-    // guards (`!effectiveSetupSnapshot.synthetic`) do NOT apply here -- the
-    // warn toast must actually fire. This is the direct, positive contrast to
-    // the B3a "raises zero missing-setup diagnostics" test's toastCalls.length
-    // === 0 assertion for the inactive-plant case.
-    assert.ok(toastCalls.some(call => call.msg.includes('toast.optimize_missing_setup_summary') && call.type === 'warn'),
-      'a real active-and-matching plant with a genuine coverage gap must still see the missing-setup-data warn toast');
   } finally {
-    Toast.show = originalShow;
     Store.setTasks(priorTasks, 'unit-test');
     Store.replaceSetupSnapshot(priorSetup, 'unit-test');
     if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
     else delete Store.calendars[line];
     Store.setSelectedPlant(priorPlant, 'unit-test');
     Store.setPriorityRankMaps(priorPriorityRankMaps, 'unit-test');
-    Engine.lastSetupAwareResult = priorLastSetupAware;
   }
 });
 
@@ -3052,7 +3025,7 @@ test('Task 6 (B3b): a real active-and-matching plant with one genuinely uncovere
 // (setup-scheduler.mts) already orders comparisons hard-constraints ->
 // policyKey -> uncovered-edge count -> mode-permuted terms (setup minutes
 // last for 'min-changeover') -- these tests turn that prose into an
-// executable pin at the full Engine.runAndApply('duedate', ...) level.
+// executable pin at the full runAndApply('duedate', ...) level.
 //
 // Both tests below share one fixture: two orders (BLUE, higher colorWheel
 // priority; RED, lower) whose DUE DATES are deliberately reversed (RED due
@@ -3111,7 +3084,7 @@ test('B4: policyKey follows the CONFIGURED FIRST priority field, not insertion o
     Store.setPriorityRankMaps({ '': { colorWheel: { BLUE: 1, RED: 2 }, prt01: { SAME: 1 } } }, 'unit-test');
     Store.setTasks(tasks(), 'unit-test');
 
-    Engine.runAndApply('changeover', runOpts);
+    runAndApply('changeover', runOpts);
     const phase1 = positions();
     assert.ok(Number.isFinite(phase1.blue) && Number.isFinite(phase1.red), 'both orders were placed');
     assert.ok(phase1.blue < phase1.red,
@@ -3145,7 +3118,7 @@ test('B4: policyKey follows the CONFIGURED FIRST priority field, not insertion o
         start_date: null, end_date: null, original_end_date: new Date('2026-08-25T09:00:00') },
     ], 'unit-test');
 
-    Engine.runAndApply('changeover', runOpts);
+    runAndApply('changeover', runOpts);
     const phase2 = positions();
     assert.ok(phase2.blue < phase2.red,
       'prt01 is now the configured FIRST field and ranks BLUE (LOW) ahead of RED (HIGH), so BLUE still goes first -- ' +
@@ -3222,7 +3195,7 @@ test('B4: priority rank wins over a cheaper setup reorder under a REAL active-an
     Store.setPriorityRankMaps({}, 'unit-test');
     Store.replaceSetupSnapshot(costMatrix(), 'unit-test');
     Store.setTasks(tasks(), 'unit-test');
-    Engine.runAndApply('changeover', runOpts);
+    runAndApply('changeover', runOpts);
     const noPriority = positions();
     assert.ok(noPriority.red < noPriority.blue,
       'control: with no priority rank configured, the drastically cheaper RED-then-BLUE reorder is taken');
@@ -3235,7 +3208,7 @@ test('B4: priority rank wins over a cheaper setup reorder under a REAL active-an
     Store.setPriorityRankMaps({ '': { colorWheel: { BLUE: 1, RED: 2 } } }, 'unit-test');
     Store.replaceSetupSnapshot(costMatrix(), 'unit-test');
     Store.setTasks(tasks(), 'unit-test');
-    Engine.runAndApply('changeover', runOpts);
+    runAndApply('changeover', runOpts);
     const realActive = positions();
     assert.ok(realActive.red < realActive.blue, 'equal admission and delivery permit the 175-minute setup saving before priority preference');
 
@@ -3248,7 +3221,7 @@ test('B4: priority rank wins over a cheaper setup reorder under a REAL active-an
 
     Store.replaceSetupSnapshot(null, 'unit-test'); // no real Store.setupSnapshot -> runAndApply's gate falls back to the synthetic snapshot above
     Store.setTasks(tasks(), 'unit-test');
-    Engine.runAndApply('changeover', runOpts);
+    runAndApply('changeover', runOpts);
     const syntheticRun = positions();
     // NOTE: absolute clock positions legitimately differ from realActive's --
     // the real matrix actually consumes 60 (GREEN->BLUE) + 120 (BLUE->RED)
@@ -3608,39 +3581,27 @@ test('Engine.manualSchedulePatchFor shifts an already-split (>=2 scheduleSegment
 });
 
 
-test('Engine.runAndApply replaces stale setup results on synthetic SPT runs', () => {
-  // F8: lastSetupAwareResult must mirror lastBacklogResult's clear-then-set
-  // lifecycle — a later run that does NOT go through the setup-aware branch
-  // must not leave a stale result from an earlier setup-aware run lying
-  // around.
-  //
-  // B3a (2026-08-21): 'changeover' and 'spt' route through evaluateSetupAware
-  // now. A real active-and-matching snapshot is used when available; otherwise
-  // the engine supplies Engine._syntheticZeroCostSetupSnapshot, so both modes
-  // exercise the setup-aware lifecycle and can replace a stale prior result.
+test('a synthetic SPT run returns its own hard-bound setup-aware result', () => {
+  // B3a (2026-08-21): 'changeover' and 'spt' route through evaluateSetupAware. A real active-and-matching snapshot is
+  // used when available; otherwise the engine supplies Engine._syntheticZeroCostSetupSnapshot. (The old
+  // Engine.lastSetupAwareResult clear-then-set lifecycle was deleted with the live tail: the result is the return value.)
   const plant = 'SETUP-STALE-PLANT';
   const line = 'SETUP-STALE-LINE';
   const priorPlant = Store.selectedPlant;
   const priorTasks = structuredClone(Store.tasksArr);
-  const priorLastSetupAware = Engine.lastSetupAwareResult;
 
   Store.setSelectedPlant(plant, 'unit-test');
-  // No Store.replaceSetupSnapshot call: this plant has no active setup
-  // definition, so runAndApply('spt', ...) uses the synthetic zero-cost
-  // setup-aware path and still replaces the stale result.
   Store.setTasks([
     { id: 'stale-check-a', PLANT: plant, MACHINE: line, RUN_TIME: '1' },
   ], 'unit-test');
-  Engine.lastSetupAwareResult = { patches: [], score: [], explanation: [], diagnostics: {}, unchangedLines: [], missingEdges: [] };
 
   try {
-    Engine.runAndApply('spt', { plant, respectFirmed: true, respectCalendar: false });
-    assert.equal(Engine.lastSetupAwareResult.diagnostics.method, 'spt-detached', 'synthetic SPT replaces the stale candidate with its own hard-bound result');
-    assert.ok(Engine.lastSetupAwareResult.validationContext);
+    const result = runAndApply('spt', { plant, respectFirmed: true, respectCalendar: false });
+    assert.equal(result.diagnostics.method, 'spt-detached', 'synthetic SPT produces its own hard-bound result');
+    assert.ok(result.validationContext);
   } finally {
     Store.setTasks(priorTasks, 'unit-test');
     Store.setSelectedPlant(priorPlant, 'unit-test');
-    Engine.lastSetupAwareResult = priorLastSetupAware;
   }
 });
 
@@ -3680,7 +3641,7 @@ test('effectiveFirmedIdSet = manual (gated) + frozen + running (not gated); SAP 
 });
 
 // ---------------------------------------------------------------------------
-// Engine.runAndApply('changeover', ...) -- respectFirmed must gate the
+// runAndApply('changeover', ...) -- respectFirmed must gate the
 // setup-aware branch's ECC-firmed fold, mirroring the prior per-line
 // protection rule. SAP's firm flag is display-only now: an SAP-firmed order is
 // free to move whatever respectFirmed says; a frozen-horizon order must stay
@@ -3688,7 +3649,7 @@ test('effectiveFirmedIdSet = manual (gated) + frozen + running (not gated); SAP 
 // ---------------------------------------------------------------------------
 
 
-test('Engine.runAndApply("changeover") never locks on SAP firm: an SAP-firmed order is movable with respectFirmed true or false, while a frozen-horizon order stays immovable regardless', () => {
+test('runAndApply("changeover") never locks on SAP firm: an SAP-firmed order is movable with respectFirmed true or false, while a frozen-horizon order stays immovable regardless', () => {
   const plant = 'CO-RESPECT-PLANT';
   const line = 'CO-RESPECT-LINE';
   const priorPlant = Store.selectedPlant;
@@ -3731,19 +3692,20 @@ test('Engine.runAndApply("changeover") never locks on SAP firm: an SAP-firmed or
     { id: 'co-frozen', PLANT: plant, MACHINE: line, RUN_TIME: '1', user_scheduled: true, start_date: frozenStart, end_date: frozenTaskEnd },
   ];
 
+  let lastResult;
   try {
     // --- respectFirmed omitted (defaults true): the SAP-firmed order is still movable.
     Store.setTasks(structuredClone(baseTasks), 'unit-test');
-    Engine.runAndApply('changeover', { plant, respectCalendar: true, startDate: horizonStart, runNow: horizonStart, endDate: new Date('2026-10-15T00:00:00') });
-    assert.equal(Engine.lastSetupAwareResult.dispositions.find(disposition => disposition.id === 'co-ecc').status, 'scheduled',
+    lastResult = runAndApply('changeover', { plant, respectCalendar: true, startDate: horizonStart, runNow: horizonStart, endDate: new Date('2026-10-15T00:00:00') });
+    assert.equal(lastResult.dispositions.find(disposition => disposition.id === 'co-ecc').status, 'scheduled',
       'with respectFirmed defaulted to true, an SAP-firmed order is still evaluated as movable');
     assert.equal(Store.tasks['co-frozen'].start_date.getTime(), frozenStart.getTime(),
       'a frozen-horizon order is never moved');
 
     // --- respectFirmed: true (explicit): same result.
     Store.setTasks(structuredClone(baseTasks), 'unit-test');
-    Engine.runAndApply('changeover', { plant, respectFirmed: true, respectCalendar: true, startDate: horizonStart, runNow: horizonStart, endDate: new Date('2026-10-15T00:00:00') });
-    assert.equal(Engine.lastSetupAwareResult.dispositions.find(disposition => disposition.id === 'co-ecc').status, 'scheduled',
+    lastResult = runAndApply('changeover', { plant, respectFirmed: true, respectCalendar: true, startDate: horizonStart, runNow: horizonStart, endDate: new Date('2026-10-15T00:00:00') });
+    assert.equal(lastResult.dispositions.find(disposition => disposition.id === 'co-ecc').status, 'scheduled',
       'with respectFirmed: true, an SAP-firmed order is still evaluated as movable');
     assert.equal(Store.tasks['co-frozen'].start_date.getTime(), frozenStart.getTime());
 
@@ -3751,8 +3713,8 @@ test('Engine.runAndApply("changeover") never locks on SAP firm: an SAP-firmed or
     // re-placed by the evaluator (a patch lands, moving it off its manually-set,
     // far-future, otherwise-never-chosen date); the frozen order still never moves.
     Store.setTasks(structuredClone(baseTasks), 'unit-test');
-    Engine.runAndApply('changeover', { plant, respectFirmed: false, respectCalendar: true, startDate: horizonStart, runNow: horizonStart, endDate: new Date('2026-10-15T00:00:00') });
-    assert.equal(Engine.lastSetupAwareResult.dispositions.find(disposition => disposition.id === 'co-ecc').status, 'scheduled',
+    lastResult = runAndApply('changeover', { plant, respectFirmed: false, respectCalendar: true, startDate: horizonStart, runNow: horizonStart, endDate: new Date('2026-10-15T00:00:00') });
+    assert.equal(lastResult.dispositions.find(disposition => disposition.id === 'co-ecc').status, 'scheduled',
       'with respectFirmed: false, the ECC-firmed order must be evaluated as movable rather than protected');
     assert.equal(Store.tasks['co-frozen'].start_date.getTime(), frozenStart.getTime(),
       'the frozen-horizon fold is unconditional -- respectFirmed: false must not free it too');
@@ -5161,7 +5123,7 @@ describe('reconcile (finish-anchored)', () => {
       const free = fx.task('fr', { RUN_TIME: '2', user_scheduled: true, start_date: at(20, 9), end_date: at(20, 11), original_end_date: at(21, 17) });
       Store.setTasks([marked, free], 'unit-test');
       const before = [Store.tasks.mk.start_date.getTime(), Store.tasks.mk.end_date.getTime()];
-      Engine.runAndApply('changeover', { plant: fx.plant, respectFirmed: false, respectCalendar: true,
+      runAndApply('changeover', { plant: fx.plant, respectFirmed: false, respectCalendar: true,
         planningStart: at(20, 0), runNow: at(20, 9), endDate: at(27, 0) });
       assert.deepEqual([Store.tasks.mk.start_date.getTime(), Store.tasks.mk.end_date.getTime()], before, 'the marked row is fixed whatever the toggle says');
       assert.equal(Store.tasks.mk.placement_exception, 'overtime');
@@ -5746,15 +5708,15 @@ describe('calendar periods: engine plant-hours readers', () => {
     const { sourcePlantWorkHours, sourcePlantPeriods } = await import('../../../frontend/optimization/engine.mjs');
     Store.ensurePlant('SPW-SNAP');
     Store.setPlantPeriods('SPW-SNAP', [period('live', '2026-10-01', null, allDays(null))], 'unit-test');
-    const originalRun = Engine.runAndApply;
+    const originalRun = Engine._evaluateDetached;
     try {
       const snapshot = {
         ...snapshotSchedule(),
         plants: { 'SPW-SNAP': { workHours: weekdays(6, 18), periods: PERIODS } },
       };
       let seen = null;
-      // evaluateSchedule sets the detached candidate snapshot around runAndApply; read the accessors from inside it.
-      Engine.runAndApply = () => {
+      // evaluateSchedule sets the detached candidate snapshot around the detached body; read the accessors from inside it.
+      Engine._evaluateDetached = () => {
         seen = {
           periods: sourcePlantPeriods('SPW-SNAP'),
           before: sourcePlantWorkHours('SPW-SNAP', new Date('2026-10-21T12:00:00'))[3],
@@ -5771,7 +5733,7 @@ describe('calendar periods: engine plant-hours readers', () => {
       assert.equal(seen.noDate, snapshot.plants['SPW-SNAP'].workHours);
       assert.deepEqual(seen.missing, []);
     } finally {
-      Engine.runAndApply = originalRun;
+      Engine._evaluateDetached = originalRun;
       Store.setPlantPeriods('SPW-SNAP', [], 'unit-test');
     }
   });

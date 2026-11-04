@@ -65,6 +65,19 @@ export interface RemoveBacklogResult {
  * their own copy. */
 export const MIN_PRODUCTIVE_SEGMENT_MINUTES = 30;
 
+/** The four known rankable priority fields and the order attribute each one
+ *  reads: the single offline-default mapping. `Engine._fieldTaskFields` seeds
+ *  from it (and `Engine.setFieldTaskFields` merges the backend registry over a
+ *  copy); setup-scheduler.mts keeps its own private `PRIORITY_TASK_FIELDS`
+ *  table with the same four entries (it can import this instead). A
+ *  `key.toUpperCase()` guess is wrong for three of the four. */
+export const PRIORITY_FIELD_DEFAULTS: Readonly<Record<string, string>> = {
+  colorWheel: 'COLOR',
+  prt01: 'PRT_01',
+  prt02: 'PRT_02',
+  productionVersion: 'PRODUCTION_VERSION',
+};
+
 /** Capacity-aware task sequencer: reorders tasks to respect ceiling constraints.
  *
  * Given a sorted task list, cursor position (ms), and per-task ceiling/runtime

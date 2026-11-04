@@ -1,5 +1,5 @@
 // Tool Inventory Wave 5: Alerts.applyFix for an `overload` alert now judges a DETACHED candidate first
-// (Engine.evaluateSchedule on a snapshot) instead of the live Engine.runAndApply. An error finding means nothing is applied,
+// (Engine.evaluateSchedule on a snapshot) instead of a live run (the live runAndApply tail is deleted). An error finding means nothing is applied,
 // no Undo entry is pushed and the alert stays; a candidate that queues orders for tooling needs the shared confirm
 // (Cancel applies nothing, keeps the alert). applyFix is async and resolves true only when something was applied.
 import { test } from 'node:test';
@@ -18,14 +18,13 @@ if (typeof globalThis.document === 'undefined') globalThis.document = { getEleme
 const alertFor = () => ({ id: 'ov-1', sev: 'warn', type: 'overload', line: 'FX-L1', time: new Date('2035-08-10T10:00:00'), msg: 'overloaded' });
 
 function harness({ candidate, confirm = async () => true }) {
-  const calls = { evaluate: [], runAndApply: 0, applied: [], undo: [], dismissed: [], toasts: [], confirms: [] };
+  const calls = { evaluate: [], applied: [], undo: [], dismissed: [], toasts: [], confirms: [] };
   const prior = {
-    evaluate: Engine.evaluateSchedule, run: Engine.runAndApply, apply: Engine.applySchedulePatches, push: UndoStack.push,
+    evaluate: Engine.evaluateSchedule, apply: Engine.applySchedulePatches, push: UndoStack.push,
     dismiss: Alerts.dismiss, clear: Alerts.clearDismissed, recompute: Alerts.scheduleRecompute, show: Toast.show, confirm: Modal.confirm,
     plantNow: Store.plantNow, plantForLine: Store.getPlantForLine, alerts: Store.alerts, sel: Store.selectedPlant,
   };
   Engine.evaluateSchedule = (mode, opts, snapshot) => { calls.evaluate.push({ mode, opts, snapshot }); return candidate; };
-  Engine.runAndApply = () => { calls.runAndApply++; };
   Engine.applySchedulePatches = patches => { calls.applied.push(patches); };
   UndoStack.push = (label, fn, ids) => { calls.undo.push({ label, ids }); };
   Alerts.dismiss = id => { calls.dismissed.push(id); };
@@ -40,7 +39,7 @@ function harness({ candidate, confirm = async () => true }) {
   return {
     calls,
     restore() {
-      Engine.evaluateSchedule = prior.evaluate; Engine.runAndApply = prior.run; Engine.applySchedulePatches = prior.apply; UndoStack.push = prior.push;
+      Engine.evaluateSchedule = prior.evaluate; Engine.applySchedulePatches = prior.apply; UndoStack.push = prior.push;
       Alerts.dismiss = prior.dismiss; Alerts.clearDismissed = prior.clear; Alerts.scheduleRecompute = prior.recompute;
       Toast.show = prior.show; Modal.confirm = prior.confirm; Store.plantNow = prior.plantNow; Store.getPlantForLine = prior.plantForLine;
       Store.setAlerts(prior.alerts, 'unit-test');
@@ -51,12 +50,11 @@ function harness({ candidate, confirm = async () => true }) {
 const patchFor = id => ({ id, changes: { start_date: new Date('2035-08-10T09:00:00'), end_date: new Date('2035-08-10T10:00:00') } });
 const okCandidate = (extra = {}) => ({ patches: [patchFor('o1'), patchFor('o2')], validationFindings: [], ...extra });
 
-test('Fix overload evaluates a detached candidate (never the live runAndApply), then applies, pushes one Undo and dismisses', async () => {
+test('Fix overload evaluates a detached candidate (no live run), then applies, pushes one Undo and dismisses', async () => {
   const h = harness({ candidate: okCandidate() });
   try {
     const applied = await Alerts.applyFix('ov-1');
     assert.equal(applied, true);
-    assert.equal(h.calls.runAndApply, 0, 'the live runAndApply is no longer used');
     assert.equal(h.calls.evaluate.length, 1);
     const { mode, opts, snapshot } = h.calls.evaluate[0];
     assert.equal(mode, 'changeover');

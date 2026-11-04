@@ -255,6 +255,10 @@ export const Persistence = {
   },
   _dirtyIds: new Set<string>(),       // task ids mutated since last successful backend save
   _forceIds: new Set<string>(),       // historical name: dependent optimizer/undo edits require atomic version checks
+  /** Does this task id carry unsaved local edits? (The engine's reconcile never re-derives such a row.) */
+  isDirty(id: string): boolean { return Persistence._dirtyIds.has(id); },
+  /** Forget one task's unsaved-edit mark (the dirty and force sets together). */
+  discardDirty(id: string): void { Persistence._dirtyIds.delete(id); Persistence._forceIds.delete(id); },
   _conflictedIds: new Set<string>(),  // retained local edits cannot adopt a server version without reconciliation
   // Ids whose manual firm the planner changed (Firm/Unfirm/undo). Only these rows send FIRMED:
   // an ordinary date edit must not write this client's possibly stale firm copy back over
