@@ -2051,8 +2051,12 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       // only turn red once the push cap is known). The next alerts:change (the post-ready publish) re-enters here; the
       // fallback timer applies the score anyway so a failed load never leaves the badge on "—". The unchanged-guard
       // below is deliberately not updated, so the later recompute is not skipped.
-      if (!force && Store.tasksForSelectedPlant().length
-          && (NIMBUS.Persistence?.bootReady === false || stale)) {
+      // The load gate also covers a plant with NO orders yet: before the first /tasks response the plant looks empty,
+      // and applying the empty-plant 100 there painted a false "100" that then dropped when the orders arrived. The
+      // freshness gate still needs orders (an empty plant's alert list is legitimately empty and fresh).
+      // (No selected plant means nothing is loading, so `bootReady === false` alone is not a reason to hold.)
+      if (!force && ((Store.selectedPlant && NIMBUS.Persistence?.bootReady === false)
+          || (stale && Store.tasksForSelectedPlant().length))) {
         if (!_confStaleTimer) {
           const generation = Confidence._lifecycleGeneration;
           _confStaleTimer = setTimeout(() => {

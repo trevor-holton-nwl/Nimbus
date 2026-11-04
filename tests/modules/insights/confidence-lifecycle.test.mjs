@@ -1017,3 +1017,47 @@ test('Confidence holds while the load is not ready or the alerts are stale, appl
     globalThis.NIMBUS = priorNimbus;
   }
 });
+test('Confidence does not paint the empty-plant 100 while the load is still running, and applies it once the load is ready', async () => {
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  const priorAlerts = structuredClone(Store.alerts);
+  const priorAll = Alerts._allAlerts;
+  const priorAvailable = Compute.available;
+  const priorSchedule = Alerts.scheduleRecompute;
+  const priorNimbus = globalThis.NIMBUS;
+  const priorConfidence = Confidence.snapshot();
+  const priorApply = Confidence._apply;
+  const priorPersistence = nimbus.Persistence;
+  const applied = [];
+  globalThis.NIMBUS = nimbus;
+  Compute.available = () => false;
+  Alerts.scheduleRecompute = () => {};
+  nimbus.Persistence = { bootReady: false };
+  try {
+    Confidence._invalidatePending(true);
+    Store.setTasks([], 'test');
+    Store.setSelectedPlant('EMP', 'test');   // resets the badge and the unchanged-guard
+    Alerts._publish([], null);
+    Confidence._apply = function (score) { applied.push(score); return priorApply.call(this, score); };
+
+    await Confidence._recompute();
+    assert.deepEqual(applied, [], 'no orders yet but the load is not ready: the empty-plant 100 is held');
+    assert.equal(Confidence._lastAlertsSrc, null, 'the unchanged-guard is not updated by the held attempt');
+
+    nimbus.Persistence.bootReady = true;
+    await Confidence._recompute();
+    assert.deepEqual(applied, [100], 'load ready and still no orders: a genuinely empty plant scores 100');
+  } finally {
+    Confidence._apply = priorApply;
+    Confidence._invalidatePending(true);
+    Confidence.restore(priorConfidence);
+    nimbus.Persistence = priorPersistence;
+    Compute.available = priorAvailable;
+    Alerts.scheduleRecompute = priorSchedule;
+    Alerts._allAlerts = priorAll;
+    Store.setAlerts(priorAlerts, 'test');
+    Store.setTasks(priorTasks, 'test');
+    Store.setSelectedPlant(priorPlant, 'test');
+    globalThis.NIMBUS = priorNimbus;
+  }
+});
