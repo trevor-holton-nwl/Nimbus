@@ -8650,3 +8650,94 @@ body.dark .asl-best { color: var(--fg); }
   .job-tl-row { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   .job-tl-axis-row > div:first-child { display: none; }
 }
+
+/* =============================================================================
+   UNSAVED CHANGES DIALOG (scheduling/unsaved-dialog.mts, #unsaved-modal)
+   The header badge is a button (same id/role); the dialog is a dense one-row-per-order table.
+   ========================================================================== */
+.unsaved-badge {
+  font: 600 11px var(--font-mono); letter-spacing: 0.02em;
+  background: var(--warn-vivid); color: #2a1e00;
+  border: 0; border-radius: var(--r-sm); padding: 5px 9px; cursor: pointer;
+}
+.unsaved-badge[hidden] { display: none; }
+.unsaved-badge:hover { filter: brightness(1.08); }
+.unsaved-badge:focus-visible { outline: 2px solid var(--chrome-accent); outline-offset: 2px; }
+.modal.unsaved-dlg { max-width: 960px; }
+.unsaved-body { display: flex; flex-direction: column; gap: 10px; padding: 12px 16px; }
+.unsaved-ctrl { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.unsaved-ctrl input { flex: 1 1 200px; min-width: 0; }
+.unsaved-banner {
+  background: var(--warn-soft); color: var(--warn-text);
+  border-left: 3px solid var(--warn-text); padding: 7px 12px; font-size: 12px; font-weight: 500;
+}
+.unsaved-skipped, .unsaved-foot-note, .unsaved-cap { font-size: 11px; color: var(--fg-mute); }
+.unsaved-foot-note { margin-right: auto; align-self: center; }
+.unsaved-cap { align-self: center; }
+.unsaved-tablewrap { overflow: auto; min-height: 0; }
+.unsaved-table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: 12px; }
+.unsaved-table th {
+  text-align: left; font: 500 10px var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--fg-mute); padding: 8px 10px; border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; background: var(--bg-elev); z-index: 1;
+}
+.unsaved-table td { padding: 7px 10px; vertical-align: middle; border-bottom: 1px solid var(--line); }
+.unsaved-row { cursor: pointer; }
+.unsaved-row:nth-child(4n+1) { background: var(--bg-subtle); }
+.unsaved-row:hover { background: var(--bg-hover); }
+.unsaved-row.muted td { color: var(--fg-faint); }
+.unsaved-row.open td { background: var(--accent-wash); border-bottom-color: transparent; }
+.unsaved-ord { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.unsaved-id, .unsaved-val, .unsaved-delta { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.unsaved-mat { font-size: 11px; color: var(--fg-mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+.unsaved-mat b { font: 500 11px var(--font-mono); color: var(--fg); margin-right: 6px; }
+.unsaved-row.muted .unsaved-mat b { color: var(--fg-faint); }
+.unsaved-chip {
+  display: inline-block; font: 500 10px/1 var(--font-mono); letter-spacing: 0.03em; padding: 4px 6px;
+  border-radius: var(--r-sm); border: 1px solid transparent; white-space: nowrap;
+}
+.unsaved-chip.moved { background: var(--info-soft); color: var(--accent); }
+.unsaved-chip.machine { background: var(--accent-wash); color: var(--primary); border-color: var(--primary); }
+.unsaved-chip.firm { background: var(--err-soft); color: var(--bar-firmed); }
+.unsaved-chip.runtime, .unsaved-chip.tooling { background: var(--warn-soft); color: var(--warn-text); }
+.unsaved-chip.needs { background: var(--err-soft); color: var(--err); }
+.unsaved-chip.noref { background: var(--bg-subtle); color: var(--fg-mute); border: 1px dashed var(--fg-faint); }
+.unsaved-chip.nochange { background: var(--bg-subtle); color: var(--fg-faint); }
+.unsaved-val.old { color: var(--fg-mute); }
+.unsaved-val.mute, .unsaved-delta.mute { color: var(--fg-faint); }
+.unsaved-delta { font-size: 12px; white-space: nowrap; }
+.unsaved-delta.pos { color: var(--warn-text); }
+.unsaved-delta.neg { color: var(--ok); }
+.unsaved-delta.kind { color: var(--primary); }
+.unsaved-delta small { display: block; font-size: 10px; color: var(--fg-mute); }
+.unsaved-exp-cell { width: 34px; }
+.unsaved-exp {
+  width: 24px; height: 24px; border: 0; background: none; color: var(--fg-mute); cursor: pointer;
+  border-radius: var(--r-sm); display: inline-grid; place-items: center;
+}
+.unsaved-exp::before {
+  content: ""; width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg) translateY(-1px); transition: transform var(--t-fast);
+}
+.unsaved-exp[aria-expanded="true"]::before { transform: rotate(-135deg) translateY(-1px); }
+.unsaved-exp:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.unsaved-detail[hidden] { display: none; }
+.unsaved-detail td { padding: 0 10px 12px; background: var(--accent-wash); }
+.unsaved-dwrap { display: flex; gap: 16px 28px; flex-wrap: wrap; align-items: flex-start; padding: 8px 10px 0; border-top: 1px dashed var(--line); }
+.unsaved-dfields { flex: 1 1 320px; display: grid; grid-template-columns: max-content 1fr 14px 1fr; gap: 4px 10px; align-items: baseline; font-size: 12px; }
+.unsaved-dfields.single { grid-template-columns: max-content 1fr; }
+.unsaved-lab { color: var(--fg-mute); }
+.unsaved-hd { font: 500 10px var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-mute); }
+.unsaved-arr { color: var(--fg-faint); text-align: center; }
+.unsaved-dfields .unsaved-val.old { text-decoration: line-through; text-decoration-color: var(--fg-faint); }
+.unsaved-dmeta { flex: 0 1 300px; display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.unsaved-src i { font-style: normal; color: var(--fg-mute); margin-right: 6px; }
+.unsaved-enote { color: var(--fg-mute); border-left: 2px solid var(--accent); padding-left: 8px; }
+.unsaved-stale { color: var(--fg-mute); }
+.unsaved-dmeta .btn { align-self: flex-start; }
+.unsaved-empty { padding: 24px 10px; text-align: center; color: var(--fg-mute); }
+.unsaved-empty[hidden] { display: none; }
+@media (max-width: 720px) {
+  .unsaved-dfields { grid-template-columns: max-content 1fr; }
+  .unsaved-dfields .unsaved-arr { display: none; }
+}

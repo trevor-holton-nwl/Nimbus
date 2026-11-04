@@ -75,6 +75,7 @@ import { OPTIMIZER_MODES, seedOptimizerMode, seedOptimizerPreset } from '../opti
 import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction } from '../scheduling/gantt.mjs';
 import { Table } from '../scheduling/orders.mjs';
 import { GanttLegend } from '../scheduling/gantt-legend.mjs';
+import { UnsavedDialog } from '../scheduling/unsaved-dialog.mjs';
 import { Dashboard, AlertsUIAdapter } from '../insights/insights-ui.mjs';
 import { AdminCockpit } from '../admin-ops/admin-ui.mjs';
 import { Plant, ProdLines, WorkCenters } from '../master-data/admin-ui.mjs';
@@ -2234,6 +2235,8 @@ const App = {
     }
     // Board legend: modal wiring + toolbar button (aria-label set inline, no aria sweep exists).
     GanttLegend.init();
+    // Header "N unsaved" badge opens the unsaved-changes dialog.
+    UnsavedDialog.init();
     // Always-on matched-alert set (Gantt highlight, bell/drawer filter, Alert Monitor) — not tab-scoped.
     AlertProfileMatches.init();
     const ganttLegendBtn = document.getElementById('btn-gantt-legend');

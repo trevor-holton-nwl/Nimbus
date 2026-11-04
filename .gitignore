@@ -43,6 +43,8 @@ frontend/calendar/calendar-sync.mjs
 frontend/security/session.mjs
 frontend/scheduling/gantt.mjs
 frontend/scheduling/gantt-legend.mjs
+frontend/scheduling/unsaved-dialog.mjs
+frontend/scheduling/unsaved-diff.mjs
 frontend/scheduling/gantt-lanes.mjs
 frontend/scheduling/nonworking-spans.mjs
 frontend/scheduling/drag-state.mjs
