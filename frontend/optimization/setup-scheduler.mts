@@ -1711,6 +1711,32 @@ function overridesForLine(
   return filtered;
 }
 
+/** The one 8-argument `resolveSetup` call every transition lookup in this
+ * module makes: the run's plant/machine rows, overrides and value defaults,
+ * plus its prebuilt resolution index when one exists. */
+function resolveTransition(
+  bounds: Readonly<DueDateFirstBounds>,
+  definition: SetupDefinition,
+  line: string,
+  predecessorState: SetupStateKey | null,
+  successorState: SetupStateKey | null,
+  predecessorOrderId: string | null,
+  successorOrderId: string,
+): ReturnType<typeof resolveSetup> {
+  return resolveSetup({
+    definition,
+    machine: line,
+    predecessorState,
+    successorState,
+    predecessorOrderId,
+    successorOrderId,
+    plantRows: bounds.setup.plant_rows,
+    machineRows: bounds.setup.machine_rows,
+    overrides: bounds.setup.overrides, valueDefaults: bounds.setup.value_defaults ?? NO_VALUE_DEFAULTS,
+    index: bounds.runContext?.resolutionIndex ?? undefined,
+  });
+}
+
 /** An active occurrence override belongs to one physical adjacency. When a
  * candidate puts its successor behind a different order/state, the override
  * does not travel with that order; the candidate is infeasible and reports
@@ -2335,18 +2361,7 @@ function orderedBySetupNearest(
     const ranked = remaining.map(task => {
       const successorState = orderState(bounds, task, definition);
       const resolution = predecessorState && successorState
-        ? resolveSetup({
-          definition,
-          machine: line,
-          predecessorState,
-          successorState,
-          predecessorOrderId,
-          successorOrderId: taskId(task),
-          plantRows: bounds.setup.plant_rows,
-          machineRows: bounds.setup.machine_rows,
-          overrides: bounds.setup.overrides, valueDefaults: bounds.setup.value_defaults ?? NO_VALUE_DEFAULTS,
-          index: bounds.runContext?.resolutionIndex ?? undefined,
-        })
+        ? resolveTransition(bounds, definition, line, predecessorState, successorState, predecessorOrderId, taskId(task))
         : null;
       return {
         task,
@@ -3306,18 +3321,7 @@ function candidateForSequence(
       }
       setupRequirement = { kind: 'resolved', minutes: effectiveSetupMinutes };
     } else {
-      const resolved = resolveSetup({
-        definition,
-        machine: line,
-        predecessorState,
-        successorState: successorState!,
-        predecessorOrderId,
-        successorOrderId: taskId(task),
-        plantRows: bounds.setup.plant_rows,
-        machineRows: bounds.setup.machine_rows,
-        overrides: bounds.setup.overrides, valueDefaults: bounds.setup.value_defaults ?? NO_VALUE_DEFAULTS,
-        index: bounds.runContext?.resolutionIndex ?? undefined,
-      });
+      const resolved = resolveTransition(bounds, definition, line, predecessorState, successorState!, predecessorOrderId, taskId(task));
       if (!resolved.covered || resolved.effectiveMin === null) {
         const ctx = bounds.runContext;
         if (ctx?.unknownSetupPolicy === 'excludeFromSearch') {
@@ -3457,7 +3461,7 @@ function candidateForSequence(
   while (fragment.nextFirmed && predecessorState && checkpoints.length) {
     const boundary = fragment.nextFirmed;
     const outgoing = boundary.state
-      ? resolveSetup({ definition, machine: line, predecessorState, successorState: boundary.state, predecessorOrderId, successorOrderId: taskId(boundary.task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides, valueDefaults: bounds.setup.value_defaults ?? NO_VALUE_DEFAULTS, index: bounds.runContext?.resolutionIndex ?? undefined })
+      ? resolveTransition(bounds, definition, line, predecessorState, boundary.state, predecessorOrderId, taskId(boundary.task))
       : null;
     // Under plantDefaultMinutes an uncovered pair, or a boundary with no setup state, still reserves the plant
     // default (same charge the boundary block below and `validateCandidate` make); zero/excludeFromSearch
@@ -3535,18 +3539,7 @@ function candidateForSequence(
       missingEdges.push(unknownInitialStateEdge(line, firmed.task));
       reserveBoundaryDefault();
     } else {
-      const resolved = resolveSetup({
-        definition,
-        machine: line,
-        predecessorState,
-        successorState: firmed.state,
-        predecessorOrderId,
-        successorOrderId: taskId(firmed.task),
-        plantRows: bounds.setup.plant_rows,
-        machineRows: bounds.setup.machine_rows,
-        overrides: bounds.setup.overrides, valueDefaults: bounds.setup.value_defaults ?? NO_VALUE_DEFAULTS,
-        index: bounds.runContext?.resolutionIndex ?? undefined,
-      });
+      const resolved = resolveTransition(bounds, definition, line, predecessorState, firmed.state, predecessorOrderId, taskId(firmed.task));
       if (!resolved.covered || resolved.effectiveMin === null) {
         // A1: counted into uncoveredEdgeCount (only this !resolved.covered
         // branch — not `incoming-firmed-setup-infeasible` below, which is a
@@ -4860,18 +4853,7 @@ function tailCapacityEnd(
     return new Date(nextFirmed.start.getTime() - chargedSetupMinutes(bounds.runContext, null, chargeable) * 60 * 1000);
   }
   const definition = bounds.setup.definition!;
-  const resolved = resolveSetup({
-    definition,
-    machine: line,
-    predecessorState: finalState,
-    successorState: nextFirmed.state,
-    predecessorOrderId: finalPredecessorOrderId,
-    successorOrderId: taskId(nextFirmed.task),
-    plantRows: bounds.setup.plant_rows,
-    machineRows: bounds.setup.machine_rows,
-    overrides: bounds.setup.overrides, valueDefaults: bounds.setup.value_defaults ?? NO_VALUE_DEFAULTS,
-    index: bounds.runContext?.resolutionIndex ?? undefined,
-  });
+  const resolved = resolveTransition(bounds, definition, line, finalState, nextFirmed.state, finalPredecessorOrderId, taskId(nextFirmed.task));
   const reserveMinutes = chargedSetupMinutes(bounds.runContext, resolved, chargeable);
   return new Date(nextFirmed.start.getTime() - reserveMinutes * 60 * 1000);
 }
@@ -7300,7 +7282,7 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
       const protectedTask = taskIsEvaluationProtected(snapshot, bounds, task);
       const successor = definition ? stateForOrder(task, definition) : null;
       const resolution = chargeable && state && successor
-        ? resolveSetup({ definition: definition!, machine: line, predecessorState: state, successorState: successor, predecessorOrderId: predecessor ? taskId(predecessor) : null, successorOrderId: taskId(task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides, valueDefaults: bounds.setup.value_defaults ?? NO_VALUE_DEFAULTS, index: bounds.runContext?.resolutionIndex ?? undefined })
+        ? resolveTransition(bounds, definition!, line, state, successor, predecessor ? taskId(predecessor) : null, taskId(task))
         : null;
       // excludeFromSearch (O2): the search refuses an unprotected order whose transition has no matrix row, so an incumbent
       // sitting behind one is an error too (repairCandidate queues it). Both states are known (resolution exists only then) and the
@@ -7817,10 +7799,7 @@ function placeTaskInLineGaps(env: GapEnv, task: NimbusTask, hooks?: ToolGapHooks
     // than a hardcoded zero.
     if (!chargeable) return 0;
     if (!from || !to) return chargedSetupMinutes(bounds.runContext, null, true);
-    const resolution = resolveSetup({ definition: definition!, machine: line, predecessorState: from, successorState: to,
-      predecessorOrderId: predecessor ? taskId(predecessor) : null, successorOrderId: taskId(successor),
-      plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides, valueDefaults: bounds.setup.value_defaults ?? NO_VALUE_DEFAULTS,
-      index: bounds.runContext?.resolutionIndex ?? undefined });
+    const resolution = resolveTransition(bounds, definition!, line, from, to, predecessor ? taskId(predecessor) : null, taskId(successor));
     if (!resolution.covered && bounds.runContext?.unknownSetupPolicy === 'excludeFromSearch' && !relaxExclude) return null;
     return chargedSetupMinutes(bounds.runContext, resolution, true);
   };
@@ -8197,7 +8176,7 @@ export function objectiveFactsForCandidate(
       const successor = stateForOrder(task, definition);
       if (chargeable) {
         const resolved = state && successor
-          ? resolveSetup({ definition, machine: line, predecessorState: state, successorState: successor, predecessorOrderId: previous, successorOrderId: taskId(task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides, valueDefaults: bounds.setup.value_defaults ?? NO_VALUE_DEFAULTS, index: bounds.runContext?.resolutionIndex ?? undefined })
+          ? resolveTransition(bounds, definition, line, state, successor, previous, taskId(task))
           : null;
         setupMinutes += chargedSetupMinutes(bounds.runContext, resolved, true);
       }
@@ -8226,18 +8205,7 @@ export function objectiveFactsForCandidate(
     for (const task of lineTasks) {
       const successorState = stateForOrder(task, definition);
       if (predecessorState && successorState && !setupCompatibilityForLine(snapshot, bounds.setup.plant, line)) {
-        const resolved = resolveSetup({
-          definition,
-          machine: line,
-          predecessorState,
-          successorState,
-          predecessorOrderId,
-          successorOrderId: taskId(task),
-          plantRows: bounds.setup.plant_rows,
-          machineRows: bounds.setup.machine_rows,
-          overrides: bounds.setup.overrides, valueDefaults: bounds.setup.value_defaults ?? NO_VALUE_DEFAULTS,
-          index: bounds.runContext?.resolutionIndex ?? undefined,
-        });
+        const resolved = resolveTransition(bounds, definition, line, predecessorState, successorState, predecessorOrderId, taskId(task));
         if (!resolved.covered || resolved.effectiveMin === null) uncoveredEdges += 1;
       }
       predecessorState = successorState;
