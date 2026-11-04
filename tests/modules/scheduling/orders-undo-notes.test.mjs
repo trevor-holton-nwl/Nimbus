@@ -6,6 +6,7 @@ import { Table, Inspector, manualEditKind, shouldAdoptNoteVersion } from '../../
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Util, Toast } from '../../../frontend/platform/foundation.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
+import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 
 if (typeof globalThis.document === 'undefined') {
   globalThis.document = { getElementById() { return null; }, addEventListener() {}, removeEventListener() {}, querySelector() { return null; }, body: { appendChild() {} } };
@@ -133,6 +134,43 @@ test('Grid typed finish pushes one undo entry whose snapshot holds the OLD finis
     assert.equal(Store.tasks.ue1.end_date.getTime(), oldEnd.getTime());
     assert.equal(Store.tasks.ue1.start_date.getTime(), new Date('2026-08-25T08:00:00').getTime());
   } finally { Table._api = prior; s.restore(); }
+});
+
+test('Grid finish / run time edit on an already-dirty row: the undo snapshot keeps its "was dirty" mark (F10 must not discard it)', () => {
+  const s = setup('P-UNDO-G', 'LG', 'ug1');
+  const prior = Table._api, priorProbe = UndoStack.dirtyProbe, priorAfter = UndoStack.afterRestore;
+  Table._api = { applyTransaction: () => {}, refreshCells: () => {} };
+  UndoStack.dirtyProbe = id => id === 'ug1';   // the row carries an unsaved edit (e.g. a PRT_01 change) before the grid edit
+  try {
+    for (const field of ['end_date', 'RUN_TIME']) {
+      const row = Store.tasks.ug1;
+      const oldValue = row[field];
+      row[field] = field === 'end_date' ? new Date('2026-08-25T09:00:00') : '3';
+      Table._onCellChanged({ colDef: { field }, data: row, newValue: row[field], oldValue, node: {} });
+      const seen = [];
+      UndoStack.afterRestore = (ids, wasDirty) => seen.push([...wasDirty]);
+      UndoStack.pop();
+      assert.deepEqual(seen, [['ug1']], field + ': the restored snapshot row still carries the dirty marker');
+    }
+  } finally { UndoStack.dirtyProbe = priorProbe; UndoStack.afterRestore = priorAfter; Table._api = prior; s.restore(); }
+});
+
+test('a note save that adopts the new row_version moves the saved baseline only when it sat at the sent version', async () => {
+  const s = setup('P-UNDO-H', 'LH', 'uh1');
+  const priorFetch = Util.fetchTraced;
+  Util.fetchTraced = (url, init) => Promise.resolve({ ok: true, json: async () => ({ versions: { [JSON.parse(init.body).id]: 9 } }) });
+  try {
+    Store.tasks.uh1.row_version = 5; Store.tasks.uh1.notes = 'n';
+    Persistence._savedBaseline.set('uh1', { version: 5, key: 'K' });
+    await Inspector._sendNote('uh1', 'n', false);
+    assert.equal(Store.tasks.uh1.row_version, 9);
+    assert.deepEqual(Persistence._savedBaseline.get('uh1'), { version: 9, key: 'K' }, 'the note does not change the saved content, so the baseline follows the version');
+    // A baseline from some OTHER version is not the state this note was written on: it stays, and the row can never settle on it.
+    Store.tasks.uh1.row_version = 5;
+    Persistence._savedBaseline.set('uh1', { version: 3, key: 'K' });
+    await Inspector._sendNote('uh1', 'n', false);
+    assert.deepEqual(Persistence._savedBaseline.get('uh1'), { version: 3, key: 'K' });
+  } finally { Util.fetchTraced = priorFetch; Persistence._savedBaseline.clear(); s.restore(); }
 });
 
 test('Grid invalid typed finish pushes nothing and restores the cell', () => {

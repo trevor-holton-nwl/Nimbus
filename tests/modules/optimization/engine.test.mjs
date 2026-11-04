@@ -4870,6 +4870,59 @@ describe('reconcile (finish-anchored)', () => {
     }
   });
 
+  test('F10 + Save: a never-placed row edited, SAVED, then undone stays dirty (the server holds the placement); Undo/Redo/Save/Undo too', () => {
+    const fx = recFixture();
+    const unsubscribe = Store.subscribe(evt => App._trackDirty(evt), 'f10-saved');
+    const priorDirty = new Set(Persistence._dirtyIds), priorForce = new Set(Persistence._forceIds);
+    Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+    try {
+      Store.setTasks([fx.task('sv', { original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10), row_version: 3 })], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(Store.tasks.sv.user_scheduled, false);
+      const snapshot = UndoStack.snapshotTasks(['sv']);
+      Store.updateMany([{ id: 'sv', changes: { start_date: at(21, 7), end_date: at(21, 11) } }], 'engine');
+      assert.equal(Store.tasks.sv.user_scheduled, true, 'precondition: the edit placed the row');
+      // Save: the server now holds the placement; the dirty mark is cleared and the version moves on.
+      Persistence.discardDirty('sv');
+      Store.tasks.sv.row_version = 4;
+      UndoStack.restoreTasks(snapshot);
+      assert.equal(Persistence._dirtyIds.has('sv'), true, 'undo past a Save must stay dirty: nothing else would send it');
+      // Undo, Save, Undo variant: a second save after a fresh edit, then the same snapshot again.
+      Persistence.discardDirty('sv');
+      Store.tasks.sv.row_version = 5;
+      UndoStack.restoreTasks(snapshot);
+      assert.equal(Persistence._dirtyIds.has('sv'), true, 'a later Save moved the version again: still dirty');
+    } finally {
+      unsubscribe();
+      Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+      priorDirty.forEach(id => Persistence._dirtyIds.add(id)); priorForce.forEach(id => Persistence._forceIds.add(id));
+      fx.restore();
+    }
+  });
+
+  test('Redo through the engine hook leaves a firmed / frozen / running order where it is', () => {
+    const fx = recFixture();
+    const priorShow = Toast.show, priorStatus = Engine.firmingStatus, priorEntries = UndoStack._entries.slice(), priorRedo = UndoStack._redo;
+    Toast.show = () => {};
+    try {
+      for (const reason of ['manual', 'frozen', 'running']) {
+        Store.setTasks([fx.task('rl', { user_scheduled: true, row_version: 3, start_date: at(24, 13), end_date: at(24, 17) })], 'unit-test');
+        UndoStack._entries = []; UndoStack._redo = [];
+        const snap = UndoStack.snapshotTasks(['rl']);
+        Store.updateMany([{ id: 'rl', changes: { start_date: at(25, 13), end_date: at(25, 17) } }], 'interaction');
+        UndoStack.push('drag', () => UndoStack.restoreTasks(snap), ['rl'], { redo: true });
+        UndoStack.pop();
+        assert.equal(Store.tasks.rl.end_date.getTime(), at(24, 17).getTime(), reason + ': undone');
+        // The lock arrives with no task event (time passing, or a firm that raised none).
+        if (reason === 'manual') Store._state.firmedIds.add('rl');
+        else Engine.firmingStatus = () => ({ firmed: true, reasons: [reason] });
+        UndoStack.popRedo();
+        assert.equal(Store.tasks.rl.end_date.getTime(), at(24, 17).getTime(), reason + ': Redo did not move the locked order');
+        Store._state.firmedIds.delete('rl'); Engine.firmingStatus = priorStatus;
+      }
+    } finally { Toast.show = priorShow; Engine.firmingStatus = priorStatus; UndoStack._entries = priorEntries; UndoStack._redo = priorRedo; fx.restore(); }
+  });
+
   // Undo settles the unsaved count: a row that returns to its last saved state stops counting as unsaved.
   describe('undo settles unsaved state', () => {
     const SETTLE_SETS = ['_dirtyIds', '_forceIds', '_firmDirtyIds', '_conflictedIds', '_dirtySource', '_refreshRetry'];

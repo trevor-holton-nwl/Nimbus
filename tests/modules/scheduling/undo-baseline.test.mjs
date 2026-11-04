@@ -104,3 +104,48 @@ test('settleRestored un-dirties only a row that equals its baseline at the same 
   assert.equal(Persistence._dirtySource.has('A'), false);
   assert.equal(Persistence._dirtyIds.has('B'), true);
 });
+
+test('load keeps its original order: a row from an older server (no planning_status) is overlaid BEFORE it is normalized, so the overlaid cached dates are still snapped', async t => {
+  fixture(t);
+  const old = id => rowFor(id, { planning_status: undefined });
+  Store.setTasks([Persistence._prepTask(old('A'))], 'persistence');
+  Store.updateTask('A', { start_date: new Date('2026-10-01T12:07:00'), end_date: new Date('2026-10-01T15:07:00') }, 'table');
+  Store.tasks.A.planning_status = undefined;
+  Persistence._dirtyIds.add('A'); Persistence._saveCache();
+  t.mock.method(Util, 'fetchTraced', async url => ({ ok: true, json: async () =>
+    url.includes('/tasks?') ? { data: [old('A')], meta: {}, links: [] } : url.endsWith('/system-settings') ? {} : { rows: [] } }));
+  await Persistence.load({ plant: 'P' }); await tick();
+  assert.equal(Store.tasks.A.start_date.getHours(), 12, 'precondition: the cached edit was overlaid');
+  assert.equal(Store.tasks.A.start_date.getMinutes() % 15, 0, 'setTasks snapped the overlaid dates, as before the baseline change');
+  assert.equal(Store.tasks.A.planning_status, 'scheduled');
+});
+
+test('a server row flagged runtime_schedule_mismatch gets no baseline from a load or a refresh', async t => {
+  fixture(t);
+  t.mock.method(Util, 'fetchTraced', async url => ({ ok: true, json: async () =>
+    url.includes('/tasks?') ? { data: [rowFor('A', { runtime_schedule_mismatch: true }), rowFor('B')], meta: {}, links: [] }
+      : url.endsWith('/system-settings') ? {} : { rows: [] } }));
+  await Persistence.load({ plant: 'P' }); await tick();
+  assert.equal(Persistence._savedBaseline.has('A'), false, 'the stale-flagged row is unknown: an undo can never un-dirty it');
+  assert.equal(Persistence._savedBaseline.has('B'), true);
+  t.mock.method(Util, 'fetchTraced', async () => ({ ok: true, json: async () =>
+    ({ data: [rowFor('A', { row_version: 4, runtime_schedule_mismatch: true })], missing: [] }) }));
+  Persistence._refreshTasks(['A']); await tick();
+  assert.equal(Persistence._savedBaseline.has('A'), false, 'a refreshed stale-flagged row gets none either');
+});
+
+test('settleRestored clears a stale move note THROUGH the Store (views refresh) with a source the dirty tracker skips', t => {
+  fixture(t);
+  Store.setTasks([Persistence._prepTask(rowFor('A'))], 'persistence');
+  Persistence._recordBaseline('A', 1, keyOf('A'));
+  const same = new Date('2026-10-01T08:00:00');
+  Store.tasks.A.systemMove = { from: same, to: new Date(same), reason: 'reversal' };
+  Persistence._dirtyIds.add('A');
+  const events = [];
+  const off = Store.subscribe(evt => { if (evt.type === 'tasks:bulkUpdate' || evt.type === 'task:update') events.push(evt); });
+  try { Persistence.settleRestored(['A']); } finally { off(); }
+  assert.equal(Store.tasks.A.systemMove, null);
+  assert.equal(events.length, 1, 'one emit so Gantt / Inspector repaint');
+  assert.equal(events[0].source, 'engine-runtime-reconcile-display');
+  assert.equal(Persistence._dirtyIds.has('A'), false, 'the display-only write does not dirty the settled row');
+});

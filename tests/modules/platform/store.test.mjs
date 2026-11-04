@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
-import { ErrorLog } from '../../../frontend/platform/foundation.mjs';
+import { ErrorLog, Toast } from '../../../frontend/platform/foundation.mjs';
 import { Selection } from '../../../frontend/scheduling/selection.mjs';
 
 test('Store.rev() starts at 0 and increments on every mutation', () => {
@@ -765,7 +765,7 @@ test('silent re-push on Redo emits no undo:pushed; a normal push does', () => {
   } finally { off(); }
 });
 
-test('the row budget is shared by the undo and redo stacks: oldest first across both, newest redo entry stays', () => {
+test('the row budget is shared by the undo and redo stacks: older redo entries first, then oldest undo; the protected entry stays', () => {
   const { edit } = redoFx(1);
   const B = UndoStack.MAX_ROWS;
   UndoStack._entries = []; UndoStack._redo = [];
@@ -775,11 +775,85 @@ test('the row budget is shared by the undo and redo stacks: oldest first across 
   assert.equal(UndoStack._redo.length, 1);
   assert.ok(UndoStack.rowCount(UndoStack._entries, UndoStack._redo) <= B);
   // A big redo entry arrives: the older undo entry goes, the redo entry stays.
-  UndoStack._redo.push({ label: 'huge', at: Date.now(), cost: B - 5, ids: ['rd1'], redoSnap: [], undoFn: () => {} });
-  UndoStack._trimShared();
-  assert.ok(UndoStack._redo.some(e => e.label === 'huge'), 'the newest redo entry always stays');
-  assert.equal(UndoStack._entries.length, 0, 'oldest-first across both stacks: the undo entry went');
+  const huge = { label: 'huge', at: Date.now(), cost: B - 5, ids: ['rd1'], redoSnap: [], undoFn: () => {} };
+  UndoStack._redo.push(huge);
+  UndoStack._trimShared(huge);
+  assert.ok(UndoStack._redo.some(e => e.label === 'huge'), 'the protected redo entry always stays');
+  assert.ok(!UndoStack._redo.some(e => e.label === 'redoable'), 'the older redo entry went first');
+  assert.equal(UndoStack._entries.length, 0, 'then the oldest undo entry');
   assert.ok(UndoStack.rowCount(UndoStack._entries, UndoStack._redo) <= B);
+});
+
+test('a redo entry is pruned / invalidated by ids of the ORIGINAL entry too, not only the rows its undo captured', () => {
+  const { edit } = redoFx(2);
+  const snap = UndoStack.snapshotTasks(['rd1', 'rd2']);
+  Store.updateMany([{ id: 'rd1', changes: { RUN_TIME: '9' } }, { id: 'rd2', changes: { RUN_TIME: '9' } }], 'interaction');
+  // like the optimizer's family-sibling filter: the entry is tagged with both ids but its undo restores only rd1
+  UndoStack.push('opt', () => UndoStack.restoreTasks(snap.filter(s => s.id === 'rd1')), ['rd1', 'rd2'], { redo: true });
+  UndoStack.pop();
+  assert.deepEqual(UndoStack._redo[0].redoSnap.map(t => t.id), ['rd1'], 'redoSnap stays what the undo captured');
+  assert.deepEqual([...UndoStack._redo[0].ids].sort(), ['rd1', 'rd2'], 'ids cover the original entry');
+  UndoStack.invalidate(['rd2']);
+  assert.equal(UndoStack._redo.length, 0, 'invalidate by the skipped sibling prunes the redo entry');
+  edit('E', { RUN_TIME: '5' }, { redo: true });   // fresh state for the prune path
+  UndoStack._entries = []; UndoStack._redo = [];
+  const snap2 = UndoStack.snapshotTasks(['rd1', 'rd2']);
+  UndoStack.push('opt2', () => UndoStack.restoreTasks(snap2.filter(s => s.id === 'rd1')), ['rd1', 'rd2'], { redo: true });
+  UndoStack.pop();
+  Store.updateTask('rd2', { PRT_01: 'p' }, 'table');
+  assert.equal(UndoStack._redo.length, 0, 'a foreign write to the skipped sibling prunes it');
+});
+
+test('a calendar change after the undo clears the redo stack (the captured placements may sit on closed time now); an undo-sourced one does not', () => {
+  const { edit } = redoFx(2);
+  edit('E1', { RUN_TIME: '9' });
+  UndoStack.pop();
+  assert.equal(UndoStack._redo.length, 1);
+  Store.emit({ type: 'calendar:change', line: 'L', source: 'undo' });
+  assert.equal(UndoStack._redo.length, 1, 'the undo own write does not count');
+  Store.emit({ type: 'calendar:change', line: 'L', source: 'calendar-sync' });
+  assert.equal(UndoStack._redo.length, 0);
+});
+
+test('a redoable undoFn that captured nothing (restored after an await) clears the redo stack instead of leaving older entries', () => {
+  const { edit } = redoFx(2);
+  edit('E1', { RUN_TIME: '9' }, { redo: true }, ['rd1']);
+  edit('E2', { RUN_TIME: '9' }, { redo: true }, ['rd2']);
+  UndoStack.pop();   // E2 undone: one redo entry
+  assert.equal(UndoStack._redo.length, 1);
+  UndoStack._entries.push({ label: 'late', undoFn: () => {}, at: Date.now(), ids: ['rd1'], redo: true });   // restores nothing synchronously
+  UndoStack.pop();
+  assert.equal(UndoStack._redo.length, 0, 'older redo entries must not survive against a board that changed');
+});
+
+test('a plant-wide Apply undo costs its captured rows once in the redo stack: it does not evict other undo history', () => {
+  const { edit } = redoFx(8000);
+  UndoStack._entries = []; UndoStack._redo = [];
+  UndoStack.push('filler A', () => {}, ['x'], { cost: 5000 });
+  UndoStack.push('filler B', () => {}, ['y'], { cost: 5000 });
+  edit('big apply', { RUN_TIME: '9' });
+  UndoStack.pop();
+  assert.equal(UndoStack._redo.length, 1);
+  assert.equal(UndoStack._redo[0].cost, 8000, 'the redo entry costs its captured rows (the original is counted when re-pushed)');
+  assert.deepEqual(UndoStack._entries.map(e => e.label), ['filler A', 'filler B'], 'the other undo history survives');
+});
+
+test('popRedo never evicts the entry it just re-pushed: Ctrl+Z right after Redo still undoes it', () => {
+  const { edit } = redoFx(3);
+  const prior = UndoStack.MAX_ROWS;
+  try {
+    edit('E1', { RUN_TIME: '4' }, { redo: true }, ['rd1']);
+    edit('E2', { RUN_TIME: '5' }, { redo: true }, ['rd2']);
+    edit('E3', { RUN_TIME: '6' }, { redo: true }, ['rd3']);
+    UndoStack.pop(); UndoStack.pop(); UndoStack.pop();
+    assert.deepEqual(UndoStack._redo.map(e => e.label), ['E3', 'E2', 'E1']);
+    UndoStack.MAX_ROWS = 2;   // over budget once the re-pushed original is counted next to the two redo entries left
+    assert.equal(UndoStack.popRedo()?.label, 'E1');
+    assert.deepEqual(UndoStack._entries.map(e => e.label), ['E1'], 'the re-pushed entry is protected');
+    assert.deepEqual(UndoStack._redo.map(e => e.label), ['E2'], 'the OLDEST redo entry went first');
+    UndoStack.pop();
+    assert.equal(Store.tasks.rd1.RUN_TIME, '2', 'Ctrl+Z right after Redo undoes it');
+  } finally { UndoStack.MAX_ROWS = prior; }
 });
 
 test('a non-undo write to a redo entry id prunes it; undo / reconcile / unrelated writes do not', () => {
@@ -797,6 +871,46 @@ test('a non-undo write to a redo entry id prunes it; undo / reconcile / unrelate
   assert.deepEqual(UndoStack._redo.map(e => e.label), ['E2'], 'task:update prunes');
   Store.updateMany([{ id: 'rd2', changes: { notes: 'q' } }], 'refresh');
   assert.equal(UndoStack._redo.length, 0, 'tasks:bulkUpdate prunes');
+});
+
+test('a firm after the undo prunes the redo entry (firmed:change from any source but undo); an undo-sourced firm does not', () => {
+  const { edit } = redoFx(2);
+  edit('E1', { RUN_TIME: '9' }, { redo: true }, ['rd1']);
+  edit('E2', { RUN_TIME: '9' }, { redo: true }, ['rd2']);
+  UndoStack.pop(); UndoStack.pop();
+  assert.equal(UndoStack._redo.length, 2);
+  Store.setFirmed('rd1', true, 'undo');
+  assert.equal(UndoStack._redo.length, 2, 'a firm written by an undo does not prune');
+  Store.setFirmed('rd2', true, 'interaction');
+  assert.deepEqual(UndoStack._redo.map(e => e.label), ['E1'], 'Firm A after the undo prunes the redo entry of A');
+  Store.setFirmed(['rd1', 'rd2'], false, 'unit-test');
+});
+
+test('Redo skips rows the engine hook calls locked (frozen / running / firmed): not moved, warn toast, entry dropped', () => {
+  const { edit } = redoFx(2);
+  const toasts = [];
+  const priorShow = Toast.show, priorHook = UndoStack.redoBlocked;
+  Toast.show = (msg, type) => { toasts.push([msg, type]); };
+  try {
+    edit('E1', { RUN_TIME: '9' });
+    UndoStack.pop();
+    // rd1 becomes locked after the undo (time passed / a firm that raised no task event): rd2 stays movable.
+    UndoStack.redoBlocked = t => t.id === 'rd1';
+    const r = UndoStack.popRedo();
+    assert.equal(r?.label, 'E1');
+    assert.equal(Store.tasks.rd1.RUN_TIME, '2', 'the locked row is not moved');
+    assert.equal(Store.tasks.rd2.RUN_TIME, '9', 'the other row is redone');
+    assert.ok(toasts.some(([m, t]) => /redo_locked_skipped/.test(m) && t === 'warn'), 'a warn toast names the skip');
+    assert.equal(UndoStack._redo.length, 0, 'the entry is dropped');
+    // Every row locked: a no-op that moves nothing.
+    UndoStack.pop();
+    UndoStack.redoBlocked = () => true;
+    const events = [];
+    const off = Store.subscribe(evt => { if (evt.type === 'tasks:bulkUpdate') events.push(evt); });
+    try { UndoStack.popRedo(); } finally { off(); }
+    assert.equal(Store.tasks.rd2.RUN_TIME, '2');
+    assert.equal(events.length, 0);
+  } finally { Toast.show = priorShow; UndoStack.redoBlocked = priorHook; }
 });
 
 test('Redo of an entry whose rows were removed from the Store is a safe no-op', () => {

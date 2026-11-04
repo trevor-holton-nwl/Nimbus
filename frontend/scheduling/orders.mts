@@ -1585,8 +1585,11 @@ export const Table = {
     // already written the edited value onto the row (it IS the Store task), so the snapshot puts the old value back.
     const editKind = pairPv !== null ? null : manualEditKind(field);
     const undoSnap = (pairPv !== null || editKind)
-      ? UndoStack.snapshotTasks([id]).map(s => (field === 'end_date' || field === 'RUN_TIME') ? { ...s, [field]: p.oldValue } as NimbusTask : s)
+      ? UndoStack.snapshotTasks([id])
       : null;
+    // The grid already wrote the new value onto the row: put the OLD one back into the snapshot IN PLACE. A spread copy
+    // would lose the clone's UndoStack._wasDirty membership, and F10 would then discard an already-dirty row's mark.
+    if (undoSnap && (field === 'end_date' || field === 'RUN_TIME')) for (const s of undoSnap) (s as Record<string, unknown>)[field] = p.oldValue;
     Store.updateTask(id, changes, 'table');
     if (undoSnap) { if (editKind) Table._pushEditUndo(id, undoSnap, editKind); else Table._pushPairUndo(id, undoSnap); }
     Table._api!.applyTransaction({ update: [Store.tasks[id]] });
@@ -3130,6 +3133,8 @@ export const Inspector = {
         const local = Store.tasks[id];
         if (version && local && shouldAdoptNoteVersion(local.row_version, baseVersion, local.notes, notes)) {
           local.row_version = version;
+          // The note is not part of the saved-state key: the baseline moves with the version it was taken at.
+          Persistence.adoptBaselineVersion(id, baseVersion, version);
         }
         Inspector.invalidateHistory([id]);
         return true;

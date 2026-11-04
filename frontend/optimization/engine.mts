@@ -2184,7 +2184,7 @@ export const Engine = {
 
   /** After rows were restored (undo, Time Machine) their stored start is a placeholder: re-derive each plant's
    *  restored rows from their restored finish under the current run time (OQ21). */
-  reconcileRestored(ids: Iterable<string>, wasDirty: ReadonlySet<string> = new Set()): void {
+  reconcileRestored(ids: Iterable<string>, wasDirty: ReadonlySet<string> = new Set(), savedSince: ReadonlySet<string> = new Set()): void {
     const byPlant = new Map<string, Set<string>>();
     const neverPlaced: string[] = [];
     for (const raw of ids) {
@@ -2205,7 +2205,9 @@ export const Engine = {
     if (neverPlaced.length) {
       Store.updateMany(neverPlaced.map(id => ({ id, changes: { runtime_schedule_mismatch: false } })), 'engine-runtime-reconcile-display');
       for (const id of neverPlaced) {
-        if (wasDirty.has(id)) continue;
+        // savedSince: the row was saved after the snapshot, so the server holds a placement this restore does not remove.
+        // Time Machine passes none (its snapshots carry no row_version): it keeps the discard.
+        if (wasDirty.has(id) || savedSince.has(id)) continue;
         Persistence.discardDirty(id);
       }
     }
@@ -3168,7 +3170,7 @@ Store.subscribe(evt => {
 
 // OQ21: an undo restores the finish, so the start is re-derived under the run time as it is now. The Store cannot
 // import the engine (platform sits below it); the engine registers this hook once at load.
-UndoStack.afterRestore = (ids: string[], wasDirty: ReadonlySet<string>): void => Engine.reconcileRestored(ids, wasDirty);
+UndoStack.afterRestore = (ids: string[], wasDirty: ReadonlySet<string>, savedSince?: ReadonlySet<string>): void => Engine.reconcileRestored(ids, wasDirty, savedSince);
 // U23: restoreTasks flags a row stale only when the reconcile will process it (the same eligibility its candidate
 // filter applies); any other row would keep the flag, and its error alert, until reload.
 UndoStack.willRederive = (task: NimbusTask): boolean => {
@@ -3179,6 +3181,8 @@ UndoStack.willRederive = (task: NimbusTask): boolean => {
 UndoStack.dirtyProbe = (id: string): boolean => Persistence.isDirty(id);
 // An undo that returns a row to its last saved state clears its unsaved mark (Persistence.settleRestored).
 UndoStack.afterSettle = (ids: string[]): void => Persistence.settleRestored(ids);
+// Redo never moves an order that is locked now (manual firm, frozen horizon, running): the same union a drag is refused on.
+UndoStack.redoBlocked = (task: NimbusTask): boolean => Engine.firmingStatus(task).firmed;
 
 /**
  * Evaluate against the existing placement algorithm, but with its reads bound
