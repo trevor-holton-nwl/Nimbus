@@ -2871,7 +2871,8 @@ export const OptimizerPreview = {
     UndoStack.push(`Optimization (${mode})${plant ? ' · ' + plant : ''}`,
       () => UndoStack.restoreTasks(snap), snap.map(t => t.id));
     Toast.show(Util.t('toast.opt_applied'), 'success');
-    // Fire warning toasts — matching the warning toasts the old live apply tail fired
+    // Fire warning toasts, the same set the deleted live apply tail fired (missing setup, needs planning, left in place,
+    // distribution separation, guarded lines).
     if (OptimizerPreview._explanation) {
       const { scheduledWithoutSetup, unplacedOrders } = OptimizerPreview._explanation;
       if (scheduledWithoutSetup.orders && !OptimizerPreview._syntheticSetup) {
@@ -2890,6 +2891,12 @@ export const OptimizerPreview = {
           lines: unplacedOrders.lines,
         }), 'warn');
       }
+    }
+    // Sub-order distribution separation (SAP aggregate work center -> per-machine sub-orders): parents whose siblings
+    // landed in different calendar buckets. A scheduling-outcome fact, not a setup-data one, so not gated on synthetic setup.
+    const distributionSeparationCount = candidate.validationFindings?.filter(finding => finding.code === 'distribution_separation').length ?? 0;
+    if (distributionSeparationCount) {
+      Toast.show(Util.t('toast.optimize_distribution_separation', { parents: distributionSeparationCount }), 'warn');
     }
     if (candidate.unchangedLines.length) {
       Toast.show(Util.t('toast.optimize_lines_guarded', { count: candidate.unchangedLines.length }), 'warn');
