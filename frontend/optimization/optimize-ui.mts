@@ -18,7 +18,8 @@ import { Store, UndoStack } from '../platform/store.mjs';
 import { Sandbox } from './sandbox.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
 import { Alerts, scheduleAlertsForPatches } from '../insights/services.mjs';
-import { Engine, snapshotSchedule, SETUP_AWARE_NORMAL_BUDGET_MS, SETUP_AWARE_EXHAUSTIVE_BUDGET_MS, effectiveFirmedIdSet, evaluateSchedule } from './engine.mjs';
+import { Engine, snapshotSchedule, SETUP_AWARE_NORMAL_BUDGET_MS, effectiveFirmedIdSet, evaluateSchedule } from './engine.mjs';
+import { backlogWindow, budgetFor } from './run-params.mjs';
 import { createOptimizerWorkerSession } from './optimizer-worker-client.mjs';
 import type { OptimizerWorkerFactory, OptimizerWorkerSession } from './optimizer-worker-client.mjs';
 import type { RemoveBacklogResult } from './scheduler-contract.mjs';
@@ -299,28 +300,12 @@ export const OptimizeDialog = (() => {
     const local = Store.serverNow(); local.setSeconds(0, 0); return local;
   }
 
-  function _addCalendarMonths(date: Date, months: number): Date {
-    const result = new Date(date);
-    const day = result.getDate();
-    result.setDate(1);
-    result.setMonth(result.getMonth() + months);
-    const last = new Date(result.getFullYear(), result.getMonth() + 1, 0).getDate();
-    result.setDate(Math.min(day, last));
-    return result;
-  }
-
   function _applyBacklogDefaults() {
     if (!_plant) return;
     const now = _backlogNow();
     const scopedLines = _scope === 'lines' && _selectedLines.size ? _selectedLines : null;
     const tasks = Store.tasksByPlant(_plant).filter(t => !scopedLines || scopedLines.has(t.MACHINE));
-    const pastStarts = tasks.map(t => t.start_date).filter((d): d is Date => !!d && d < now);
-    const latestEnds = tasks.map(t => t.end_date).filter((d): d is Date => !!d);
-    const computedStart = pastStarts.length ? new Date(Math.min(...pastStarts.map(d => d.getTime()))) : now;
-    let computedEnd = latestEnds.length
-      ? new Date(Math.min(Math.max(...latestEnds.map(d => d.getTime())), _addCalendarMonths(now, 4).getTime()))
-      : _addCalendarMonths(now, 4);
-    if (computedEnd < computedStart) computedEnd = _addCalendarMonths(computedStart, 4);
+    const { start: computedStart, end: computedEnd } = backlogWindow(tasks, now);
     if (!_startDirty) _start = computedStart;
     if (!_endDirty) _end = computedEnd;
     _fpStart?.setDate(_start!, false);
@@ -931,7 +916,7 @@ export const OptimizeDialog = (() => {
       respectFirmed,
       respectCalendar: mode === 'backlog' ? true : respectCalendarChecked,
       runAt:           Store.serverNow(),
-      searchBudgetMs:  exhaustive ? SETUP_AWARE_EXHAUSTIVE_BUDGET_MS : SETUP_AWARE_NORMAL_BUDGET_MS,
+      searchBudgetMs:  budgetFor(exhaustive),
       exhaustive,
       auditDetails: mode === 'backlog' ? undefined : {
         mode,
@@ -942,7 +927,7 @@ export const OptimizeDialog = (() => {
         activePriorityFields: Engine.activeConstraintKeys(plant),
         unrankedPriorityFields: unrankedFields,
         splitOrderPolicy: Engine.splitOrderPolicyFor(plant),
-        searchBudgetMs: exhaustive ? SETUP_AWARE_EXHAUSTIVE_BUDGET_MS : SETUP_AWARE_NORMAL_BUDGET_MS,
+        searchBudgetMs: budgetFor(exhaustive),
         exhaustive,
       },
     };

@@ -99,6 +99,7 @@ import type {
 } from './setup-scheduler.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy, SetupSnapshot, SetupDefinition, SetupStateKey, SetupValueDefault, PlantCalendarEntry, PlantPeriod } from '../platform/types.mjs';
 import { MIN_PRODUCTIVE_SEGMENT_MINUTES, PRIORITY_FIELD_DEFAULTS } from './scheduler-contract.mjs';
+import { SETUP_AWARE_NORMAL_BUDGET_MS, SETUP_AWARE_EXHAUSTIVE_BUDGET_MS } from './run-params.mjs';
 import type { RemoveBacklogResult, RemoveBacklogDiagnostics } from './scheduler-contract.mjs';
 import type { SerializedOptimizerValidation } from './optimizer-worker-contract.mjs';
 import { firmActionForReasons, firmReasonLabels, planFirmActions } from './firm-actions.mjs';
@@ -775,8 +776,8 @@ const SETUP_AWARE_ITERATION_CAP = 20000;
 // deferred Plan B comparison run (a fraction of this budget) instead of
 // duplicating the number.
 export const SETUP_AWARE_DEADLINE_MS = 5000;
-export const SETUP_AWARE_NORMAL_BUDGET_MS = 8000;
-export const SETUP_AWARE_EXHAUSTIVE_BUDGET_MS = 180000;
+// The two budgets live in the pure run-params leaf (shared with the dialog and the headless CLI); re-exported here.
+export { SETUP_AWARE_NORMAL_BUDGET_MS, SETUP_AWARE_EXHAUSTIVE_BUDGET_MS };
 const SETUP_AWARE_EXHAUSTIVE_EXACT_SEARCH_THRESHOLD = 10;
 const SETUP_AWARE_EXHAUSTIVE_EXACT_LEAF_CAP = 5000;
 const SETUP_AWARE_EXHAUSTIVE_CONVERGENCE_WINDOW = 10000;
