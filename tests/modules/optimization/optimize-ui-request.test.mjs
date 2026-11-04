@@ -59,3 +59,16 @@ test('evalRequestOf carries every request key to the evaluator, the worker mode 
     assert.deepEqual(out[key], request[key], key);
   }
 });
+
+// ---- P3-5g: toolRuleOfFingerprint reads the rule back out of toolFingerprint's string ----
+test('toolRuleOfFingerprint returns the rule a fingerprint was built under; absent reads as off', async () => {
+  const { toolFingerprint, toolRuleOfFingerprint } = await import('../../../frontend/optimization/optimize-ui.mjs');
+  const md = (rule) => ({ plants: [{ plant: 'P', setup_policy_config: rule ? { toolingRule: rule } : {} }], lines: [], tool_inventory: [{ plant: 'P', tool_id: 'T1', total_qty: 2, out_of_service_qty: 0 }] });
+  assert.equal(toolRuleOfFingerprint(toolFingerprint(md('hard'), 'P')), 'hard');
+  assert.equal(toolRuleOfFingerprint(toolFingerprint(md('off'), 'P')), 'off');
+  assert.equal(toolRuleOfFingerprint(toolFingerprint(md(null), 'P')), 'off');
+  assert.equal(toolRuleOfFingerprint(toolFingerprint(null, 'P')), 'off');
+  assert.equal(toolRuleOfFingerprint(null), 'off');
+  assert.equal(toolRuleOfFingerprint(undefined), 'off');
+  assert.equal(toolRuleOfFingerprint(''), 'off');
+});

@@ -1195,6 +1195,12 @@ export function toolFingerprint(masterData: NimbusMasterData | null | undefined,
   return JSON.stringify({ r: rule, i: rows });
 }
 
+/** The tooling rule a `toolFingerprint` string was built under; an absent fingerprint (Remove Backlog, no run) reads as 'off'. */
+export function toolRuleOfFingerprint(fingerprint: string | null | undefined): 'off' | 'hard' {
+  if (!fingerprint) return 'off';
+  return (JSON.parse(fingerprint) as { r: 'off' | 'hard' }).r;
+}
+
 function liveToolingRule(plant: string): 'off' | 'hard' {
   return toolingRuleForSnapshot({ masterData: Store.masterData ?? null } as unknown as ScheduleSnapshot, plant);
 }
@@ -2534,7 +2540,7 @@ export const OptimizerPreview = {
       ${toolMovedCount ? `<div>${Util.escapeHtml(Util.t('ui.opt_tool_moved_summary', { n: toolMovedCount }))}</div>` : ''}
       ${toolIncomplete ? `<div>${Util.escapeHtml(Util.t('ui.opt_tool_incomplete'))}</div>` : ''}
     </div>` : '';
-    const toolingChipHtml = OptimizerPreview._mode !== 'backlog' && OptimizerPreview._toolFingerprint !== null && (JSON.parse(OptimizerPreview._toolFingerprint) as { r: string }).r === 'hard'
+    const toolingChipHtml = OptimizerPreview._mode !== 'backlog' && OptimizerPreview._toolFingerprint !== null && toolRuleOfFingerprint(OptimizerPreview._toolFingerprint) === 'hard'
       ? `<div class="opt-pv-chip opt-pv-chip-tooling" title="${Util.escapeHtml(Util.t('ui.opt_pv_chip_tooling_title'))}">${Util.escapeHtml(Util.t('ui.opt_pv_chip_tooling'))}</div>` : '';
     body.innerHTML = `
       <div class="opt-pv-shell">
@@ -2813,7 +2819,7 @@ export const OptimizerPreview = {
             active_priority_fields: auditDetails.activePriorityFields,
             unranked_priority_fields: auditDetails.unrankedPriorityFields,
             split_order_policy: auditDetails.splitOrderPolicy,
-            tooling_rule: OptimizerPreview._toolFingerprint ? (JSON.parse(OptimizerPreview._toolFingerprint) as { r: string }).r : 'off',
+            tooling_rule: toolRuleOfFingerprint(OptimizerPreview._toolFingerprint),
             tool_blocked: toolSummary.queued.length,
             tool_moved: toolSummary.moved,
             applied_count: kept.length,

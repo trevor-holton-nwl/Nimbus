@@ -1362,8 +1362,8 @@ export const Engine = {
    *  Detached optimizer runs must use the snapshot fold in the fixed/free split + setup-aware
    *  fold below, never this. reasons: 'frozen' (horizon band), 'manual' (planner),
    *  'running' (in progress). SAP firm is never a reason. */
-  firmingStatus(task: NimbusTask, now?: Date): { firmed: boolean; reasons: Array<'frozen'|'manual'|'running'> } {
-    const reasons: Array<'frozen'|'manual'|'running'> = [];
+  firmingStatus(task: NimbusTask, now?: Date): { firmed: boolean; reasons: FirmReason[] } {
+    const reasons: FirmReason[] = [];
     if (Engine.isFrozenHorizon(task, now)) reasons.push('frozen');
     if (Store.isFirmed(task.id)) reasons.push('manual');
     if (Engine.isInProgress(task, now)) reasons.push('running');
