@@ -33,7 +33,7 @@ import { seedOptimizerMode, seedOptimizerPreset } from './optimizer-prefs.mjs';
 import type { NimbusMasterData, NimbusTask, OptimizerMode, SplitOrderPolicy, SetupSnapshot, SetupStateKey } from '../platform/types.mjs';
 
 /* =============================================================================
-   OPTIMIZE DIALOG — time-window & strategy picker for Engine.runAndApply
+   OPTIMIZE DIALOG — time-window & strategy picker for Engine.evaluateSchedule
    ========================================================================== */
 // -- Local type declarations (CQ-1 Phase 6 Task 7 conversion; scoped to
 //    OptimizeDialog/OptimizerPreview) ----------------------------------------
@@ -63,9 +63,9 @@ interface OptimizerDefaults {
   respectCalendar?: boolean;
 }
 
-/** Mirrors Engine.runAndApply's opts contract (schedule-services.mts) — built by
+/** Mirrors the opts contract of Engine.evaluateSchedule (engine.mts) — built by
  *  run() below and threaded through OptimizerPreview.runWithPreview. Engine.
- *  runAndApply itself takes `opts: Record<string, unknown>` (an open bag it
+ *  evaluateSchedule itself takes `opts: Record<string, unknown>` (an open bag it
  *  reads defensively via individual `as` casts), so this needs the same index
  *  signature to stay assignable at that call site — same "known fields + open
  *  bag" shape as NimbusTask (types.mts) / InteractionTraceEntry above. */
@@ -486,7 +486,7 @@ export const OptimizeDialog = (() => {
   /** Does this plant have any colorWheel ranks the optimizer could apply?
    *  Delegates to Engine.hasPriorityRanks — the SHARED implementation, so this
    *  and Plant → System Settings' own hints can never drift apart. Reads the
-   *  exact same Store.priorityRankMaps that Engine._sortTerms' term factory
+   *  exact same Store.priorityRankMaps that the evaluator's rankForTask / policyKeyForTask
    *  reads, and counts per-line overrides as well as the plant-wide list (Stage 3
    *  replaced the old `GET /color-wheel/{plant}` probe, which saw plant-wide
    *  lists only and therefore mis-reported a plant configured purely with
@@ -807,7 +807,7 @@ export const OptimizeDialog = (() => {
 
     // --- Rank-source freshness guard (Stage 3) ---------------------------
     // The Stage 3 replacement for the retired per-plant color→rank cache and
-    // its pre-Run fallback fetch. Engine._sortTerms now resolves EVERY priority
+    // its pre-Run fallback fetch. The evaluator (rankForTask / policyKeyForTask) now resolves EVERY priority
     // field's rank straight out of Store.priorityRankMaps, so that cache — not
     // a single color map — is what has to be fresh for this plant before Run. It
     // normally already is (Persistence.load() fetches it on every plant
@@ -935,7 +935,7 @@ export const OptimizeDialog = (() => {
 
     // Defer the optimizer run by one frame so the modal-close paint and the
     // heavy subscriber fanout don't fight for the same main-thread tick.
-    // Route through OptimizerPreview (C4) — wraps Engine.runAndApply with
+    // Route through OptimizerPreview (C4) — wraps Engine.evaluateSchedule with
     // a pre/post KPI comparison and an apply/discard step.
     requestAnimationFrame(() => setTimeout(() => {
       OptimizerPreview.runWithPreview(mode, optsForEngine);
@@ -1062,8 +1062,8 @@ interface PreviewExplanation {
   /** B3: orders in scope for this run (plant + line filter + excludeFromOpt)
    *  that ended up with neither a patch nor a firmed/pinned exemption — i.e.
    *  "not scheduled". Derived by set difference against `candidate.patches`,
-   *  never a field threaded through CandidateResult (see runAndApply's own
-   *  B3 comment in schedule-services.mts for why: the worst drops produce no
+   *  never a field threaded through CandidateResult (see the B3 note in
+   *  Engine._evaluateDetached for why: the worst drops produce no
    *  diagnostic object at all, so there is nothing else to collect from). */
   unplacedOrders: { orders: number; lines: number };
   search: { candidateCount: number; method: string; termination: string; runtimeMs: number; limitReached: boolean };
@@ -1239,7 +1239,7 @@ function taskBaseline(tasks: ReadonlyArray<NimbusTask>): Map<string, string> {
 }
 
 /* =============================================================================
-   OPTIMIZER PREVIEW (C4) — wraps Engine.runAndApply so the planner sees a
+   OPTIMIZER PREVIEW (C4) — wraps Engine.evaluateSchedule so the planner sees a
    pre/post KPI comparison before committing. Discard reverts to the snapshot;
    Apply pushes an UndoStack entry so Ctrl+Z still works after the fact.
    ========================================================================== */
@@ -1648,8 +1648,8 @@ export const OptimizerPreview = {
     }).observe(el, { attributes: true, attributeFilter: ['hidden'] });
   },
 
-  /** Entry point — call this instead of Engine.runAndApply when you want
-   *  the preview UI. Mirrors Engine.runAndApply's signature. */
+  /** Entry point — call this instead of Engine.evaluateSchedule when you want
+   *  the preview UI. Mirrors its mode/opts signature. */
   runWithPreview(mode: OptimizerMode = 'changeover', opts: OptimizerRunOptions = {}) {
     // Phase 2 (Pkg D): monotonic run token, captured by the deferred Plan B
     // callback below so it can detect a superseding run and bail silently.
@@ -2810,7 +2810,7 @@ export const OptimizerPreview = {
     UndoStack.push(`Optimization (${mode})${plant ? ' · ' + plant : ''}`,
       () => UndoStack.restoreTasks(snap), snap.map(t => t.id));
     Toast.show(Util.t('toast.opt_applied'), 'success');
-    // Fire warning toasts — matching the live Engine.runAndApply patterns from schedule-services.mts
+    // Fire warning toasts — matching the warning toasts the old live apply tail fired
     if (OptimizerPreview._explanation) {
       const { scheduledWithoutSetup, unplacedOrders } = OptimizerPreview._explanation;
       if (scheduledWithoutSetup.orders && !OptimizerPreview._syntheticSetup) {

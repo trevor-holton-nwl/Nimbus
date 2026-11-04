@@ -287,7 +287,7 @@ export const Store = {
    *  former direct `Store._state.meta.lastOptimize = ...` write (CQ-1 Phase 2
    *  Task 3 — closes Engine's `_state` touch, one of the tracked §6 exceptions).
    *  Deliberately does NOT call `emit()`: the original direct field write fired
-   *  no Store event, and `runAndApply` calls this setter unconditionally on every
+   *  no Store event, and the optimizer apply path calls this setter unconditionally on every
    *  run (including true no-ops with `patches.length === 0`) — emitting here would
    *  spuriously bump `Store._rev` and trigger the debounced autosave subscriber on
    *  every optimize call, a real behavior change this setter must not introduce.
@@ -332,7 +332,7 @@ export const Store = {
    *  utilization cache, which is keyed on `dataRev()`) on every rank load — including one per Optimize-dialog open and
    *  one per Scheduling Constraints render, neither of which changes any
    *  schedule data. Nothing subscribes to rank-map changes: every reader
-   *  (`Engine._sortTerms`' terms, `hasPriorityRanks`, `unrankedActiveFields`)
+   *  (the evaluator's `rankForTask`, `hasPriorityRanks`, `unrankedActiveFields`)
    *  pulls on demand. `_source` is accepted only for signature symmetry with
    *  the other setters, exactly as in `setLastOptimize`. */
   setPriorityRankMaps(maps: PriorityRankMaps, _source?: string): void {

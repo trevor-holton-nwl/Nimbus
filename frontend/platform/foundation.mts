@@ -260,7 +260,7 @@ export const Util = {
 
   /** The task fields whose change between adjacent orders is a changeover, for
    *  the plant currently being scheduled. Resolved through the injected seam so
-   *  this stays the SAME list `Engine._sortTerms` actually sequences on; falls
+   *  this stays the SAME list the evaluator (rankForTask / policyKeyForTask) actually sequences on; falls
    *  back to COLOR/FORM_SIZE when unwired. Exported (not just used internally)
    *  so the alert cell-briefing's own adjacent-order count can share it rather
    *  than keeping a second hardcoded copy. */
@@ -983,7 +983,7 @@ export const Util = {
         // COLOR/FORM_SIZE comparison used, so a blank/null/absent value stays
         // equal to any other blank rather than becoming a changeover. Left as a
         // raw compare rather than Util.norm: normalizing case/whitespace here
-        // would also be defensible (it is what _sortTerms does) but would shift
+        // would also be defensible (it is what the evaluator does) but would shift
         // every existing plant's baseline count, which is outside this fix.
         if (fields.some(f => (a[f] || '') !== (b[f] || ''))) n++;
       }

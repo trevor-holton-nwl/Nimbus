@@ -215,7 +215,7 @@ export function fitsMergedSpan(windows: Iterable<{ s: number; e: number } | null
 const _noWindowWarned = new Set<string>();
 
 export const Calendar = {
-  /* ---------- Per-run caches (installed by Engine.runAndApply) ----------- */
+  /* ---------- Per-run caches (installed by Engine._evaluateDetached) ----------- */
   // workWindow memoization, keyed by `${line}|${startOfDayMs}`. Values are
   // `null` (closed day) or the same [Date, Date] tuple returned to every
   // caller during one run — callers must NOT mutate window endpoints.
@@ -225,7 +225,7 @@ export const Calendar = {
   // where BlockRec = { s: ms, e: ms, startDate: Date, endDate: Date }.
   _runBlocks: null as RunBlocksIndex | null,
 
-  /** Install per-run caches. Called once at the top of Engine.runAndApply. */
+  /** Install per-run caches. Called once at the top of Engine._evaluateDetached. */
   _beginRun(plant: string | null): void {
     Calendar._runCache  = { ww: new Map(), nominal: new Map() };
     Calendar._runBlocks = Calendar._indexBlocks(plant);
