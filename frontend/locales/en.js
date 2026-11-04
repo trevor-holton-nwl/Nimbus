@@ -937,7 +937,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.insp_no_of_fte':                 'No. of FTE',
   'ui.insp_line':                      'Machine',
   'ui.insp_sap_start': 'SAP Start',
-  'ui.sap_start_hint': 'As received from SAP; the schedule is anchored on the finish',
+  'ui.sap_start_hint': 'Due Date minus run time, in clock hours (ignores shifts and closed days)',
   'ui.insp_due_date':                  'Due Date',
   'ui.insp_planned_start':             'Planned Start',
   'ui.insp_planned_finish':            'Planned Finish',

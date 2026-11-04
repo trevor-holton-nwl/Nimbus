@@ -1424,7 +1424,7 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.insp_no_of_fte':                 'N.º de FTE',
   'ui.insp_line':                      'Máquina',
   'ui.insp_sap_start': 'Início SAP',
-  'ui.sap_start_hint': 'Conforme recebido do SAP; a programação é ancorada no término',
+  'ui.sap_start_hint': 'Data de vencimento menos o tempo de execução, em horas corridas (ignora turnos e dias fechados)',
   'ui.insp_due_date':                 'Data de vencimento',
   'ui.insp_planned_start':            'Início planejado',
   'ui.insp_planned_finish':           'Término planejado',

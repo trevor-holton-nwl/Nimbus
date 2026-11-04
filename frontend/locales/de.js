@@ -1424,7 +1424,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.insp_no_of_fte':                 'Anzahl VZÄ',
   'ui.insp_line':                      'Maschine',
   'ui.insp_sap_start': 'SAP-Start',
-  'ui.sap_start_hint': 'Wie von SAP empfangen; die Planung ist am Ende verankert',
+  'ui.sap_start_hint': 'Fälligkeitsdatum minus Laufzeit, in Uhrzeitstunden (ignoriert Schichten und geschlossene Tage)',
   'ui.insp_due_date':                 'Fälligkeitsdatum',
   'ui.insp_planned_start':            'Geplanter Start',
   'ui.insp_planned_finish':           'Geplantes Ende',

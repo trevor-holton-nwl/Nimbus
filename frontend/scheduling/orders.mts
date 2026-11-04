@@ -405,13 +405,22 @@ export const Table = {
     return planningReasonText(task.planning_reason, (k, v) => Util.t(k, v), { nowFits });
   },
 
-  /** SAP Start text: the raw SAP start as received, date only (a date-only SAP start must not read "12:00 AM");
-   *  the time is appended only when the value carries a non-midnight time. Display only, never fed to the scheduler. */
-  _fmtSapStart(v: unknown): string {
-    const d = Util.parseDate(v);
-    if (!d) return '';
-    const timed = d.getHours() !== 0 || d.getMinutes() !== 0 || d.getSeconds() !== 0;
-    return timed ? Util.fmtDTReadable(d) : Util._fmtDatePref(d);
+  /** SAP Start (derived, display only): the due instant minus the run time in plain clock hours (ignores shifts,
+   *  closed days and blackouts, so it differs from Planned Start). Null when the due or run time is unusable.
+   *  The raw SAP start stays in BASIC_START_DATE and is never touched. */
+  _sapStartDerived(task: NimbusTask | null | undefined): Date | null {
+    if (!task) return null;
+    const due = Util.dueInstant(task);
+    if (!(due instanceof Date) || Number.isNaN(due.getTime())) return null;
+    const rt = task.RUN_TIME as unknown;
+    const hours = (rt === null || rt === undefined || rt === '') ? NaN : Number(rt);
+    if (!Number.isFinite(hours) || hours <= 0) return null;
+    return new Date(due.getTime() - hours * Config.MS_HOUR);
+  },
+
+  /** SAP Start text: blank for no derived start, else the readable date and time. */
+  _fmtSapStart(d: Date | null | undefined): string {
+    return d instanceof Date && !Number.isNaN(d.getTime()) ? Util.fmtDTReadable(d) : '';
   },
 
   /** Due Date / Planned Start / Planned Finish columns (backward scheduling OQ1, OQ16). The FINISH is the input
@@ -421,12 +430,13 @@ export const Table = {
    *  and agDateColumnFilter. Extracted (like `_runTimeEditable`) so it is testable without a live AG Grid. */
   _scheduleDateColumns(): TableColDef[] {
     return [
-      // SAP Start (2026-10-28, owner request): the RAW SAP start as received, read-only. The derived Original Start
-      // (OQ16) stays retired; the schedule is anchored on the finish, so this will differ from Planned Start.
+      // SAP Start (owner request): a DERIVED start, Due Date minus run time in clock hours, display only. The raw SAP
+      // start stays in BASIC_START_DATE; field/colId stay original_start_date so saved layouts keep working.
       { headerName: Util.t('col.sap_start'), field: 'original_start_date', minWidth: 170,
         editable: false, hide: Table._fieldHidden('original_start_date'),
         headerTooltip: Util.t('ui.sap_start_hint'),
-        valueFormatter: (p: TableValueFormatterParams) => Table._fmtSapStart(p.value),
+        valueGetter: (p: { data?: NimbusTask }) => (p.data ? Table._sapStartDerived(p.data) : null),
+        valueFormatter: (p: TableValueFormatterParams) => Table._fmtSapStart(p.value as Date | null),
         cellClass: 'cell-date cell-date-original' },
       { headerName: Util.t('col.due_date'), field: 'original_end_date', minWidth: 160,
         editable: false, hide: Table._fieldHidden('original_end_date'),
@@ -2719,7 +2729,7 @@ export const Inspector = {
         <h4>${Util.t('ui.insp_schedule_section')}</h4>
         ${Inspector._fieldVisible('original_start_date') ? `
         <div class="insp-row"><label>${Util.t('ui.insp_sap_start')}</label>
-          <div class="insp-val" title="${Util.escapeHtml(Util.t('ui.sap_start_hint'))}">${task.original_start_date ? Util.escapeHtml(Table._fmtSapStart(task.original_start_date)) : '—'}</div></div>` : ''}
+          <div class="insp-val" title="${Util.escapeHtml(Util.t('ui.sap_start_hint'))}">${Util.escapeHtml(Table._fmtSapStart(Table._sapStartDerived(task)) || '—')}</div></div>` : ''}
         ${Inspector._fieldVisible('original_end_date') ? `
         <div class="insp-row"><label>${Util.t('ui.insp_due_date')}</label>
           <div class="insp-val">${dueInstant ? Util.fmtDTReadable(dueInstant) : '—'}</div></div>` : ''}

@@ -1425,7 +1425,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.insp_no_of_fte':                 "Nb d'ETP",
   'ui.insp_line':                      'Machine',
   'ui.insp_sap_start': 'Début SAP',
-  'ui.sap_start_hint': 'Tel que reçu de SAP ; la planification est ancrée sur la fin',
+  'ui.sap_start_hint': 'Date d\'échéance moins la durée de production, en heures d\'horloge (ignore les équipes et les jours fermés)',
   'ui.insp_due_date':                 'Date d\'échéance',
   'ui.insp_planned_start':            'Début planifié',
   'ui.insp_planned_finish':           'Fin planifiée',

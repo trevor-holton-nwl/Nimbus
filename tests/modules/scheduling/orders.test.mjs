@@ -9,7 +9,7 @@ import { Table, Inspector, ContextMenu, Printer, historyRowView, groupHistoryEve
 import { makeDocument, makeEl } from '../helpers/dom-stub.mjs';
 import { Timeline, setupSourceLabel } from '../../../frontend/scheduling/gantt.mjs';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
-import { Util, Toast, Modal } from '../../../frontend/platform/foundation.mjs';
+import { Config, Util, Toast, Modal } from '../../../frontend/platform/foundation.mjs';
 import { ORDER_FIELD_CATALOG } from '../../../frontend/scheduling/order-field-catalog.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
 import { Engine } from '../../../frontend/optimization/engine.mjs';
@@ -2025,13 +2025,32 @@ test('SAP Start (raw, read-only) is the first schedule date column before Due Da
   assert.equal(ORDER_FIELD_CATALOG.find(f => f.key === 'original_end_date').i18nGridKey, 'col.due_date');
 });
 
-test('SAP Start shows the date only for a date-only value and adds the time only when the value is timed', () => {
+test('SAP Start is derived: due instant minus run time in clock hours (timed, date-only, fractional)', () => {
+  const timed = { original_end_date: new Date(2026, 7, 4, 15, 0), RUN_TIME: 6 };
+  assert.equal(Table._sapStartDerived(timed).getTime(), new Date(2026, 7, 4, 9, 0).getTime());
+  const dateOnly = { original_end_date: new Date(2026, 7, 4), RUN_TIME: 10 };
+  assert.equal(Table._sapStartDerived(dateOnly).getTime(), Util.dueInstant(dateOnly).getTime() - 10 * Config.MS_HOUR);
+  const frac = { original_end_date: new Date(2026, 7, 4, 15, 0), RUN_TIME: 1.5 };
+  assert.equal(Table._sapStartDerived(frac).getTime(), new Date(2026, 7, 4, 13, 30).getTime());
+});
+
+test('SAP Start is null when run time is not a finite number above zero or the due is missing', () => {
+  const due = new Date(2026, 7, 4, 15, 0);
+  for (const rt of [0, null, undefined, NaN, -2, 'abc', '']) {
+    assert.equal(Table._sapStartDerived({ original_end_date: due, RUN_TIME: rt }), null, 'RUN_TIME ' + String(rt));
+  }
+  assert.equal(Table._sapStartDerived({ original_end_date: null, RUN_TIME: 5 }), null);
+  assert.equal(Table._sapStartDerived(null), null);
+});
+
+test('SAP Start column getter feeds the formatter (blank when not derivable)', () => {
   const [sapStart] = Table._scheduleDateColumns();
-  const dateOnly = new Date(2026, 7, 4);
-  assert.equal(sapStart.valueFormatter({ value: dateOnly }), Util._fmtDatePref(dateOnly));
-  assert.ok(!/AM|PM|00:00/.test(sapStart.valueFormatter({ value: dateOnly })), 'no 12:00 AM on a date-only start');
-  const timed = new Date(2026, 7, 4, 13, 30);
-  assert.equal(sapStart.valueFormatter({ value: timed }), Util.fmtDTReadable(timed));
+  const task = { original_end_date: new Date(2026, 7, 4, 15, 0), RUN_TIME: 6 };
+  const v = sapStart.valueGetter({ data: task });
+  assert.equal(v.getTime(), new Date(2026, 7, 4, 9, 0).getTime());
+  assert.equal(sapStart.valueFormatter({ value: v }), Util.fmtDTReadable(v));
+  assert.equal(sapStart.valueGetter({ data: { original_end_date: task.original_end_date, RUN_TIME: 0 } }), null);
+  assert.equal(sapStart.valueGetter({ data: undefined }), null);
   assert.equal(sapStart.valueFormatter({ value: null }), '');
 });
 
