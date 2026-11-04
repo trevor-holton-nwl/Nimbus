@@ -135,6 +135,25 @@ test('Grid typed finish pushes one undo entry whose snapshot holds the OLD finis
   } finally { Table._api = prior; s.restore(); }
 });
 
+test('Grid finish / run time edit on an already-dirty row: the undo snapshot keeps its "was dirty" mark (F10 must not discard it)', () => {
+  const s = setup('P-UNDO-G', 'LG', 'ug1');
+  const prior = Table._api, priorProbe = UndoStack.dirtyProbe, priorAfter = UndoStack.afterRestore;
+  Table._api = { applyTransaction: () => {}, refreshCells: () => {} };
+  UndoStack.dirtyProbe = id => id === 'ug1';   // the row carries an unsaved edit (e.g. a PRT_01 change) before the grid edit
+  try {
+    for (const field of ['end_date', 'RUN_TIME']) {
+      const row = Store.tasks.ug1;
+      const oldValue = row[field];
+      row[field] = field === 'end_date' ? new Date('2026-08-25T09:00:00') : '3';
+      Table._onCellChanged({ colDef: { field }, data: row, newValue: row[field], oldValue, node: {} });
+      const seen = [];
+      UndoStack.afterRestore = (ids, wasDirty) => seen.push([...wasDirty]);
+      UndoStack.pop();
+      assert.deepEqual(seen, [['ug1']], field + ': the restored snapshot row still carries the dirty marker');
+    }
+  } finally { UndoStack.dirtyProbe = priorProbe; UndoStack.afterRestore = priorAfter; Table._api = prior; s.restore(); }
+});
+
 test('Grid invalid typed finish pushes nothing and restores the cell', () => {
   const s = setup('P-UNDO-F', 'LF', 'uf1');
   const prior = Table._api;
