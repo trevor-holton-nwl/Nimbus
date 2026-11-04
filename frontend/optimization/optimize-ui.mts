@@ -20,6 +20,7 @@ import type { StoreEvent } from '../platform/store.mjs';
 import { Alerts, scheduleAlertsForPatches } from '../insights/services.mjs';
 import { Engine, snapshotSchedule, SETUP_AWARE_NORMAL_BUDGET_MS, effectiveFirmedIdSet, evaluateSchedule } from './engine.mjs';
 import { backlogWindow, budgetFor } from './run-params.mjs';
+import type { EngineEvaluationRequest } from './scheduler-contract.mjs';
 import { createOptimizerWorkerSession } from './optimizer-worker-client.mjs';
 import type { OptimizerWorkerFactory, OptimizerWorkerSession } from './optimizer-worker-client.mjs';
 import type { RemoveBacklogResult } from './scheduler-contract.mjs';
@@ -98,9 +99,9 @@ interface OptimizerRunOptions {
   [key: string]: unknown;
 }
 
-function previewEvaluationRequest(
+export function previewEvaluationRequest(
   mode: OptimizerMode, opts: OptimizerRunOptions, plant: string, deadlineAt: number,
-): EvaluationRequest {
+): EngineEvaluationRequest {
   return {
     mode,
     plant: opts.plant ?? plant,
@@ -116,6 +117,8 @@ function previewEvaluationRequest(
     placementStart: opts.placementStart as EvaluationRequest['placementStart'],
     deadlineAt,
     searchBudgetMs: opts.searchBudgetMs,
+    iterationCap: opts.iterationCap as EngineEvaluationRequest['iterationCap'],
+    holdRunning: opts.holdRunning as EngineEvaluationRequest['holdRunning'],
     exhaustive: opts.exhaustive,
   };
 }

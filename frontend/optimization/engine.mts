@@ -100,7 +100,7 @@ import type {
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy, SetupSnapshot, SetupDefinition, SetupStateKey, SetupValueDefault, PlantCalendarEntry, PlantPeriod } from '../platform/types.mjs';
 import { MIN_PRODUCTIVE_SEGMENT_MINUTES, PRIORITY_FIELD_DEFAULTS } from './scheduler-contract.mjs';
 import { SETUP_AWARE_NORMAL_BUDGET_MS, SETUP_AWARE_EXHAUSTIVE_BUDGET_MS } from './run-params.mjs';
-import type { RemoveBacklogResult, RemoveBacklogDiagnostics } from './scheduler-contract.mjs';
+import type { RemoveBacklogResult, RemoveBacklogDiagnostics, EngineEvaluationRequest } from './scheduler-contract.mjs';
 import type { SerializedOptimizerValidation } from './optimizer-worker-contract.mjs';
 import { firmActionForReasons, firmReasonLabels, planFirmActions } from './firm-actions.mjs';
 import type { FirmAction, FirmPlan, FirmReason } from './firm-actions.mjs';
@@ -3189,7 +3189,7 @@ UndoStack.dirtyProbe = (id: string): boolean => Persistence.isDirty(id);
  * optimization/optimize-ui.mts, which now imports it from here instead of
  * from setup-scheduler.mjs.
  */
-export function evaluateSchedule(snapshot: Readonly<ScheduleSnapshot>, request: EvaluationRequest = {}): CandidateResult {
+export function evaluateSchedule(snapshot: Readonly<ScheduleSnapshot>, request: EngineEvaluationRequest = {}): CandidateResult {
   const { mode = 'changeover', ...opts } = request;
   return Engine.evaluateSchedule(mode, opts, snapshot);
 }
