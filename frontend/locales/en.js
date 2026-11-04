@@ -199,6 +199,7 @@ window.__NIMBUS_LOCALES.en = {
   'toast.clear_failed':                'Clear failed',
   'toast.diag_bundle_downloaded':      'Diagnostics bundle downloaded',
   'toast.undone':                      'Undone: {{label}}',
+  'toast.redo_locked_skipped':         'Redo skipped for {{count}} order(s) that are now firmed, frozen or running. They were left as they are.',
   'toast.redone':                      'Redone: {{label}}',
   'toast.dark_mode_on':                'Dark mode on',
   'toast.light_mode_on':               'Light mode on',

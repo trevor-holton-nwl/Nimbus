@@ -3181,6 +3181,8 @@ UndoStack.willRederive = (task: NimbusTask): boolean => {
 UndoStack.dirtyProbe = (id: string): boolean => Persistence.isDirty(id);
 // An undo that returns a row to its last saved state clears its unsaved mark (Persistence.settleRestored).
 UndoStack.afterSettle = (ids: string[]): void => Persistence.settleRestored(ids);
+// Redo never moves an order that is locked now (manual firm, frozen horizon, running): the same union a drag is refused on.
+UndoStack.redoBlocked = (task: NimbusTask): boolean => Engine.firmingStatus(task).firmed;
 
 /**
  * Evaluate against the existing placement algorithm, but with its reads bound

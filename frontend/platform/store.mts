@@ -1334,8 +1334,18 @@ export const UndoStack = {
     if (this._busy) return null;
     const r = this._redo.pop();
     if (!r || !r.redoSnap || !r.original) return null;
-    if (!r.redoSnap.some(t => Store.tasks[t.id] != null)) return null;   // every row left the Store since: nothing to redo
-    this.restoreTasks(r.redoSnap, { exact: true });
+    const present = r.redoSnap.filter(t => Store.tasks[t.id] != null);
+    if (!present.length) return null;   // every row left the Store since: nothing to redo
+    // Redo must never move an order that is locked NOW (firmed, frozen horizon, running): time passes and a firm raises no
+    // task event, so the prune subscriber alone cannot see it. Locked rows keep their live value; the entry is spent.
+    const hook = UndoStack.redoBlocked;
+    const movable = hook ? present.filter(t => !hook(Store.tasks[t.id] as NimbusTask)) : present;
+    if (movable.length < r.redoSnap.length && hook) {
+      const skipped = r.redoSnap.length - movable.length;
+      Toast.show(Util.t('toast.redo_locked_skipped', { count: skipped }), 'warn', 6000);
+    }
+    if (!movable.length) return null;
+    this.restoreTasks(movable, { exact: true });
     this._entries.push(r.original);
     if (this._entries.length > this.MAX) this._entries.shift();
     this._trimShared();
@@ -1365,6 +1375,9 @@ export const UndoStack = {
   /** Registered by the engine (platform cannot import Persistence): runs after afterRestore returned, with the restored
    *  ids, so rows that provably equal their last saved state stop counting as unsaved. Not called by Time Machine. */
   afterSettle: null as null | ((ids: string[]) => void),
+  /** Registered by the engine (platform cannot import it): true when the order is firmed / frozen / running right now,
+   *  so Redo leaves it where it is. Null = nothing is blocked. */
+  redoBlocked: null as null | ((task: NimbusTask) => boolean),
   /** `exact` (Redo): write the snapshot rows as they are: no stale-run-time flag and
    *  no re-derive (the rows are a real earlier state, not a placeholder); the settle rule still runs. */
   restoreTasks(snapshot: NimbusTask[], opts?: { exact?: boolean }): void {
@@ -1421,6 +1434,13 @@ Store.subscribe(evt => {
 // redo just touched) do not count.
 Store.subscribe(evt => {
   if (!UndoStack._redo.length) return;
+  if (evt.type === 'firmed:change') {
+    // A firm after the undo (Engine.applyFirm, F-key, What-If): Redo would move a now-firmed order.
+    if (evt.source === 'undo') return;
+    const firmedHit = new Set(((evt.ids as Array<string | number> | undefined) ?? []).map(String));
+    UndoStack._redo = UndoStack._redo.filter(e => !e.ids || !e.ids.some(id => firmedHit.has(id)));
+    return;
+  }
   if (evt.source === 'undo' || evt.source === 'engine-runtime-reconcile' || evt.source === 'engine-runtime-reconcile-display') return;
   let touched: string[];
   if (evt.type === 'task:update') touched = [String(evt.id)];

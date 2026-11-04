@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
-import { ErrorLog } from '../../../frontend/platform/foundation.mjs';
+import { ErrorLog, Toast } from '../../../frontend/platform/foundation.mjs';
 import { Selection } from '../../../frontend/scheduling/selection.mjs';
 
 test('Store.rev() starts at 0 and increments on every mutation', () => {
@@ -797,6 +797,46 @@ test('a non-undo write to a redo entry id prunes it; undo / reconcile / unrelate
   assert.deepEqual(UndoStack._redo.map(e => e.label), ['E2'], 'task:update prunes');
   Store.updateMany([{ id: 'rd2', changes: { notes: 'q' } }], 'refresh');
   assert.equal(UndoStack._redo.length, 0, 'tasks:bulkUpdate prunes');
+});
+
+test('a firm after the undo prunes the redo entry (firmed:change from any source but undo); an undo-sourced firm does not', () => {
+  const { edit } = redoFx(2);
+  edit('E1', { RUN_TIME: '9' }, { redo: true }, ['rd1']);
+  edit('E2', { RUN_TIME: '9' }, { redo: true }, ['rd2']);
+  UndoStack.pop(); UndoStack.pop();
+  assert.equal(UndoStack._redo.length, 2);
+  Store.setFirmed('rd1', true, 'undo');
+  assert.equal(UndoStack._redo.length, 2, 'a firm written by an undo does not prune');
+  Store.setFirmed('rd2', true, 'interaction');
+  assert.deepEqual(UndoStack._redo.map(e => e.label), ['E1'], 'Firm A after the undo prunes the redo entry of A');
+  Store.setFirmed(['rd1', 'rd2'], false, 'unit-test');
+});
+
+test('Redo skips rows the engine hook calls locked (frozen / running / firmed): not moved, warn toast, entry dropped', () => {
+  const { edit } = redoFx(2);
+  const toasts = [];
+  const priorShow = Toast.show, priorHook = UndoStack.redoBlocked;
+  Toast.show = (msg, type) => { toasts.push([msg, type]); };
+  try {
+    edit('E1', { RUN_TIME: '9' });
+    UndoStack.pop();
+    // rd1 becomes locked after the undo (time passed / a firm that raised no task event): rd2 stays movable.
+    UndoStack.redoBlocked = t => t.id === 'rd1';
+    const r = UndoStack.popRedo();
+    assert.equal(r?.label, 'E1');
+    assert.equal(Store.tasks.rd1.RUN_TIME, '2', 'the locked row is not moved');
+    assert.equal(Store.tasks.rd2.RUN_TIME, '9', 'the other row is redone');
+    assert.ok(toasts.some(([m, t]) => /redo_locked_skipped/.test(m) && t === 'warn'), 'a warn toast names the skip');
+    assert.equal(UndoStack._redo.length, 0, 'the entry is dropped');
+    // Every row locked: a no-op that moves nothing.
+    UndoStack.pop();
+    UndoStack.redoBlocked = () => true;
+    const events = [];
+    const off = Store.subscribe(evt => { if (evt.type === 'tasks:bulkUpdate') events.push(evt); });
+    try { UndoStack.popRedo(); } finally { off(); }
+    assert.equal(Store.tasks.rd2.RUN_TIME, '2');
+    assert.equal(events.length, 0);
+  } finally { Toast.show = priorShow; UndoStack.redoBlocked = priorHook; }
 });
 
 test('Redo of an entry whose rows were removed from the Store is a safe no-op', () => {

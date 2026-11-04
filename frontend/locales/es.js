@@ -168,6 +168,7 @@ window.__NIMBUS_LOCALES.es = {
   'toast.clear_failed':                'Error al borrar',
   'toast.diag_bundle_downloaded':      'Paquete de diagnóstico descargado',
   'toast.undone':                      'Deshecho: {{label}}',
+  'toast.redo_locked_skipped':         'Rehacer omitido para {{count}} pedido(s) que ahora están en firme, congelados o en curso. Se dejaron como estaban.',
   'toast.redone':                      'Rehecho: {{label}}',
   'toast.machine_rejected':           '{{count}} order(s) could not be moved: the machine is not registered for this plant',
   'toast.dark_mode_on':                'Modo oscuro activado',
