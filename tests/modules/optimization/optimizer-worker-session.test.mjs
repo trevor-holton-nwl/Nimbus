@@ -230,6 +230,42 @@ test('session: prewarm boots idle workers up to the cap, a request takes one of 
   assert.ok(pool.workers.every(w => w.terminated));
 });
 
+test('session: a pre-warmed worker that errors while idle is retired; later requests still complete (no hang)', async () => {
+  const pool = fakePool();
+  const session = createOptimizerWorkerSession({ workerFactory: pool.factory, maxWorkers: 2 });
+  const primary = session.run(req('p'));
+  session.prewarm(1 + 1);
+  assert.equal(pool.workers.length, 2);
+  pool.workers[1].onerror({ message: 'boom while idle' });              // the pre-warmed worker dies before any request
+  assert.equal(pool.workers[1].terminated, true, 'the idle dead worker is retired');
+  const alt0 = session.run(req('alt-0'), { kpiOnly: true });
+  const alt1 = session.run(req('alt-1'), { kpiOnly: true });
+  assert.equal(pool.workers.length, 3, 'a replacement worker is spawned within the cap');
+  assert.deepEqual(pool.workers[1].posted, [], 'nothing was posted to the dead worker');
+  pool.workers[2].reply({ runId: 'alt-0', candidate: cand('A0') });
+  assert.equal((await alt0).id, 'A0');
+  pool.workers[2].reply({ runId: 'alt-1', candidate: cand('A1') });   // alt-1 waited for the freed replacement
+  assert.equal((await alt1).id, 'A1');
+  pool.workers[0].reply({ runId: 'p', candidate: cand('P'), validation });
+  assert.equal((await primary).id, 'P');
+  session.close();
+});
+
+test('session: a kept-alive idle worker that errors is retired and the next request gets a replacement', async () => {
+  const pool = fakePool();
+  const session = createOptimizerWorkerSession({ workerFactory: pool.factory, maxWorkers: 1 });
+  const a = session.run(req('a'));
+  pool.workers[0].reply({ runId: 'a', candidate: cand('A'), validation });
+  await a;
+  pool.workers[0].onerror({ message: 'idle death' });
+  assert.equal(pool.workers[0].terminated, true);
+  const b = session.run(req('b'));
+  assert.equal(pool.workers.length, 2);
+  pool.workers[1].reply({ runId: 'b', candidate: cand('B'), validation });
+  assert.equal((await b).id, 'B');
+  session.close();
+});
+
 // ── real worker_threads: a reused worker answers exactly like a fresh one ───────────────────────────────────────────
 const workerUrl = pathToFileURL(resolve('frontend/optimization/optimizer-worker.mjs')).href;
 const corePath = resolve('frontend/nimbus-compute-core.js');

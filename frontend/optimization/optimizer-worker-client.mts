@@ -160,8 +160,8 @@ export function createOptimizerWorkerSession(options: OptimizerWorkerSessionOpti
     const slot: SessionSlot = { worker, pending: null, spawnedAt: performance.now(), runs: 0, dead: false, prewarmed: false };
     slots.push(slot);
     worker.onmessage = ({ data }): void => onMessage(slot, data);
-    worker.onerror = (event): void => settle(slot, true, p => p.reject(new Error(event.message || 'Optimizer worker failed.')));
-    worker.onmessageerror = (): void => settle(slot, true, p => p.reject(new Error('Optimizer worker response could not be read (message deserialisation failed).')));
+    worker.onerror = (event): void => failSlot(slot, new Error(event.message || 'Optimizer worker failed.'));
+    worker.onmessageerror = (): void => failSlot(slot, new Error('Optimizer worker response could not be read (message deserialisation failed).'));
     return slot;
   };
 
@@ -174,6 +174,16 @@ export function createOptimizerWorkerSession(options: OptimizerWorkerSessionOpti
     pending.signal?.removeEventListener('abort', pending.onAbort);
     if (terminate || !keepAlive || stale || closed) terminateSlot(slot);
     callback(pending);
+    drain();
+  }
+
+  /** A worker reported a failure. With a request running it rejects that request; an IDLE (pre-warmed or kept-alive)
+   *  worker has nothing to reject but is just as dead: retire it so no later request is posted to it, and let any
+   *  queued request spawn a replacement (or take the fallback). */
+  function failSlot(slot: SessionSlot, error: Error): void {
+    if (slot.dead) return;
+    if (slot.pending) { settle(slot, true, p => p.reject(error)); return; }
+    terminateSlot(slot);
     drain();
   }
 
