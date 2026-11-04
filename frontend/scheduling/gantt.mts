@@ -427,6 +427,20 @@ export const Timeline = {
 
     Timeline._tl = new vis.Timeline(container, Timeline._visItems, Timeline._groups, options);
 
+    // Corner label above the machine column (CSS ::before reads data-label). Language change reloads the
+    // page, so the text is set once; --corner-h follows the real axis height on 'changed' (only on change).
+    const _cornerSync = (): void => {
+      const left = container.querySelector('.vis-panel.vis-left') as HTMLElement | null;
+      if (!left) return;
+      const label = Util.t('ui.sidebar_lines');
+      if (left.getAttribute('data-label') !== label) left.setAttribute('data-label', label);
+      const top = container.querySelector('.vis-panel.vis-top') as HTMLElement | null;
+      const h = top ? Math.round(top.getBoundingClientRect().height) : 0;
+      if (h > 8 && h < 120 && left.style.getPropertyValue('--corner-h') !== h + 'px') left.style.setProperty('--corner-h', h + 'px');
+    };
+    _cornerSync();
+    Timeline._tl.on('changed', _cornerSync);
+
     // vis binds Hammer `press` to _onMultiSelectItem; with `multiselect` unset it REPLACES vis's selection with the
     // pressed bar, so "grab, hold, then move" would drag one bar while Selection still holds N. Nothing in NIMBUS
     // uses press on items (the context menu is contextmenu / Shift+F10), so switch the recogniser off. Deliberate

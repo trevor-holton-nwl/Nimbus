@@ -1212,6 +1212,20 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 .vis-time-axis .vis-grid.vis-minor { border-color: var(--line); }
 .vis-time-axis .vis-grid.vis-major { border-color: var(--line-strong); }
 .vis-panel.vis-left { background: transparent; border-right: 1px solid var(--line); }
+/* Corner label above the machine column: axis-height strip at the top of the left
+   panel (height from --corner-h, set in gantt.mts). Text is data-label from ui.sidebar_lines.
+   Pass-through; rows never move. */
+.vis-panel.vis-left[data-label]::before {
+  content: attr(data-label);
+  position: absolute; top: 0; left: 0; right: 0; height: var(--corner-h, 40px);
+  z-index: 2; box-sizing: border-box; pointer-events: none;
+  display: flex; align-items: flex-end; justify-content: center;
+  padding: 0 8px 6px;
+  background: var(--bg-subtle); border-bottom: 1px solid var(--line);
+  font-size: 11px; font-weight: 600; letter-spacing: 0.04em; line-height: 1;
+  color: var(--fg-mute);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 /* Explicit light-mode panel backgrounds — previously relied on the vis-timeline
    vendor default (coincidentally white, same as --bg-elev today); made explicit
    so the Gantt panel/time-axis stay token-driven rather than vendor-default. */
@@ -6043,6 +6057,7 @@ body.dark .vis-panel.vis-left { background: var(--bg) !important; }
 body.dark .vis-panel.vis-top,
 body.dark .vis-panel.vis-bottom { background: var(--bg-strong) !important; }
 body.dark .vis-time-axis { background: var(--bg-strong) !important; }
+body.dark .vis-panel.vis-left[data-label]::before { background: var(--bg-strong); }
 /* vis-timeline group labels (production lines in the Gantt left rail) — */
 /* library's default color wins on .vis-inner, so target it explicitly */
 body.dark .vis-labelset .vis-label,
