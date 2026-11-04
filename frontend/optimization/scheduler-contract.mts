@@ -178,3 +178,123 @@ export function capAwareSequence<T>(
 
   return result;
 }
+
+// ---------------------------------------------------------------------------
+// P3-5(c): shared time unit and plant-policy readers. Pure value-in, value-out
+// helpers over the raw `plants` master-data fields, so the detached scheduler
+// (snapshot read) and the Engine (live Store read) can validate a field the
+// same way. No imports; this block stays a leaf.
+// ---------------------------------------------------------------------------
+
+/** Milliseconds in one minute (the divisor for every ms-to-minutes conversion). */
+export const MS_PER_MINUTE = 60 * 1000;
+
+/** A plant's productive-segment floor in minutes: a positive integer, else the default. */
+export function plantSegmentFloor(value: unknown): number {
+  return Number.isInteger(value) && (value as number) > 0 ? (value as number) : MIN_PRODUCTIVE_SEGMENT_MINUTES;
+}
+
+/** A plant's split-order policy; absent or malformed keeps continuous scheduling ('never'). */
+export function plantSplitPolicy(value: unknown): 'never' | 'overlong_only' | 'partial_allowed' {
+  return value === 'overlong_only' || value === 'partial_allowed' ? value : 'never';
+}
+
+/** A plant's unknown-setup policy; absent or malformed means 'zero'. */
+export function plantUnknownSetupPolicy(value: unknown): 'zero' | 'plantDefaultMinutes' | 'excludeFromSearch' {
+  return value === 'plantDefaultMinutes' || value === 'excludeFromSearch' ? value : 'zero';
+}
+
+/** A plant's default minutes for an unknown setup: a non-negative integer, else 0. */
+export function plantUnknownSetupDefaultMinutes(value: unknown): number {
+  return Number.isInteger(value) && (value as number) >= 0 ? (value as number) : 0;
+}
+
+/** A plant's tooling rule; anything but 'hard' is 'off'. */
+export function plantToolingRule(value: unknown): 'off' | 'hard' {
+  return value === 'hard' ? 'hard' : 'off';
+}
+
+// ---------------------------------------------------------------------------
+// P3-5(d): the candidate score vector. Eight slots, every one named; arity is
+// not type-enforced (`score` is `number[]`), so `makeScore` is the one place
+// the width lives. Slots 6 and 7 were appended after the first six (never
+// inserted), so slot 5 stays the setup-minute term other code reads.
+// ---------------------------------------------------------------------------
+
+/** Slot 0: hard-constraint violations (1 on a hard-infeasible candidate). */
+export const SCORE_HARD = 0;
+/** Slot 1: compact priority-policy diagnostic. */
+export const SCORE_POLICY = 1;
+/** Slot 2: late-order count. */
+export const SCORE_LATE_COUNT = 2;
+/** Slot 3: total lateness minutes. */
+export const SCORE_LATENESS = 3;
+/** Slot 4: minus the admitted-order count (lower is better, so more admissions win). */
+export const SCORE_PATCHES = 4;
+/** Slot 5: setup minutes. */
+export const SCORE_SETUP = 5;
+
+/** Score index carrying the count of uncovered-but-admitted transitions in a
+ * candidate (A2). Appended, never inserted: `score[5]` is read as setup-minute
+ * savings elsewhere (`evaluateMinChangeover`/`selectThroughputCandidate`), so
+ * renumbering would corrupt the min-changeover accept/reject decision.
+ * Compared explicitly in `compareCandidate` immediately after `policyKey` —
+ * never folded into the mode-permuted `terms` list — so it stays mode-
+ * independent: fewest uncovered edges outranks every term except the over-cap
+ * tier (SCORE_OVER_CAP), which sits just ahead of it (after `policyKey`) and is
+ * a no-op for unprotected orders now that the push limit is hard. This ordering is
+ * mode-independent EXCEPT for `'due-date'` (2026-09-09), whose dedicated
+ * `compareDueDateCandidate` puts lateness (score[2]/score[3]) and even
+ * `policyKey` itself ahead of both this tier and SCORE_OVER_CAP — see that
+ * function. */
+export const SCORE_UNCOVERED = 6;
+
+/** Score index carrying the count of over-cap orders in a candidate
+ * (due-date push-forward limit, 2026-09-09): an order whose scheduled end
+ * exceeds `bounds.notAfter(task)`. Appended, never inserted — same rule as
+ * SCORE_UNCOVERED above. Compared in `compareCandidate` immediately after
+ * `policyKey` and BEFORE the coverage tier (SCORE_UNCOVERED): on a plant with
+ * no real matrix, coverage is effectively same-signature grouping, so the cap
+ * must outrank it or a changeover saving could push an order arbitrarily far
+ * past its cap. Null/absent `bounds.notAfter` means every candidate's
+ * score[SCORE_OVER_CAP] is 0 — a provable no-op default. The ceiling is
+ * HARD (an order past it is queued, never placed), so this term is also 0 for
+ * every unprotected order; it can only count a protected/firmed order that
+ * already sits past its ceiling. Kept for score-vector arity. Mode-independent
+ * except for `'due-date'`, where `compareDueDateCandidate` still compares this
+ * tier second (right after hard feasibility) but ahead of `policyKey` — see
+ * that function's own comment. */
+export const SCORE_OVER_CAP = 7;
+
+/** Number of slots in a score vector. */
+export const SCORE_WIDTH = 8;
+
+/** A fresh all-zero score vector of the canonical width; the one place that width is written. */
+export function makeScore(): number[] {
+  return new Array<number>(SCORE_WIDTH).fill(0);
+}
+
+// ---------------------------------------------------------------------------
+// P3-5(e): the structured reasons an optimizer run queues an order under.
+// ---------------------------------------------------------------------------
+
+/** Every code the detached scheduler writes into a queued order's `planning_reason`. */
+export type PlanningReasonCode =
+  | 'expired_window'
+  | 'missing_due_date'
+  | 'invalid_runtime'
+  | 'no_fit_found'
+  | 'search_limit'
+  | 'search_incomplete'
+  | 'setup_transition_unrecorded'
+  | 'segment_floor_unfittable'
+  | 'push_limit_unmet'
+  | 'overlong_never'
+  | 'tool_contention'
+  | 'tool_unavailable';
+
+/** The code and message of a planning reason built by the detached scheduler. */
+export interface PlanningReason {
+  code: PlanningReasonCode;
+  message: string;
+}
