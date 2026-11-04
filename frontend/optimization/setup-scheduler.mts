@@ -7,7 +7,10 @@
  */
 
 import type { RemoveBacklogResult } from './scheduler-contract.mjs';
-import { MIN_PRODUCTIVE_SEGMENT_MINUTES, PRIORITY_FIELD_DEFAULTS, capAwareSequence } from './scheduler-contract.mjs';
+import {
+  MS_PER_MINUTE, PRIORITY_FIELD_DEFAULTS, capAwareSequence,
+  plantSegmentFloor, plantSplitPolicy, plantToolingRule, plantUnknownSetupDefaultMinutes, plantUnknownSetupPolicy,
+} from './scheduler-contract.mjs';
 import { candidateAllDayWorkHours, candidateDefaultWorkHours, fitsMergedSpan } from '../calendar/calendar-engine.mjs';
 import { buildSetupResolutionIndex, normalizedValue, resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
 import type { SetupResolutionIndex } from '../setup/setup-domain.mjs';
@@ -118,7 +121,7 @@ interface IntegerRange {
 function ceilMinute(value: Date): Date | null {
   const ms = value?.getTime?.();
   if (!Number.isFinite(ms)) return null;
-  const minuteMs = 60 * 1000;
+  const minuteMs = MS_PER_MINUTE;
   const rounded = ms % minuteMs ? ms + minuteMs - (ms % minuteMs) : ms;
   return new Date(rounded);
 }
@@ -126,7 +129,7 @@ function ceilMinute(value: Date): Date | null {
 function floorMinute(value: Date): Date | null {
   const ms = value?.getTime?.();
   if (!Number.isFinite(ms)) return null;
-  const minuteMs = 60 * 1000;
+  const minuteMs = MS_PER_MINUTE;
   return new Date(ms - (ms % minuteMs));
 }
 
@@ -158,7 +161,7 @@ function normalizedIntervals(intervals: ReadonlyArray<PlacementInterval>, earlie
   return merged.map(interval => ({
     start: interval.start,
     end: interval.end,
-    minutes: Math.floor((interval.end.getTime() - interval.start.getTime()) / (60 * 1000)),
+    minutes: Math.floor((interval.end.getTime() - interval.start.getTime()) / MS_PER_MINUTE),
   })).filter(interval => interval.minutes > 0);
 }
 
@@ -176,7 +179,7 @@ function clipAlignedIntervals(intervals: ReadonlyArray<MinuteInterval>, earliest
     } else if (interval.end.getTime() > earliestMs) {
       result.push({
         start: new Date(earliestMs), end: interval.end,
-        minutes: Math.floor((interval.end.getTime() - earliestMs) / (60 * 1000)),
+        minutes: Math.floor((interval.end.getTime() - earliestMs) / MS_PER_MINUTE),
       });
     }
   }
@@ -272,7 +275,7 @@ function capacityFailure(reason: PlacementInfeasibility['reason'] = 'no-feasible
 }
 
 function normalizedMinProductiveSegment(value: number | undefined): number {
-  return Number.isInteger(value) && (value as number) > 0 ? (value as number) : MIN_PRODUCTIVE_SEGMENT_MINUTES;
+  return plantSegmentFloor(value);
 }
 
 /** True when `placeWithSetup` must place the order whole in a single free
@@ -367,7 +370,7 @@ export function placeWithSetup(request: Readonly<PlaceWithSetupRequest>): Placem
     if (suffixMinutes[first] - setup.minutes < runtimeMinutes) break;
     const firstInterval = intervals[first];
     const firstProductiveStart = new Date(firstInterval.start.getTime() + setup.minutes * 60 * 1000);
-    const firstCapacity = Math.floor((firstInterval.end.getTime() - firstProductiveStart.getTime()) / (60 * 1000));
+    const firstCapacity = Math.floor((firstInterval.end.getTime() - firstProductiveStart.getTime()) / MS_PER_MINUTE);
     if (firstCapacity < minProductiveSegmentMinutes) continue;
 
     const slots: MinuteInterval[] = [{ start: firstProductiveStart, end: firstInterval.end, minutes: firstCapacity }];
@@ -2745,7 +2748,7 @@ function freeIndexFor(
   const re = new Float64Array(raw.length);
   const alignedStarts: number[] = [];
   const alignedEnds: number[] = [];
-  const MIN_MS = 60 * 1000;
+  const MIN_MS = MS_PER_MINUTE;
   for (let index = 0; index < raw.length; index += 1) {
     const start = +raw[index].start;
     const end = +raw[index].end;
@@ -2835,7 +2838,7 @@ export function placeWithFinishFloor(
   if (!finishFloor) return attempt(earliestStart);
   const floorMs = +finishFloor;
   const earliestMs = +earliestStart;
-  const MIN_MS = 60 * 1000;
+  const MIN_MS = MS_PER_MINUTE;
   const finishOf = (result: PlacementResult): number | null =>
     result.kind === 'placed' && result.productiveSegments.length ? +result.productiveSegments.at(-1)!.end : null;
   if (policy === 'never') {
@@ -2891,7 +2894,7 @@ function freeIntervalsForPlacement(
   if (through <= from || ctx?.respectCalendar === false) return freeIntervalsFor(snapshot, line, plant, from, through, ctx);
   const entry = freeIndexFor(ctx, snapshot, line, plant, from, through);
   if (!entry) return freeIntervalsFor(snapshot, line, plant, from, through, ctx);
-  const MIN_MS = 60 * 1000;
+  const MIN_MS = MS_PER_MINUTE;
   const fromMs = +from;
   const throughMs = +through;
   const lower = fromMs % MIN_MS ? fromMs + MIN_MS - (fromMs % MIN_MS) : fromMs;
@@ -2918,8 +2921,7 @@ function freeIntervalsForPlacement(
  * resolver: only the two persisted split choices opt into split placement;
  * absent or malformed snapshot data retains continuous scheduling. */
 function splitOrderPolicyForSnapshot(snapshot: Readonly<ScheduleSnapshot>, plant: string): SplitOrderPolicy {
-  const value = snapshot.masterData?.plants.find(candidate => candidate.plant === plant)?.split_order_policy;
-  return value === 'overlong_only' || value === 'partial_allowed' ? value : 'never';
+  return plantSplitPolicy(snapshot.masterData?.plants.find(candidate => candidate.plant === plant)?.split_order_policy);
 }
 
 /** B3 (2026-08-21): mirrors splitOrderPolicyForSnapshot above — resolves the
@@ -2929,25 +2931,21 @@ function splitOrderPolicyForSnapshot(snapshot: Readonly<ScheduleSnapshot>, plant
  * the same fallback default (MIN_PRODUCTIVE_SEGMENT_MINUTES) Engine's
  * version falls back to. */
 function minProductiveSegmentMinutesForSnapshot(snapshot: Readonly<ScheduleSnapshot>, plant: string): number {
-  const value = snapshot.masterData?.plants.find(candidate => candidate.plant === plant)?.min_productive_segment_minutes;
-  return Number.isInteger(value) && (value as number) > 0 ? (value as number) : MIN_PRODUCTIVE_SEGMENT_MINUTES;
+  return plantSegmentFloor(snapshot.masterData?.plants.find(candidate => candidate.plant === plant)?.min_productive_segment_minutes);
 }
 
 /** N8: mirrors splitOrderPolicyForSnapshot — Store-free read of the plant's
  * unknown-setup policy; absent/malformed → 'zero' (today's behavior). */
 function unknownSetupPolicyForSnapshot(snapshot: Readonly<ScheduleSnapshot>, plant: string): UnknownSetupPolicy {
-  const value = snapshot.masterData?.plants.find(candidate => candidate.plant === plant)?.setup_policy_config?.unknownSetupPolicy;
-  return value === 'plantDefaultMinutes' || value === 'excludeFromSearch' ? value : 'zero';
+  return plantUnknownSetupPolicy(snapshot.masterData?.plants.find(candidate => candidate.plant === plant)?.setup_policy_config?.unknownSetupPolicy);
 }
 /** Tool Inventory: Store-free read of the plant's tooling rule; absent/garbage -> 'off'. Deliberately NOT gated on
  * `bounds.setup.synthetic` (setup-off plants still get the tool rule). */
 export function toolingRuleForSnapshot(snapshot: Readonly<ScheduleSnapshot>, plant: string): 'off' | 'hard' {
-  const value = snapshot.masterData?.plants?.find(candidate => candidate.plant === plant)?.setup_policy_config?.toolingRule;
-  return value === 'hard' ? 'hard' : 'off';
+  return plantToolingRule(snapshot.masterData?.plants?.find(candidate => candidate.plant === plant)?.setup_policy_config?.toolingRule);
 }
 function unknownSetupDefaultMinutesForSnapshot(snapshot: Readonly<ScheduleSnapshot>, plant: string): number {
-  const value = snapshot.masterData?.plants.find(candidate => candidate.plant === plant)?.setup_policy_config?.unknownSetupDefaultMinutes;
-  return Number.isInteger(value) && (value as number) >= 0 ? (value as number) : 0;
+  return plantUnknownSetupDefaultMinutes(snapshot.masterData?.plants.find(candidate => candidate.plant === plant)?.setup_policy_config?.unknownSetupDefaultMinutes);
 }
 /** Whether an unresolved (unrecorded-state or uncovered-row) transition on
  * this line may ever be charged the plant's configured
@@ -3404,11 +3402,11 @@ function candidateForSequence(
     // Instability is keyed on the finish (Reading A): the placed finish is the anchor, so a task whose
     // finish held but whose start moved because its run time changed is not unstable.
     const priorFinish = timestamp(task.end_date);
-    if (priorFinish) instabilityMinutes += Math.abs(last.end.getTime() - priorFinish.getTime()) / 60000;
+    if (priorFinish) instabilityMinutes += Math.abs(last.end.getTime() - priorFinish.getTime()) / MS_PER_MINUTE;
     setupMinutes += effectiveSetupMinutes;
     const due = dueTimestamp(task, dueScope);
     if (Number.isFinite(due) && last.end.getTime() > due) {
-      const lateMinutes = Math.ceil((last.end.getTime() - due) / (60 * 1000));
+      const lateMinutes = Math.ceil((last.end.getTime() - due) / MS_PER_MINUTE);
       lateCount += 1;
       latenessMinutes += lateMinutes;
       maxLatenessMinutes = Math.max(maxLatenessMinutes, lateMinutes);
@@ -5824,7 +5822,7 @@ export function evaluateDueDateFirst(
 
 function scheduledEndMinutes(task: Readonly<NimbusTask>): number | null {
   const end = timestamp(task.end_date);
-  return end ? Math.floor(end.getTime() / (60 * 1000)) : null;
+  return end ? Math.floor(end.getTime() / MS_PER_MINUTE) : null;
 }
 
 /** Per-order lateness facts. The push-forward limit is a hard ceiling now, so no over-cap fact is kept here. */
@@ -7143,8 +7141,8 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
   }
   const occupied = new Map<string, { interval: PlacementInterval; task: NimbusTask; protectedTask: boolean }[]>();
   // P1-10: plant-constant reads hoisted out of the per-task loop.
-  const plantSplitPolicy = splitOrderPolicyForSnapshot(snapshot, bounds.setup.plant);
-  const plantSegmentFloor = minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant);
+  const splitPolicyForPlant = splitOrderPolicyForSnapshot(snapshot, bounds.setup.plant);
+  const segmentFloorForPlant = minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant);
   for (const task of occupancyTasks) {
     const boundaryOnly = boundaryIds.has(taskId(task)) && !ids.has(taskId(task));
     const protectedTask = taskIsFirmed(snapshot, task) || boundaryOnly;
@@ -7187,17 +7185,17 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
     if ((!protectedTask && (+start < +bounds.now || end > bounds.horizonEnd)) || (floor && start < floor) || (ceiling && end > ceiling)) add('date_window', 'Production lies outside its allowed planning window.', task, protectedTask);
     // Frozen finish floor (unprotected orders only): the message is fixed so applyPartial's code|taskId|message baseline key is stable.
     if (!protectedTask && bounds.finishFloor && end < bounds.finishFloor) add('date_window', 'Production finishes inside the frozen horizon.', task, protectedTask);
-    const minutes = intervals.reduce((sum, i) => sum + (+i.end - +i.start) / 60000, 0);
+    const minutes = intervals.reduce((sum, i) => sum + (+i.end - +i.start) / MS_PER_MINUTE, 0);
     if (Math.abs(minutes - Math.round(Number(task.RUN_TIME) * 60)) > 0.001) add('runtime', 'Productive duration does not match runtime.', task, protectedTask);
-    const policy = plantSplitPolicy;
+    const policy = splitPolicyForPlant;
     // The overlong decision is made from the placement origin (as `neverOverlongReason` and the placement walk do),
     // not from each order's own start, so a split placed under that decision is not flagged here.
     if (intervals.length > 1 && (policy === 'never' || (policy === 'overlong_only' && hasNominalWindow(snapshot, String(task.MACHINE), bounds.setup.plant, bounds.placementStart ?? bounds.now, Math.round(Number(task.RUN_TIME) * 60), bounds.runContext)))) add('split_policy', 'Order splitting violates plant policy.', task, protectedTask);
-    const minimum = plantSegmentFloor;
+    const minimum = segmentFloorForPlant;
     for (let index = 0; index < intervals.length; index++) {
       const interval = intervals[index];
       if (index && intervals[index - 1].end > interval.start) add('segments', 'Productive segments overlap or are out of order.', task, protectedTask);
-      if (intervals.length > 1 && (+interval.end - +interval.start) / 60000 < minimum) add('segment_floor', 'A productive segment is below the plant minimum.', task, protectedTask);
+      if (intervals.length > 1 && (+interval.end - +interval.start) / MS_PER_MINUTE < minimum) add('segment_floor', 'A productive segment is below the plant minimum.', task, protectedTask);
       const free = freeIntervalsFor(snapshot, String(task.MACHINE), bounds.setup.plant, interval.start, interval.end, bounds.runContext);
       if (!coversInterval(free, interval)) add('calendar', 'Production overlaps nonworking time or a blackout.', task, protectedTask);
       const line = String(task.MACHINE); const list = occupied.get(line) ?? []; list.push({ interval, task: result, protectedTask }); occupied.set(line, list);
@@ -8098,20 +8096,20 @@ export function objectiveFactsForCandidate(
     if (task.planning_status === 'needs_planning') {
       lateCount++;
       if (Number.isFinite(due)) {
-        const orderLateness = Math.max(0, (+bounds.horizonEnd - due) / 60000);
+        const orderLateness = Math.max(0, (+bounds.horizonEnd - due) / MS_PER_MINUTE);
         lateness += orderLateness;
         maxLateness = Math.max(maxLateness, orderLateness);
       }
     } else if (end && Number.isFinite(due) && +end > due) {
       lateCount++;
-      const orderLateness = (+end - due) / 60000;
+      const orderLateness = (+end - due) / MS_PER_MINUTE;
       lateness += orderLateness;
       maxLateness = Math.max(maxLateness, orderLateness);
     }
     const ceiling = notAfterFor(bounds, task);
     if (end && ceiling && +end > +ceiling) overCap++;
     const before = timestamp(original.get(taskId(task))?.end_date); const after = timestamp(task.end_date);
-    if (before && after) instability += Math.abs(+after - +before) / 60000;
+    if (before && after) instability += Math.abs(+after - +before) / MS_PER_MINUTE;
   }
   const definition = bounds.setup.definition;
   if (definition) for (const line of new Set(tasks.map(task => String(task.MACHINE)))) {

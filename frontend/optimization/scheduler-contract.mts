@@ -178,3 +178,38 @@ export function capAwareSequence<T>(
 
   return result;
 }
+
+// ---------------------------------------------------------------------------
+// P3-5(c): shared time unit and plant-policy readers. Pure value-in, value-out
+// helpers over the raw `plants` master-data fields, so the detached scheduler
+// (snapshot read) and the Engine (live Store read) can validate a field the
+// same way. No imports; this block stays a leaf.
+// ---------------------------------------------------------------------------
+
+/** Milliseconds in one minute (the divisor for every ms-to-minutes conversion). */
+export const MS_PER_MINUTE = 60 * 1000;
+
+/** A plant's productive-segment floor in minutes: a positive integer, else the default. */
+export function plantSegmentFloor(value: unknown): number {
+  return Number.isInteger(value) && (value as number) > 0 ? (value as number) : MIN_PRODUCTIVE_SEGMENT_MINUTES;
+}
+
+/** A plant's split-order policy; absent or malformed keeps continuous scheduling ('never'). */
+export function plantSplitPolicy(value: unknown): 'never' | 'overlong_only' | 'partial_allowed' {
+  return value === 'overlong_only' || value === 'partial_allowed' ? value : 'never';
+}
+
+/** A plant's unknown-setup policy; absent or malformed means 'zero'. */
+export function plantUnknownSetupPolicy(value: unknown): 'zero' | 'plantDefaultMinutes' | 'excludeFromSearch' {
+  return value === 'plantDefaultMinutes' || value === 'excludeFromSearch' ? value : 'zero';
+}
+
+/** A plant's default minutes for an unknown setup: a non-negative integer, else 0. */
+export function plantUnknownSetupDefaultMinutes(value: unknown): number {
+  return Number.isInteger(value) && (value as number) >= 0 ? (value as number) : 0;
+}
+
+/** A plant's tooling rule; anything but 'hard' is 'off'. */
+export function plantToolingRule(value: unknown): 'off' | 'hard' {
+  return value === 'hard' ? 'hard' : 'off';
+}
