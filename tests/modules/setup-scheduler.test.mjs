@@ -4674,6 +4674,26 @@ test('P1-4: skipStale omits only stale_candidate; boundsWithRunContext builds on
   assert.ok(Array.isArray(b));
 });
 
+test('P2-2: a run context is reused only for the same setup, respectCalendar and planning window', () => {
+  const snapshot = setupSnapshot([scheduledTask('current', 3, 'GREEN', '2026-08-03T18:00:00', '2026-08-03T08:00:00', '2026-08-03T11:00:00')]);
+  const base = dueDateBounds(setupTruth());
+  const first = SetupScheduler.boundsWithRunContext(snapshot, base);
+  const ctx = first.runContext;
+  assert.ok(ctx, 'a context is built');
+  assert.equal(SetupScheduler.boundsWithRunContext(snapshot, first).runContext, ctx, 'identical inputs reuse the context');
+  const before = SetupScheduler.runContextBuildCount();
+  const otherSetup = SetupScheduler.boundsWithRunContext(snapshot, { ...first, setup: setupTruth() });
+  assert.notEqual(otherSetup.runContext, ctx, 'a different setup object rebuilds');
+  const noCalendar = SetupScheduler.boundsWithRunContext(snapshot, { ...first, respectCalendar: false });
+  assert.notEqual(noCalendar.runContext, ctx, 'a different respectCalendar rebuilds');
+  assert.equal(noCalendar.runContext.respectCalendar, false);
+  const laterHorizon = SetupScheduler.boundsWithRunContext(snapshot, { ...first, horizonEnd: at('2026-08-04T18:00:00') });
+  assert.notEqual(laterHorizon.runContext, ctx, 'a different horizon rebuilds');
+  const laterStart = SetupScheduler.boundsWithRunContext(snapshot, { ...first, planningStart: at('2026-08-03T09:00:00') });
+  assert.notEqual(laterStart.runContext, ctx, 'a different planning start rebuilds');
+  assert.equal(SetupScheduler.runContextBuildCount() - before, 4);
+});
+
 test('hard bounds clip setup and split production at the ceiling and preserve equality', () => {
   const snapshot = setupSnapshot([scheduledTask('setup-overflow', 10, 'RED', '2026-08-03T18:00:00'), scheduledTask('equal', 10, 'GREEN', '2026-08-03T18:00:00')]);
   snapshot.masterData.plants[0].max_push_forward_days = 0;

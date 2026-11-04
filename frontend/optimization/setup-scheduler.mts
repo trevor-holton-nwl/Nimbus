@@ -7,7 +7,7 @@
  */
 
 import type { RemoveBacklogResult } from './scheduler-contract.mjs';
-import { MIN_PRODUCTIVE_SEGMENT_MINUTES, capAwareSequence } from './scheduler-contract.mjs';
+import { MIN_PRODUCTIVE_SEGMENT_MINUTES, PRIORITY_FIELD_DEFAULTS, capAwareSequence } from './scheduler-contract.mjs';
 import { candidateAllDayWorkHours, candidateDefaultWorkHours, fitsMergedSpan } from '../calendar/calendar-engine.mjs';
 import { buildSetupResolutionIndex, normalizedValue, resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
 import type { SetupResolutionIndex } from '../setup/setup-domain.mjs';
@@ -77,7 +77,7 @@ export interface PlaceWithSetupRequest {
    * operating windows so a blackout does not make ordinary work splitable. */
   isInherentlyOverlong?: boolean;
   /** B3 (2026-08-21): the plant's configured productive-segment floor
-   * (schedule-services.mjs's MIN_PRODUCTIVE_SEGMENT_MINUTES default when
+   * (scheduler-contract.mts's MIN_PRODUCTIVE_SEGMENT_MINUTES default when
    * omitted or not a positive integer). Callers resolve this from the
    * snapshot's masterData — see minProductiveSegmentMinutesForSnapshot below
    * — so this primitive stays Store-free. */
@@ -464,7 +464,7 @@ export interface EvaluationRequest {
   placementStart?: Date | string | number | null;
   /** Phase 2 (Pkg D): an absolute performance.now() timestamp overriding the
    *  setup-aware evaluators' default SETUP_AWARE_DEADLINE_MS search window
-   *  (schedule-services.mts). Used by the optimizer preview's deferred Plan B
+   *  (engine.mts). Used by the optimizer preview's deferred Plan B
    *  comparison run, which gets a smaller, fixed budget instead of a full
    *  fresh deadline on the synchronous path. */
   deadlineAt?: number;
@@ -543,7 +543,7 @@ export interface DueDateFirstBounds {
   runContext?: SetupRunContext;
   /** Phase 1e: overrides `SETUP_AWARE_CONVERGENCE_WINDOW` for this run. Absent
    * falls back to that constant — the live engine wiring in
-   * schedule-services.mts sets this explicitly alongside the other
+   * engine.mts sets this explicitly alongside the other
    * `SETUP_AWARE_*` constants; tests may shrink it to make a plateau cheap. */
   convergenceWindow?: number;
   /** F2 test-only off switch: true makes `buildRunContext` skip the per-line
@@ -594,6 +594,11 @@ export interface SetupRunContext {
   resolutionIndex: SetupResolutionIndex | null;
   plant: string;
   respectCalendar: boolean;
+  /** Reuse guard inputs (see `withRunContext`): the setup truth object and the
+   *  planning window (ms) this context was built from. */
+  setup: DueDateFirstBounds['setup'];
+  planningStartMs: number;
+  horizonEndMs: number;
   /** Hoisted once: identical for every candidate this run evaluates. */
   activePriorityKeys: ReadonlyArray<string>;
   splitOrderPolicy: SplitOrderPolicy;
@@ -702,6 +707,9 @@ export function buildRunContext(
     resolutionIndex,
     plant,
     respectCalendar: bounds.respectCalendar ?? true,
+    setup: bounds.setup,
+    planningStartMs: +(bounds.planningStart ?? bounds.now),
+    horizonEndMs: +bounds.horizonEnd,
     activePriorityKeys: activePriorityKeys(snapshot, plant),
     splitOrderPolicy: bounds.respectCalendar === false ? 'never' : splitOrderPolicyForSnapshot(snapshot, plant),
     minProductiveSegmentMinutes: minProductiveSegmentMinutesForSnapshot(snapshot, plant),
@@ -774,22 +782,21 @@ function normalizeRunDates(bounds: Readonly<DueDateFirstBounds>): Readonly<DueDa
  * every nested helper can read `bounds.runContext` without a second identity
  * check — safe because that returned bounds object is never mutated again.
  *
- * Invariant this guard does NOT check: a reused `runContext` is only valid
- * for the same `bounds.setup` (definition/matrix rows/overrides) it was
- * built from — `resolutionIndex` and the hoisted plant constants are derived
- * from `bounds.setup`, not `snapshot`, so a caller that reused a `snapshot`
- * object but swapped in different `bounds.setup` would silently get stale
- * setup truth. Every caller today satisfies this for free: a `runContext` is
- * created and consumed entirely within one `runAndApply`/evaluator
- * invocation, which never changes `bounds.setup` mid-call. A future caller
- * must preserve that pairing (or extend this guard with a `bounds.setup`
- * identity check) rather than reuse a `runContext` across a `bounds.setup`
- * change. */
+ * Reuse also requires the same `bounds.setup` object, the same
+ * `respectCalendar` and the same planning window (planningStart / horizonEnd
+ * in ms): `resolutionIndex`, the hoisted plant constants and the free-index
+ * span are derived from those, not from `snapshot`, so a context built for a
+ * different setup, calendar mode or window would otherwise be reused stale. */
 function withRunContext(
   snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>,
 ): Readonly<DueDateFirstBounds> {
   const normalized = normalizeRunDates(bounds);
-  if (normalized.runContext && normalized.runContext.snapshot === snapshot) return normalized;
+  const reused = normalized.runContext;
+  if (reused && reused.snapshot === snapshot
+    && reused.setup === normalized.setup
+    && reused.respectCalendar === (normalized.respectCalendar ?? true)
+    && reused.planningStartMs === +(normalized.planningStart ?? normalized.now)
+    && reused.horizonEndMs === +normalized.horizonEnd) return normalized;
   return { ...normalized, runContext: buildRunContext(snapshot, normalized) };
 }
 
@@ -861,7 +868,7 @@ const PROTECTED_FIRMED_BOUNDARY_OUTSIDE_HORIZON_REASON = 'protected-firmed-bound
  * feasible winner already exists), stop searching and report `'converged'`
  * rather than continuing to burn iterations/wall-clock on a plateaued
  * search. Overridable per-run via `bounds.convergenceWindow` (the live
- * engine wiring in schedule-services.mts defaults it to this constant); a
+ * engine wiring in engine.mts defaults it to this constant); a
  * test can shrink it to make a plateau cheap to construct. */
 export const SETUP_AWARE_CONVERGENCE_WINDOW = 2000;
 
@@ -1521,15 +1528,8 @@ function notAfterFor(bounds: Readonly<DueDateFirstBounds>, task: Readonly<Nimbus
   return value;
 }
 
-const PRIORITY_TASK_FIELDS: Readonly<Record<string, string>> = {
-  colorWheel: 'COLOR',
-  prt01: 'PRT_01',
-  prt02: 'PRT_02',
-  productionVersion: 'PRODUCTION_VERSION',
-};
-
 // Rank-lookup values here are always order attribute values for
-// PRIORITY_TASK_FIELDS (color / prt01 / prt02 / productionVersion) — never
+// PRIORITY_FIELD_DEFAULTS (color / prt01 / prt02 / productionVersion) — never
 // boolean-shaped — so this delegates to setup-domain's `normalizedValue`
 // fold for a single source of truth rather than keeping an independent
 // `toUpperCase()`. The boolean exemption in `normalizedValue` is inert here
@@ -1573,7 +1573,7 @@ function rankForTask(
   line: string,
   task: NimbusTask,
 ): number {
-  const taskField = PRIORITY_TASK_FIELDS[fieldKey];
+  const taskField = PRIORITY_FIELD_DEFAULTS[fieldKey];
   if (!taskField) return 999999;
   const value = normalizedPriorityValue((task as unknown as Record<string, unknown>)[taskField]);
   const byLine = snapshot.priorityRankMaps ?? {};
@@ -2708,7 +2708,7 @@ function walkFreeIntervals(
   ctx?: SetupRunContext,
 ): PlacementInterval[] {
   // B6: fall back to the same default work hours the alerts path and the
-  // detached-candidate path already use (schedule-services.mts's
+  // detached-candidate path already use (engine.mts's
   // setupDefaultWorkHours/candidateDefaultWorkHours) instead of returning []
   // when a line or plant calendar is missing. Without this, one plant with
   // no `Store.plants` entry silently placed nothing for every line in it,
@@ -3363,8 +3363,8 @@ function candidateForSequence(
         uncoveredAdmission = true;
         uncoveredEdgeCount += 1;
         // Reuse 'scheduled-without-setup' (F1) — the single existing authority
-        // for the live toast (schedule-services.mts) and the preview tally
-        // (schedule-workbench.mts), both of which already intersect against
+        // for the live toast (insights/services.mts) and the preview tally
+        // (optimize-ui.mts), both of which already intersect against
         // patched ids. Emitting UNCOVERED_SETUP_TRANSITION_REASON here would be
         // wrong: appendRejectedCoverageDiagnostics would then stamp this
         // *admitted* order "Rejected X -> Y" and tally it into prunes.setup.
@@ -7863,86 +7863,86 @@ function placeTaskInLineGaps(env: GapEnv, task: NimbusTask, hooks?: ToolGapHooks
   const anyProtectedNext = !!protectedOnLine && protectedOnLine.size > 0;
   let relaxBaseline: Set<string> | null = null;
   for (const relax of anyProtectedNext ? [false, true] : [false]) {
-  let cursor = +bounds.now;
-  let predecessor: NimbusTask | null = null;
-  for (let index = 0; index <= accepted.length; index++) {
-    if (expired()) return { kind: 'incomplete' };
-    const next = accepted[index];
-    const gapEnd = Math.min(+bounds.horizonEnd, next ? +timestamp(next.start_date)! : Infinity);
-    const floor = Math.max(cursor, +(notBeforeFor(bounds, task) ?? bounds.now));
-    const incoming = gapEnd > floor ? transition(predecessor, task) : null;
-    const relaxNext = relax && !!next && !!protectedOnLine?.has(taskId(next));
-    // The relaxed pass only differs from the strict one where the successor is protected: skip every other gap.
-    const outgoing = relax && !relaxNext ? null : next && incoming !== null ? transition(task, next, relaxNext) : 0;
-    if (incoming !== null && outgoing !== null) {
-      const nextStart = next ? +timestamp(next.start_date)! : gapEnd;
-      const setupStart = nextStart - outgoing * 60000;
-      const ceiling = Math.min(gapEnd, setupStart, +(notAfterFor(bounds, task) ?? bounds.horizonEnd));
-      const outgoingFits = !next || outgoing === 0 || relaxNext || (
-        setupStart >= +(notBeforeFor(bounds, next) ?? bounds.now)
-        && coversInterval(nextStart > +bounds.horizonEnd
-          ? freeIntervalsFor(snapshot, line, bounds.setup.plant, new Date(setupStart), new Date(nextStart), bounds.runContext) : free,
-        { start: new Date(setupStart), end: new Date(nextStart) }));
-      // Frozen finish floor: a gap whose ceiling is before it admits nothing (equality is valid).
-      const gapFinishFloor = bounds.finishFloor ?? null;
-      if (ceiling > floor && outgoingFits && !(gapFinishFloor && ceiling < +gapFinishFloor)) {
-        const runtimeMinutes = Math.round(Number(task.RUN_TIME) * 60);
-        const policy = bounds.runContext!.splitOrderPolicy;
-        // Tool rule: only the tool-free part of the calendar is usable (setup + run). Each MAXIMAL tool-free window of the
-        // gap is tried on its own: a split-policy order placed across a tool-blocked stretch fails the envelope check, and
-        // that must not abandon the later tool-free windows of the same gap. Without hooks: one pass over the whole `free`.
-        const toolWindows = hooks ? hooks.windows(floor, ceiling) : null;
-        for (const toolWindow of toolWindows ?? [null]) {
-          const usable = toolWindow ? intersectIntervals(free, [toolWindow]) : free;
-          // Each attempt rebuilds the clipped intervals and isInherentlyOverlong from its own start.
-          const placement = placeWithFinishFloor((earliest: Date) => placeWithSetup({ earliestStart: earliest, runtimeMinutes,
-            setup: { kind: 'resolved', minutes: incoming }, policy,
-            isInherentlyOverlong: policy === 'overlong_only' && !hasNominalWindow(snapshot, line, bounds.setup.plant, earliest, runtimeMinutes, bounds.runContext),
-            minProductiveSegmentMinutes: bounds.runContext!.minProductiveSegmentMinutes,
-            freeIntervals: usable.flatMap(slot => {
-              const start = Math.max(+slot.start, +earliest); const end = Math.min(+slot.end, ceiling);
-              return end > start ? [{ start: new Date(start), end: new Date(end) }] : [];
-            }),
-          }), new Date(floor), gapFinishFloor, incoming, runtimeMinutes, policy);
-          if (placement.kind === 'placed' && (!hooks || hooks.envelopeFits(placement.productiveSegments[0].start, placement.productiveSegments.at(-1)!.end))) {
-            const segments = placement.productiveSegments;
-            const patch: SchedulePatch = { id, changes: { start_date: segments[0].start, end_date: segments.at(-1)!.end,
-              scheduleSegments: segments.length > 1 ? segments.map((segment, i) => ({ sequence: i + 1, startDate: segment.start, endDate: segment.end })) : [],
-              planning_status: 'scheduled', planning_reason: null } };
-            const disposition: PlanningDisposition = { id, line, status: 'scheduled' };
-            const trial = { ...candidate,
-              patches: peers.flatMap(peer => taskId(peer) === id ? [patch] : patches.has(taskId(peer)) ? [patches.get(taskId(peer))!] : []),
-              dispositions: peers.flatMap(peer => {
-                const value = taskId(peer) === id ? disposition : dispositions.get(taskId(peer));
-                return value ? [value] : [];
+    let cursor = +bounds.now;
+    let predecessor: NimbusTask | null = null;
+    for (let index = 0; index <= accepted.length; index++) {
+      if (expired()) return { kind: 'incomplete' };
+      const next = accepted[index];
+      const gapEnd = Math.min(+bounds.horizonEnd, next ? +timestamp(next.start_date)! : Infinity);
+      const floor = Math.max(cursor, +(notBeforeFor(bounds, task) ?? bounds.now));
+      const incoming = gapEnd > floor ? transition(predecessor, task) : null;
+      const relaxNext = relax && !!next && !!protectedOnLine?.has(taskId(next));
+      // The relaxed pass only differs from the strict one where the successor is protected: skip every other gap.
+      const outgoing = relax && !relaxNext ? null : next && incoming !== null ? transition(task, next, relaxNext) : 0;
+      if (incoming !== null && outgoing !== null) {
+        const nextStart = next ? +timestamp(next.start_date)! : gapEnd;
+        const setupStart = nextStart - outgoing * 60000;
+        const ceiling = Math.min(gapEnd, setupStart, +(notAfterFor(bounds, task) ?? bounds.horizonEnd));
+        const outgoingFits = !next || outgoing === 0 || relaxNext || (
+          setupStart >= +(notBeforeFor(bounds, next) ?? bounds.now)
+          && coversInterval(nextStart > +bounds.horizonEnd
+            ? freeIntervalsFor(snapshot, line, bounds.setup.plant, new Date(setupStart), new Date(nextStart), bounds.runContext) : free,
+          { start: new Date(setupStart), end: new Date(nextStart) }));
+        // Frozen finish floor: a gap whose ceiling is before it admits nothing (equality is valid).
+        const gapFinishFloor = bounds.finishFloor ?? null;
+        if (ceiling > floor && outgoingFits && !(gapFinishFloor && ceiling < +gapFinishFloor)) {
+          const runtimeMinutes = Math.round(Number(task.RUN_TIME) * 60);
+          const policy = bounds.runContext!.splitOrderPolicy;
+          // Tool rule: only the tool-free part of the calendar is usable (setup + run). Each MAXIMAL tool-free window of the
+          // gap is tried on its own: a split-policy order placed across a tool-blocked stretch fails the envelope check, and
+          // that must not abandon the later tool-free windows of the same gap. Without hooks: one pass over the whole `free`.
+          const toolWindows = hooks ? hooks.windows(floor, ceiling) : null;
+          for (const toolWindow of toolWindows ?? [null]) {
+            const usable = toolWindow ? intersectIntervals(free, [toolWindow]) : free;
+            // Each attempt rebuilds the clipped intervals and isInherentlyOverlong from its own start.
+            const placement = placeWithFinishFloor((earliest: Date) => placeWithSetup({ earliestStart: earliest, runtimeMinutes,
+              setup: { kind: 'resolved', minutes: incoming }, policy,
+              isInherentlyOverlong: policy === 'overlong_only' && !hasNominalWindow(snapshot, line, bounds.setup.plant, earliest, runtimeMinutes, bounds.runContext),
+              minProductiveSegmentMinutes: bounds.runContext!.minProductiveSegmentMinutes,
+              freeIntervals: usable.flatMap(slot => {
+                const start = Math.max(+slot.start, +earliest); const end = Math.min(+slot.end, ceiling);
+                return end > start ? [{ start: new Date(start), end: new Date(end) }] : [];
               }),
-            };
-            // The per-line trial is single-line: the plant-wide tool check is made through `hooks`, never here.
-            const trialFindings = validateCandidate({ ...snapshot, tasks: peers }, { ...bounds, lines: [line], skipToolOverflowFinding: true }, trial);
-            if (!trialFindings.some(f => f.severity === 'error')) {
-              // A relaxed placement ahead of a protected successor must not CREATE a setup warning on it (the validator only
-              // warns for protected orders, so Apply would accept it): compare with the same line without this placement.
-              if (relaxNext && outgoing! > 0) {
-                const setupKeys = (list: readonly ValidationFinding[]): Set<string> => new Set(list.filter(f => f.taskId && String(f.code).startsWith('setup_') && protectedOnLine!.has(String(f.taskId))).map(f => `${f.code}|${f.taskId}`));
-                // Edges already violated without this placement are not new (a warning key present in the baseline is allowed).
-                if (!relaxBaseline) relaxBaseline = setupKeys(validateCandidate({ ...snapshot, tasks: peers }, { ...bounds, lines: [line], skipToolOverflowFinding: true },
-                  { ...candidate, patches: peers.flatMap(peer => patches.has(taskId(peer)) ? [patches.get(taskId(peer))!] : []),
-                    dispositions: peers.flatMap(peer => { const value = dispositions.get(taskId(peer)); return value ? [value] : []; }) }));
-                if ([...setupKeys(trialFindings)].some(key => !relaxBaseline!.has(key))) continue;
+            }), new Date(floor), gapFinishFloor, incoming, runtimeMinutes, policy);
+            if (placement.kind === 'placed' && (!hooks || hooks.envelopeFits(placement.productiveSegments[0].start, placement.productiveSegments.at(-1)!.end))) {
+              const segments = placement.productiveSegments;
+              const patch: SchedulePatch = { id, changes: { start_date: segments[0].start, end_date: segments.at(-1)!.end,
+                scheduleSegments: segments.length > 1 ? segments.map((segment, i) => ({ sequence: i + 1, startDate: segment.start, endDate: segment.end })) : [],
+                planning_status: 'scheduled', planning_reason: null } };
+              const disposition: PlanningDisposition = { id, line, status: 'scheduled' };
+              const trial = { ...candidate,
+                patches: peers.flatMap(peer => taskId(peer) === id ? [patch] : patches.has(taskId(peer)) ? [patches.get(taskId(peer))!] : []),
+                dispositions: peers.flatMap(peer => {
+                  const value = taskId(peer) === id ? disposition : dispositions.get(taskId(peer));
+                  return value ? [value] : [];
+                }),
+              };
+              // The per-line trial is single-line: the plant-wide tool check is made through `hooks`, never here.
+              const trialFindings = validateCandidate({ ...snapshot, tasks: peers }, { ...bounds, lines: [line], skipToolOverflowFinding: true }, trial);
+              if (!trialFindings.some(f => f.severity === 'error')) {
+                // A relaxed placement ahead of a protected successor must not CREATE a setup warning on it (the validator only
+                // warns for protected orders, so Apply would accept it): compare with the same line without this placement.
+                if (relaxNext && outgoing! > 0) {
+                  const setupKeys = (list: readonly ValidationFinding[]): Set<string> => new Set(list.filter(f => f.taskId && String(f.code).startsWith('setup_') && protectedOnLine!.has(String(f.taskId))).map(f => `${f.code}|${f.taskId}`));
+                  // Edges already violated without this placement are not new (a warning key present in the baseline is allowed).
+                  if (!relaxBaseline) relaxBaseline = setupKeys(validateCandidate({ ...snapshot, tasks: peers }, { ...bounds, lines: [line], skipToolOverflowFinding: true },
+                    { ...candidate, patches: peers.flatMap(peer => patches.has(taskId(peer)) ? [patches.get(taskId(peer))!] : []),
+                      dispositions: peers.flatMap(peer => { const value = dispositions.get(taskId(peer)); return value ? [value] : []; }) }));
+                  if ([...setupKeys(trialFindings)].some(key => !relaxBaseline!.has(key))) continue;
+                }
+                return { kind: 'placed', patch, disposition };
               }
-              return { kind: 'placed', patch, disposition };
             }
           }
         }
       }
+      if (next) {
+        // Overlapping protected orders reserve their entire union, including
+        // split-order envelopes; the last chronological order supplies state.
+        cursor = Math.max(cursor, +timestamp(next.end_date)!);
+        predecessor = next;
+      }
     }
-    if (next) {
-      // Overlapping protected orders reserve their entire union, including
-      // split-order envelopes; the last chronological order supplies state.
-      cursor = Math.max(cursor, +timestamp(next.end_date)!);
-      predecessor = next;
-    }
-  }
   }
   return { kind: 'none' };
 }
