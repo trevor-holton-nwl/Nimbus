@@ -302,6 +302,12 @@ export const Persistence = {
       tone: 'warn',
     });
     if (!discard) return false;
+    Persistence.discardUnsavedForPlantSwitch();
+    return true;
+  },
+  /** Drop every unsaved-edit set (the outgoing plant's). Shared by the confirmed plant switch and the What-If
+   *  auto-exit, whose discard hands the pre-What-If sets back before the switch completes. */
+  discardUnsavedForPlantSwitch(): void {
     Persistence._dirtyIds.clear();
     Persistence._forceIds.clear();
     Persistence._conflictedIds.clear();
@@ -311,7 +317,6 @@ export const Persistence = {
     // including when the user cleared the selector before re-selecting it.
     Persistence._currentLoadedPlant = null;
     Persistence._syncUnsaved();
-    return true;
   },
   _syncUnsaved(): void {
     const badge = typeof document === 'undefined' ? null : document.getElementById('schedule-unsaved');

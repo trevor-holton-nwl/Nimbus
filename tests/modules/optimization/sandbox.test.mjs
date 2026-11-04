@@ -225,3 +225,76 @@ test('applied-scenario undo restores tasks through the dirty path with the live 
     assert.ok(dirty.has('wu1'), 'reverted task must be dirty so the next save pushes the revert');
   } finally { off(); }
 });
+
+/* ---- P0-20: a plant switch ends What-If before the new plant loads ---------------------------------------- */
+const _withPlants = (fn) => {
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  try { fn(); } finally {
+    if (Sandbox.active) Sandbox.exit(false, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    Store.setTasks(priorTasks, 'unit-test');
+  }
+};
+
+test('Sandbox snapshot records the plant selected at enter', () => _withPlants(() => {
+  Store.setSelectedPlant('PA', 'unit-test');
+  Sandbox.enter('unit-test');
+  assert.equal(Sandbox._snapshot.plant, 'PA');
+  Sandbox.exit(false, 'unit-test');
+}));
+
+for (const source of ['header', 'nav-drawer', 'optimize-background', 'setup-preview-review', 'tool-inventory-link']) {
+  test(`plant switch (${source}) discards What-If on the outgoing plant before the new plant loads`, () => _withPlants(() => {
+    Store.setSelectedPlant('PA', 'unit-test');
+    Store.setTasks([{ id: 'a1', PLANT: 'PA', MACHINE: 'LA', RUN_TIME: 1 }], 'unit-test');
+    Sandbox.enter('unit-test');
+    Store.updateTask('a1', { RUN_TIME: 9 }, 'unit-test'); // trial edit on A
+    const seen = [];
+    const off = Store.subscribe(evt => {
+      if (evt.type === 'sandbox:exited') seen.push(['exited', Store.selectedPlant, Store.tasks.a1?.RUN_TIME, evt.source]);
+      if (evt.type === 'plant:selected') seen.push(['selected', Sandbox.active]);
+    });
+    try {
+      Store.setSelectedPlant('PB', source);
+    } finally { off(); }
+    assert.equal(Sandbox.active, false);
+    assert.equal(Store.mode(), 'live');
+    // Exit ran while the outgoing plant was still selected, with A's pre-trial row restored; then plant:selected.
+    assert.deepEqual(seen, [['exited', 'PA', 1, 'plant-switch'], ['selected', false]]);
+    // The new plant's load (what Persistence.loadForPlant does) replaces rows; A's never leak into B.
+    Store.setTasks([{ id: 'b1', PLANT: 'PB', MACHINE: 'LB', RUN_TIME: 2 }], 'persistence');
+    assert.deepEqual(Store.tasksArr.map(t => t.id), ['b1']);
+    assert.equal(Store.selectedPlant, 'PB');
+  }));
+}
+
+test('clearing the plant selection also ends What-If', () => _withPlants(() => {
+  Store.setSelectedPlant('PA', 'unit-test');
+  Sandbox.enter('unit-test');
+  Store.setSelectedPlant(null, 'header');
+  assert.equal(Sandbox.active, false);
+}));
+
+test('an exit(false) after the switch cannot happen: B rows survive and A rows are not re-applied', () => _withPlants(() => {
+  Store.setSelectedPlant('PA', 'unit-test');
+  Store.setTasks([{ id: 'a2', PLANT: 'PA', MACHINE: 'LA', RUN_TIME: 1 }], 'unit-test');
+  Sandbox.enter('unit-test');
+  Store.setSelectedPlant('PB', 'header');
+  Store.setTasks([{ id: 'b2', PLANT: 'PB', MACHINE: 'LB', RUN_TIME: 2 }], 'persistence');
+  assert.equal(Sandbox.exit(false, 'sandbox-ui'), null, 'nothing left to discard');
+  assert.deepEqual(Store.tasksArr.map(t => t.id), ['b2']);
+}));
+
+test('plant switch is a plain switch when What-If is not active, and re-selecting the same plant does not exit', () => _withPlants(() => {
+  Store.setSelectedPlant('PA', 'unit-test');
+  const events = [];
+  const off = Store.subscribe(evt => events.push(evt.type));
+  try {
+    Store.setSelectedPlant('PB', 'header');
+    assert.ok(!events.includes('sandbox:exited'));
+    Sandbox.enter('unit-test');
+    Store.setSelectedPlant('PB', 'header'); // same plant: no-op
+    assert.equal(Sandbox.active, true, 'a no-op selection leaves the trial alone');
+  } finally { off(); }
+}));

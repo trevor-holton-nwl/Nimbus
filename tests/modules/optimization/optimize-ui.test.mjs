@@ -1425,7 +1425,8 @@ test('SandboxAdapter.init wires real buttons and promotes every affected plant',
     Store.setCalendar('L2', { 0: [10, 18] }, 'unit-test');
     Store.addBlock({ id: 'new-line-p2', plant: 'P2', line: 'L2', start: '2026-08-05T00:00:00Z', end: '2026-08-05T01:00:00Z' }, 'unit-test');
     Store.addPlantBlock({ id: 'new-plant-p2', plant: 'P2', start: '2026-08-06T00:00:00Z', end: '2026-08-06T01:00:00Z' }, 'unit-test');
-    Store.setSelectedPlant('P2', 'unit-test');
+    // P0-20: a header plant switch now ends What-If (see sandbox.test.mjs), so the trial's P2 edits stay on the
+    // selected P1 plant's session; promote still flushes every plant the trial touched.
     Store.setLastOptimize(new Date('2026-08-07T12:00:00Z'), 'unit-test');
     Alerts.restoreDismissed(new Set(['after-promote']));
     fixture.elements.get('sb-apply-btn').dispatch('click');
@@ -1433,7 +1434,7 @@ test('SandboxAdapter.init wires real buttons and promotes every affected plant',
     assert.equal(Sandbox.active, false, 'the real promote button exits What-If mode');
     assert.equal(saveCalls.length, 1, 'promote persists once');
     assert.deepEqual(flushCalls.map(call => call.plant).sort(), ['P1', 'P2'],
-      'promote flushes every plant changed during the sandbox, even after selection switches');
+      'promote flushes every plant changed during the sandbox, not only the selected one');
     const p1Flush = flushCalls.find(call => call.plant === 'P1');
     assert.deepEqual(p1Flush.removed, { line: ['old-line-p1'], plant: ['old-plant-p1'], periods: [] },
       'promote flushes the exact line and plant blackout IDs deleted in the sandbox');

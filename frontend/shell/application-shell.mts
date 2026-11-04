@@ -2383,6 +2383,14 @@ const App = {
        'refresh' is ignored because those rows have already been reconciled. */
     Store.subscribe(evt => App._trackDirty(evt), 'Persistence.dirty');
 
+    /* A plant switch ends an open What-If (Store.setSelectedPlant, source 'plant-switch'); SandboxAdapter's discard
+       puts the outgoing plant's pre-What-If unsaved sets back, so drop them once the switch is announced. */
+    let _sandboxPlantSwitch = false;
+    Store.subscribe(evt => {
+      if (evt.type === 'sandbox:exited') _sandboxPlantSwitch = evt.source === 'plant-switch';
+      else if (evt.type === 'plant:selected' && _sandboxPlantSwitch) { _sandboxPlantSwitch = false; Persistence.discardUnsavedForPlantSwitch(); }
+    }, 'Persistence.sandboxPlantSwitch');
+
     /* Reload tasks when the user switches to a different plant */
     Store.subscribe(evt => {
       if (evt.type === 'plant:selected' && evt.plant && evt.source !== 'restore') {
