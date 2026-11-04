@@ -1994,6 +1994,9 @@ export const OptimizerPreview = {
             const altDeadlineAt = performance.now() + SETUP_AWARE_NORMAL_BUDGET_MS;
             const altEvaluation = session.run({
               runId: `optimizer-preview-${runSeq}-alt-${idx}`, mode: altMode, snapshot: candidateSnapshot,
+              // A relative budget, converted when the request is POSTED: with one worker an alternate queues behind the
+              // other, and a launch-time absolute deadline would leave it ~0 ms (the old serial path gave each a fresh budget).
+              deadlineDurationMs: SETUP_AWARE_NORMAL_BUDGET_MS,
               request: previewEvaluationRequest(altMode, { ...opts, searchBudgetMs: SETUP_AWARE_NORMAL_BUDGET_MS, exhaustive: false }, plant, altDeadlineAt),
             }, { signal, kpiOnly: true });
             return Promise.resolve(altEvaluation).then(value => ({ value }), error => ({ error }));

@@ -15,7 +15,7 @@ import { Alerts, Compute, Utilization } from '../../../frontend/insights/service
 import { Session } from '../../../frontend/security/session.mjs';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
-import { Engine } from '../../../frontend/optimization/engine.mjs';
+import { Engine, SETUP_AWARE_NORMAL_BUDGET_MS } from '../../../frontend/optimization/engine.mjs';
 import { runAndApply } from '../helpers/run-and-apply.mjs';
 import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
 import { buildOptimizerWorkerResponse } from '../../../frontend/optimization/optimizer-worker.mjs';
@@ -2178,6 +2178,30 @@ test('P2-1: the synchronous fallback keeps one alternate per tick (serial)', asy
     let ticks = 0;
     await OptimizerPreview.computePreview('spt', previewOpts, { tick: async () => { ticks++; }, runSeq: 6, workerFactory: null });
     assert.equal(ticks, 2, 'a tick before each of the two alternates');
+  } finally {
+    fx.restore();
+  }
+});
+
+test('P2-1: with one worker the queued alternate is posted with the FULL alternate budget, not what is left of a launch-time deadline', async () => {
+  const fx = openSingleRevealFixture('SR', singleRevealTasks);
+  try {
+    OptimizerPreview._clear();
+    const posted = [];
+    const factory = () => ({
+      onmessage: null, onerror: null, onmessageerror: null,
+      postMessage(message) {
+        posted.push({ message, at: performance.now() });
+        const response = buildOptimizerWorkerResponse(message);
+        setTimeout(() => this.onmessage?.({ data: response }), message.runId.includes('-alt-') ? 60 : 0);   // each alternate takes 60 ms
+      },
+      terminate() {},
+    });
+    await OptimizerPreview.computePreview('spt', previewOpts, { tick: async () => {}, runSeq: 11, workerFactory: factory, maxWorkers: 1 });
+    const alts = posted.filter(p => p.message.runId.includes('-alt-'));
+    assert.equal(alts.length, 2);
+    assert.ok(alts[1].at - alts[0].at >= 50, 'the second alternate really waited behind the first');
+    for (const alt of alts) assert.equal(alt.message.deadlineDurationMs, SETUP_AWARE_NORMAL_BUDGET_MS, 'each alternate gets its own budget measured from its post');
   } finally {
     fx.restore();
   }

@@ -135,8 +135,14 @@ export function createOptimizerWorkerSession(options: OptimizerWorkerSessionOpti
   let stale = false;
   let noWorker = false;
 
-  const syncEvaluate = (request: OptimizerWorkerRequest): CandidateResult =>
-    (options.syncEvaluator ?? evaluateSchedule)(request.snapshot, evalRequestOf(request));
+  const syncEvaluate = (request: OptimizerWorkerRequest): CandidateResult => {
+    const evalRequest = evalRequestOf(request);
+    // A relative budget starts when the evaluation starts (a queued request that fell back), as it does on a worker.
+    if (request.deadlineDurationMs !== undefined && Number.isFinite(request.deadlineDurationMs)) {
+      evalRequest.deadlineAt = performance.now() + Math.max(0, request.deadlineDurationMs);
+    }
+    return (options.syncEvaluator ?? evaluateSchedule)(request.snapshot, evalRequest);
+  };
 
   const terminateSlot = (slot: SessionSlot): void => {
     if (slot.dead) return;
