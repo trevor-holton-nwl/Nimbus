@@ -1308,7 +1308,8 @@ export const UndoStack = {
       this._busy = false;
       if (r === false) { this._entries.push(e); return; } // aborted: keep the entry, no toast
       if (!capture) this._redo = [];   // a non-redoable undo changed the board in a way Redo cannot replay
-      else if (capture.length) {
+      else if (!capture.length) this._redo = [];   // a redoable undo that wrote nothing synchronously (an await before restoreTasks): the board changed unseen
+      else {
         // The rows the undo actually overwrote; the entry's own snapshot stays inside e.undoFn for the next undo.
         // Cost = the captured rows only: the original entry is counted again when popRedo re-pushes it.
         const redoEntry: UndoEntry = { label: e.label, undoFn: e.undoFn, at: Date.now(), 

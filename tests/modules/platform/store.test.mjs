@@ -815,6 +815,17 @@ test('a calendar change after the undo clears the redo stack (the captured place
   assert.equal(UndoStack._redo.length, 0);
 });
 
+test('a redoable undoFn that captured nothing (restored after an await) clears the redo stack instead of leaving older entries', () => {
+  const { edit } = redoFx(2);
+  edit('E1', { RUN_TIME: '9' }, { redo: true }, ['rd1']);
+  edit('E2', { RUN_TIME: '9' }, { redo: true }, ['rd2']);
+  UndoStack.pop();   // E2 undone: one redo entry
+  assert.equal(UndoStack._redo.length, 1);
+  UndoStack._entries.push({ label: 'late', undoFn: () => {}, at: Date.now(), ids: ['rd1'], redo: true });   // restores nothing synchronously
+  UndoStack.pop();
+  assert.equal(UndoStack._redo.length, 0, 'older redo entries must not survive against a board that changed');
+});
+
 test('a plant-wide Apply undo costs its captured rows once in the redo stack: it does not evict other undo history', () => {
   const { edit } = redoFx(8000);
   UndoStack._entries = []; UndoStack._redo = [];
