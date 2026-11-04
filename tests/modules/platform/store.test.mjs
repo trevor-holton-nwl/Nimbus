@@ -804,6 +804,17 @@ test('a redo entry is pruned / invalidated by ids of the ORIGINAL entry too, not
   assert.equal(UndoStack._redo.length, 0, 'a foreign write to the skipped sibling prunes it');
 });
 
+test('a calendar change after the undo clears the redo stack (the captured placements may sit on closed time now); an undo-sourced one does not', () => {
+  const { edit } = redoFx(2);
+  edit('E1', { RUN_TIME: '9' });
+  UndoStack.pop();
+  assert.equal(UndoStack._redo.length, 1);
+  Store.emit({ type: 'calendar:change', line: 'L', source: 'undo' });
+  assert.equal(UndoStack._redo.length, 1, 'the undo own write does not count');
+  Store.emit({ type: 'calendar:change', line: 'L', source: 'calendar-sync' });
+  assert.equal(UndoStack._redo.length, 0);
+});
+
 test('a plant-wide Apply undo costs its captured rows once in the redo stack: it does not evict other undo history', () => {
   const { edit } = redoFx(8000);
   UndoStack._entries = []; UndoStack._redo = [];

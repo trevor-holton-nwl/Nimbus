@@ -1435,11 +1435,17 @@ Store.subscribe(evt => {
 }, 'UndoStack.clearOnBulk');
 
 // A write to a row a redo entry would overwrite makes that entry stale (a refresh / conflict pull-in, a PRT / note / PV
-// edit, a firm, a calendar sync): Redo could otherwise overwrite the newer value and then pass the version check.
+// edit, a firm): Redo could otherwise overwrite the newer value and then pass the version check. A calendar sync is NOT a
+// task event, so it prunes nothing by ids: a calendar change (any source but undo) clears the whole redo stack instead.
 // The undo's own writes and the engine's runtime reconcile (which rewrites derived fields of the very rows an undo or
 // redo just touched) do not count.
 Store.subscribe(evt => {
   if (!UndoStack._redo.length) return;
+  if (evt.type === 'calendar:change' || evt.type === 'calendar:replace') {
+    // Working time moved: the placements a Redo would re-apply may sit on closed time now, and calendar:change is not a task event.
+    if (evt.source !== 'undo') UndoStack._redo = [];
+    return;
+  }
   if (evt.type === 'firmed:change') {
     // A firm after the undo (Engine.applyFirm, F-key, What-If): Redo would move a now-firmed order.
     if (evt.source === 'undo') return;
