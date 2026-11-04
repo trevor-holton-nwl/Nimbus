@@ -6840,14 +6840,82 @@ test('P0-7: a firmed-boundary setup straddling midnight on a 24x7 calendar is ch
   assert.ok(+patchFor(result, 'p07-b').changes.start_date < +patchFor(result, 'p07-a').changes.start_date, 'the RED-last ending avoids the 120-minute changeover');
 });
 
+// P0-8 fixtures. The free order is DUE before the firmed boundary so the due-date partition offers it to the
+// pre-boundary fragment (an order due after the boundary is never offered there, so the pop/failed-placement paths
+// are not reached). Proven reached with a temporary counter on candidateForSequence's checkpoint pop and its
+// 'due-work-unadmitted' branch (pop 2 / fail 2 per scenario); without the rollback each scenario leaves the stale
+// 'admitted-*' explanation behind because the order is later placed after the boundary by a covered transition.
+const p08Bounds = setup => dueDateBounds(setup, { respectCalendar: true });
+const p08Stale = (result, id, codes) => result.explanation.filter(entry => entry.taskId === id && codes.includes(entry.code));
+
 test('P0-8: a backtracked suffix leaves no stale admitted-without-setup explanation or edge for the popped order', () => {
-  const x = scheduledTask('p08-x', 1, 'RED', '2026-08-03T18:00:00');
+  // GREEN -> RED has no row (uncovered admission); RED -> BLUE needs 90 minutes, which cannot fit after X, so X is popped
+  // out of the pre-boundary fragment and placed after BLUE, where BLUE -> RED is covered.
+  const x = scheduledTask('p08-x', 1, 'RED', '2026-08-03T10:00:00');
   const fixed = scheduledTask('p08-fixed-blue', 1, 'BLUE', '2026-08-03T11:00:00', '2026-08-03T10:00:00', '2026-08-03T11:00:00');
-  // GREEN -> RED has no row (uncovered admission); RED -> BLUE needs 90 minutes, which cannot fit after X, so X is popped.
   const setup = setupTruth({ rows: [setupRow('RED', 'BLUE', 90), setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'RED', 0)] });
-  const result = SetupScheduler.evaluateDueDateFirst(setupSnapshot([x, fixed], { firmedIds: ['p08-fixed-blue'] }), dueDateBounds(setup, { respectCalendar: true }));
-  assert.equal(result.explanation.some(entry => entry.code === 'admitted-without-setup' && entry.taskId === 'p08-x'), false);
+  const result = SetupScheduler.evaluateDueDateFirst(setupSnapshot([x, fixed], { firmedIds: ['p08-fixed-blue'] }), p08Bounds(setup));
+  assert.ok(+patchFor(result, 'p08-x').changes.start_date >= +at('2026-08-03T11:00:00'), 'X is placed after the firmed order');
+  assert.deepEqual(p08Stale(result, 'p08-x', ['admitted-without-setup', 'admitted-state-unrecorded']), []);
   assert.equal(result.missingEdges.some(edge => edge.reason === 'scheduled-without-setup' && edge.successorOrderId === 'p08-x'), false);
+});
+
+test('P0-8: a popped unknown-predecessor admission leaves no stale admitted-state-unrecorded explanation', () => {
+  // No line state and a dated free order (Y) that is not protected, so no anchor adopts the state and the first order
+  // of the pre-boundary fragment has an unrecorded predecessor.
+  const x = scheduledTask('p08-x', 1, 'RED', '2026-08-03T10:00:00');
+  const y = scheduledTask('p08-y', 1, 'GREEN', '2026-08-03T18:00:00', '2026-08-03T08:00:00', '2026-08-03T09:00:00');
+  const fixed = scheduledTask('p08-fixed-blue', 1, 'BLUE', '2026-08-03T11:00:00', '2026-08-03T10:00:00', '2026-08-03T11:00:00');
+  const setup = setupTruth({ current: null, rows: [setupRow('RED', 'BLUE', 90), setupRow('BLUE', 'RED', 0), setupRow('BLUE', 'GREEN', 0), setupRow('GREEN', 'RED', 0)] });
+  const result = SetupScheduler.evaluateDueDateFirst(setupSnapshot([x, y, fixed], { firmedIds: ['p08-fixed-blue'] }), p08Bounds(setup));
+  assert.ok(patchFor(result, 'p08-x'), 'X is still placed, after the firmed order');
+  assert.deepEqual(p08Stale(result, 'p08-x', ['admitted-state-unrecorded']), []);
+  assert.equal(result.missingEdges.some(edge => edge.reason === 'initial-state-unknown' && edge.successorOrderId === 'p08-x'), false);
+});
+
+test('P0-8: a failed placement after an uncovered admission leaves no stale admitted-without-setup explanation', () => {
+  // Five hours cannot fit before the boundary, so placement fails after the uncovered GREEN -> RED admission was written.
+  const big = scheduledTask('p08-big', 5, 'RED', '2026-08-03T10:00:00');
+  const fixed = scheduledTask('p08-fixed-blue', 1, 'BLUE', '2026-08-03T11:00:00', '2026-08-03T10:00:00', '2026-08-03T11:00:00');
+  const setup = setupTruth({ rows: [setupRow('RED', 'BLUE', 0), setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'RED', 0)] });
+  const result = SetupScheduler.evaluateDueDateFirst(setupSnapshot([big, fixed], { firmedIds: ['p08-fixed-blue'] }), p08Bounds(setup));
+  assert.ok(result.explanation.some(entry => entry.code === 'due-work-unadmitted' && entry.taskId === 'p08-big'), 'the failed-placement path ran');
+  assert.deepEqual(p08Stale(result, 'p08-big', ['admitted-without-setup']), []);
+});
+
+test('P0-8: a failed placement after an unknown-predecessor admission leaves no stale admitted-state-unrecorded explanation', () => {
+  const big = scheduledTask('p08-big', 5, 'RED', '2026-08-03T10:00:00');
+  const y = scheduledTask('p08-y', 1, 'GREEN', '2026-08-03T18:00:00', '2026-08-03T08:00:00', '2026-08-03T09:00:00');
+  const fixed = scheduledTask('p08-fixed-blue', 1, 'BLUE', '2026-08-03T11:00:00', '2026-08-03T10:00:00', '2026-08-03T11:00:00');
+  const setup = setupTruth({ current: null, rows: [setupRow('RED', 'BLUE', 0), setupRow('BLUE', 'RED', 0), setupRow('BLUE', 'GREEN', 0), setupRow('GREEN', 'RED', 0)] });
+  const result = SetupScheduler.evaluateDueDateFirst(setupSnapshot([big, y, fixed], { firmedIds: ['p08-fixed-blue'] }), p08Bounds(setup));
+  assert.ok(result.explanation.some(entry => entry.code === 'due-work-unadmitted' && entry.taskId === 'p08-big'), 'the failed-placement path ran');
+  assert.deepEqual(p08Stale(result, 'p08-big', ['admitted-state-unrecorded']), []);
+  assert.equal(result.missingEdges.some(edge => edge.reason === 'initial-state-unknown' && edge.successorOrderId === 'p08-big'), false);
+});
+
+test('master-data line lookup keys plant and machine unambiguously', () => {
+  // Plant "P1" + machine "L 1" and plant "P1 L" + machine "1" both flattened to "P1 L 1" under a space-joined key, so
+  // the lookalike's setup_compatible:false (listed first) was applied to the real line.
+  const only = { ...scheduledTask('key-blue', 1, 'BLUE', '2026-08-03T10:00:00'), MACHINE: 'L 1' };
+  const snapshot = setupSnapshot([only]);
+  snapshot.calendars = { 'L 1': { workHours: OPEN_HOURS } };
+  snapshot.masterData = {
+    plants: [{ plant: 'P1' }],
+    lines: [
+      { plant: 'P1 L', machine: '1', setup_compatible: false, setup_compatibility_reason: 'lookalike' },
+      { plant: 'P1', machine: 'L 1', setup_compatible: true },
+    ],
+  };
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 0)] });
+  setup.machine_states = [{ ...setup.machine_states[0], machine: 'L 1' }];
+  const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup));
+  assert.equal(result.missingEdges.some(edge => edge.reason === 'setup-compatibility-disabled'), false, 'the lookalike row must not disable line "L 1"');
+  assert.ok(patchFor(result, 'key-blue'));
+  // Control: the same line is disabled when its own row says so.
+  snapshot.masterData = { plants: [{ plant: 'P1' }], lines: [{ plant: 'P1', machine: 'L 1', setup_compatible: false, setup_compatibility_reason: 'real' }] };
+  const disabled = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup));
+  assert.ok(disabled.missingEdges.some(edge => edge.line === 'L 1' && edge.reason === 'setup-compatibility-disabled'));
 });
 
 test('P0-9: a setup-incompatible line emits no missing_setup finding or scheduled-without-setup edge', () => {

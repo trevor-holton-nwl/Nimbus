@@ -3268,7 +3268,8 @@ function candidateForSequence(
       if (explanation[index].taskId === id && (code === 'admitted-without-setup' || code === 'admitted-state-unrecorded' || code === 'due-date-first-placement')) explanation.splice(index, 1);
     }
     for (let index = missingEdges.length - 1; index >= 0; index -= 1) {
-      if (missingEdges[index].successorOrderId === id && missingEdges[index].reason === 'scheduled-without-setup') missingEdges.splice(index, 1);
+      const reason = missingEdges[index].reason;
+      if (missingEdges[index].successorOrderId === id && (reason === 'scheduled-without-setup' || reason === 'initial-state-unknown')) missingEdges.splice(index, 1);
     }
   };
 
@@ -3427,10 +3428,10 @@ function candidateForSequence(
       unadmitted.push(task);
       cursor = priorCursor;
       // Roll back the uncovered-admission accounting written before placement: this order was not admitted.
-      if (uncoveredAdmission) {
-        uncoveredEdgeCount -= 1;
-        dropAdmissionRecords(taskId(task));
-      }
+      // An unknown-predecessor admission wrote an `initial-state-unknown` edge and an `admitted-state-unrecorded`
+      // explanation the same way, so it is rolled back too (only this order's entries).
+      if (uncoveredAdmission) uncoveredEdgeCount -= 1;
+      if (uncoveredAdmission || unknownPredecessor) dropAdmissionRecords(taskId(task));
       explanation.push({ code: 'due-work-unadmitted', message: `No legal placement found for ${taskId(task)}.`, line, taskId: taskId(task) });
       continue;
     }
@@ -4427,13 +4428,16 @@ function admittedStateUnrecordedReason(line: string, task: Readonly<NimbusTask>,
 /** P1-10: first-match (plant, machine) index per master-data lines array, built once.
  * The snapshot is read-only for a run, so the array is never mutated afterwards. */
 const MASTER_LINE_INDEX = new WeakMap<object, Map<string, NimbusMasterData['lines'][number]>>();
+// A NUL separator (written as an escape, never a raw NUL byte, which makes grep and diff treat the file as binary): NUL
+// cannot occur in a plant or machine id, so ('P1', 'L 1') and ('P1 L', '1') never share a key.
+const masterLineKey = (plant: unknown, machine: unknown): string => `${plant}\u0000${machine}`;
 function masterLineLookup(lines: NimbusMasterData['lines'] | undefined): Map<string, NimbusMasterData['lines'][number]> | null {
   if (!lines) return null;
   let index = MASTER_LINE_INDEX.get(lines);
   if (!index) {
     index = new Map();
     for (const row of lines) {
-      const key = `${row.plant} ${row.machine}`;
+      const key = masterLineKey(row.plant, row.machine);
       if (!index.has(key)) index.set(key, row);
     }
     MASTER_LINE_INDEX.set(lines, index);
@@ -4447,7 +4451,7 @@ function masterLineLookup(lines: NimbusMasterData['lines'] | undefined): Map<str
 function setupCompatibilityForLine(
   snapshot: Readonly<ScheduleSnapshot>, plant: string, line: string,
 ): { reason: string | null } | null {
-  const masterLine = masterLineLookup(snapshot.masterData?.lines)?.get(`${plant} ${line}`);
+  const masterLine = masterLineLookup(snapshot.masterData?.lines)?.get(masterLineKey(plant, line));
   if (masterLine?.setup_compatible !== false) return null;
   return { reason: masterLine.setup_compatibility_reason ?? null };
 }

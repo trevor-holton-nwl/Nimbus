@@ -441,7 +441,7 @@ test('P0-6: queued (needs_planning) rows are not counted as missing a start; a b
   assert.ok(c.validationContext.bounds.scopeTaskIds.includes('blank-line'));
 });
 
-test('P1-1: array firmed/boundary ids protect like a Set and each array builds its Set once', () => {
+test('P1-1: array firmed/boundary ids protect like a Set', () => {
   seed({ hours: allDays(0, 24), tasks: [task('a', '2026-08-12T06:00', 1), task('b', '2026-08-12T12:00', 1)] });
   const candidate = Engine.evaluateSchedule('backlog', opts({ plant }));
   const { snapshot, bounds } = candidate.validationContext;
@@ -451,17 +451,49 @@ test('P1-1: array firmed/boundary ids protect like a Set and each array builds i
     bounds: { ...bounds, boundaryTaskIds: new Set(bounds.boundaryTaskIds), scopeTaskIds: new Set(bounds.scopeTaskIds) } } };
   assert.deepEqual(validateCandidateForApply(asSets, asSets.validationContext.snapshot).map(f => f.code), base);
 
+});
+
+// Counts Sets built from array iterables while `work` runs. The id-array memos (setup-scheduler `taskIsFirmed`/`idSet`,
+// engine `sourceIsFirmed`) build one Set per array; without them every per-order membership check builds its own, so
+// the count grows with the number of orders and calls. Scaling both is what makes this fail when a memo is removed.
+function arraySetBuilds(work) {
   const RealSet = globalThis.Set;
-  const countArrayBuilds = () => {
-    let n = 0;
-    globalThis.Set = class extends RealSet { constructor(it) { super(it); if (it && typeof it !== 'string' && !(it instanceof RealSet)) n++; } };
-    try { validateCandidateForApply(candidate, snapshot); } finally { globalThis.Set = RealSet; }
-    return n;
+  let n = 0;
+  // Only id Sets: arrays of order-id strings ('m*' orders, 'fx-*' firmed sentinels), not unrelated Sets of lines or dates.
+  const isIdArray = it => Array.isArray(it) && it.some(v => typeof v === 'string' && /^(md|fx-)/.test(v));
+  globalThis.Set = class extends RealSet { constructor(it) { super(it); if (isIdArray(it)) n++; } };
+  try { work(); } finally { globalThis.Set = RealSet; }
+  return n;
+}
+
+test('P1-1: id arrays build their Set once per array, independent of order count and validation calls', () => {
+  const measure = (orders, calls) => {
+    seed({ hours: allDays(0, 24), tasks: Array.from({ length: orders }, (_, i) => task(`m${i}`, '2026-08-12T06:00', 0.5)) });
+    // Detached run on a snapshot whose firmed ids are an ARRAY: engine `sourceIsFirmed` is asked once per moved order.
+    const detached = { ...snapshotSchedule(plant), firmedIds: ['fx-1', 'fx-2'] };
+    clearLiveStore();
+    let candidate;
+    const builds = arraySetBuilds(() => {
+      candidate = Engine.evaluateSchedule('backlog', opts({ endDate: at('2026-08-20T00:00') }), detached);
+      // validateCandidateForApply reads the candidate's own context, so the id arrays go in there: the firmed ids
+      // (setup-scheduler `taskIsFirmed`, asked per order) and the scope/boundary ids (`idSet`, asked per validation).
+      const context = candidate.validationContext;
+      const bounds = { ...context.bounds, scopeTaskIds: [...context.bounds.scopeTaskIds], boundaryTaskIds: ['fx-3', ...context.bounds.boundaryTaskIds] };
+      const snapshot = { ...context.snapshot, firmedIds: ['fx-1', 'fx-2', ...context.snapshot.firmedIds] };
+      candidate = { ...candidate, validationContext: { snapshot, bounds } };
+      for (let call = 0; call < calls; call += 1) validateCandidateForApply(candidate, snapshot);
+    });
+    assert.ok(candidate.validationContext.bounds.scopeTaskIds.length >= orders, 'every order is in scope');
+    assert.ok(candidate.patches.length > 0, 'orders moved, so sourceIsFirmed ran');
+    return builds;
   };
-  countArrayBuilds();               // warms the memo
-  const warm = countArrayBuilds();
-  assert.equal(warm, countArrayBuilds());
-  assert.ok(warm < 20, `id arrays memoised (saw ${warm} Set builds from iterables)`);
+  measure(5, 1); // warm any one-time module state
+  const small = measure(10, 2);
+  const large = measure(200, 10);
+  // A memoised run builds one Set per array regardless of size; an unmemoised one builds one per order and per call
+  // (>= 200 x 10 here), so removing any of the three memos makes `large` explode.
+  assert.ok(large < 20, `large run built ${large} Sets from id arrays`);
+  assert.ok(large <= small + 2, `Set builds must not grow with orders and calls (small ${small}, large ${large})`);
 });
 
 test('P1-2: boundaryConflicts golden order and a large patch set stays fast', () => {
@@ -477,5 +509,7 @@ test('P1-2: boundaryConflicts golden order and a large patch set stays fast', ()
   seed({ hours: allDays(0, 24), tasks: Array.from({ length: 3000 }, (_, i) => task(`b${i}`, '2026-08-12T00:00', 0.01)) });
   const t0 = performance.now();
   Engine.removeBacklog(opts({ endDate: at('2026-08-14T00:00') }));
-  assert.ok(performance.now() - t0 < 20000, 'loose timing bound');
+  // Timing is deliberately only a generous sanity bound (a loaded CI box can be several times slower); the memo
+  // behaviour is pinned by the Set-build count above, not by time.
+  assert.ok(performance.now() - t0 < 120000, 'generous timing bound');
 });
