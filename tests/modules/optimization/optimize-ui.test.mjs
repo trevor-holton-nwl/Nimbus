@@ -2103,6 +2103,146 @@ test('Task 3: the background driver finishes when the evaluator returns a Promis
   }
 });
 
+/* P2-1: one worker session per Optimize run, concurrent KPI-only alternates, cancel across N workers */
+function sessionFakePool({ holdAlternates = false, holdAll = false } = {}) {
+  const log = { workers: [], posted: [], postedAtFirstAltReply: null };
+  const factory = () => {
+    const worker = {
+      onmessage: null, onerror: null, onmessageerror: null, terminated: false,
+      postMessage(message) {
+        log.posted.push(message);
+        const isAlt = String(message.runId).includes('-alt-');
+        if (holdAll || (holdAlternates && isAlt)) return;
+        const response = buildOptimizerWorkerResponse(message);
+        setTimeout(() => {
+          if (isAlt && log.postedAtFirstAltReply === null) log.postedAtFirstAltReply = log.posted.length;
+          this.onmessage?.({ data: response });
+        }, 0);
+      },
+      terminate() { this.terminated = true; },
+    };
+    log.workers.push(worker);
+    return worker;
+  };
+  return { log, factory };
+}
+const waitFor = async (check, label) => {
+  for (let i = 0; i < 200; i++) { if (check()) return; await new Promise(r => setTimeout(r, 5)); }
+  assert.fail(`timed out waiting for ${label}`);
+};
+const previewOpts = { plant: 'SR', respectCalendar: false, now: new Date('2026-08-03T08:00:00') };
+const finalistFacts = result => (result.finalists ?? []).map(f => ({ label: f.label, mode: f.mode, kpis: f.kpis }));
+
+test('P2-1: a worker-path run uses one session: both alternates are posted before either answers, KPI-only, and every worker is terminated at the end', async () => {
+  const fx = openSingleRevealFixture('SR', singleRevealTasks);
+  try {
+    OptimizerPreview._clear();
+    const pool = sessionFakePool();
+    let ticks = 0;
+    const result = await OptimizerPreview.computePreview('spt', previewOpts,
+      { tick: async () => { ticks++; }, runSeq: 5, workerFactory: pool.factory, maxWorkers: 2 });
+    assert.equal(pool.log.workers.length, 2, 'two workers for three requests (the primary worker is reused for an alternate)');
+    assert.equal(pool.log.posted.length, 3);
+    assert.equal(pool.log.postedAtFirstAltReply, 3, 'both alternates were already posted when the first alternate answered');
+    const [primary, ...alts] = pool.log.posted;
+    assert.ok(primary.runId.endsWith('-primary') && primary.kpiOnly === undefined, 'the primary is a full request');
+    assert.ok(alts.every(a => a.kpiOnly === true), 'alternates are KPI-only');
+    assert.equal(ticks, 1, 'one yield for the concurrent comparison instead of one per alternate');
+    assert.ok(pool.log.workers.every(w => w.terminated), 'no worker outlives the run');
+    assert.equal(result.finalists?.length, 3);
+    assert.ok(result.candidate.validationContext, 'the primary keeps its validation seam');
+
+    // Parity: the main-thread (serial, sync) path yields the same plans and KPI vectors.
+    const sync = await OptimizerPreview.computePreview('spt', previewOpts,
+      { tick: async () => {}, runSeq: 5, workerFactory: null });
+    assert.deepEqual(finalistFacts(result), finalistFacts(sync), 'worker finalists equal the synchronous ones');
+    assert.equal(JSON.stringify(result.candidate.patches), JSON.stringify(sync.candidate.patches), 'same primary patches');
+    assert.deepEqual(result.postKpis, sync.postKpis);
+    assert.deepEqual(result.preKpis, sync.preKpis);
+    assert.deepEqual([...result.taskBaseline], [...sync.taskBaseline], 'the baseline built after the post is the same');
+  } finally {
+    fx.restore();
+  }
+});
+
+test('P2-1: the synchronous fallback keeps one alternate per tick (serial)', async () => {
+  const fx = openSingleRevealFixture('SR', singleRevealTasks);
+  try {
+    OptimizerPreview._clear();
+    let ticks = 0;
+    await OptimizerPreview.computePreview('spt', previewOpts, { tick: async () => { ticks++; }, runSeq: 6, workerFactory: null });
+    assert.equal(ticks, 2, 'a tick before each of the two alternates');
+  } finally {
+    fx.restore();
+  }
+});
+
+test('P2-1 cancel: Cancel while the alternates run terminates every worker and applies nothing', async () => {
+  const fx = openSingleRevealFixture('SR', singleRevealTasks);
+  try {
+    OptimizerPreview._clear();
+    const pool = sessionFakePool({ holdAlternates: true });
+    const controller = new AbortController();
+    const running = OptimizerPreview.computePreview('spt', previewOpts,
+      { tick: async () => {}, runSeq: 8, workerFactory: pool.factory, maxWorkers: 2, signal: controller.signal });
+    const settled = running.then(() => 'resolved', error => error);
+    await waitFor(() => pool.log.posted.filter(m => String(m.runId).includes('-alt-')).length === 2, 'both alternates to be posted');
+    assert.ok(pool.log.workers.some(w => !w.terminated), 'workers are alive while the alternates compute');
+    controller.abort();
+    const outcome = await settled;
+    assert.equal(outcome?.name, 'AbortError', 'the run rejects with AbortError, never a result');
+    assert.equal(pool.log.workers.length, 2);
+    assert.ok(pool.log.workers.every(w => w.terminated), 'all workers are terminated');
+    assert.ok(pool.log.workers.every(w => w.onmessage === null), 'no handler is left to deliver a late answer');
+    assert.equal(OptimizerPreview._candidate, null, 'nothing was installed');
+  } finally {
+    fx.restore();
+  }
+});
+
+test('P2-1 cancel: Cancel while the primary runs terminates the primary and the pre-warmed worker', async () => {
+  const fx = openSingleRevealFixture('SR', singleRevealTasks);
+  try {
+    OptimizerPreview._clear();
+    const pool = sessionFakePool({ holdAll: true });
+    const controller = new AbortController();
+    const running = OptimizerPreview.computePreview('spt', previewOpts,
+      { tick: async () => {}, runSeq: 9, workerFactory: pool.factory, maxWorkers: 2, signal: controller.signal });
+    const settled = running.then(() => 'resolved', error => error);
+    await waitFor(() => pool.log.posted.length === 1, 'the primary to be posted');
+    assert.equal(pool.log.workers.length, 2, 'the second worker boots while the primary searches');
+    controller.abort();
+    assert.equal((await settled)?.name, 'AbortError');
+    assert.ok(pool.log.workers.every(w => w.terminated), 'no leaked worker');
+    assert.equal(pool.log.posted.length, 1, 'no alternate was ever posted');
+  } finally {
+    fx.restore();
+  }
+});
+
+test('P2-1: a worker answer that fails for one alternate drops only that alternate', async () => {
+  const fx = openSingleRevealFixture('SR', singleRevealTasks);
+  try {
+    OptimizerPreview._clear();
+    const pool = sessionFakePool();
+    const base = pool.factory;
+    pool.factory = () => {
+      const worker = base();
+      const post = worker.postMessage.bind(worker);
+      worker.postMessage = message => {
+        if (String(message.runId).endsWith('-alt-0')) { setTimeout(() => worker.onmessage?.({ data: { runId: message.runId, error: 'boom' } }), 0); return; }
+        post(message);
+      };
+      return worker;
+    };
+    const result = await OptimizerPreview.computePreview('spt', previewOpts,
+      { tick: async () => {}, runSeq: 10, workerFactory: pool.factory, maxWorkers: 2 });
+    assert.deepEqual((result.finalists ?? []).map(f => f.label), ['A', 'C'], 'Plan B is omitted, Plan C (index 1) keeps its label');
+  } finally {
+    fx.restore();
+  }
+});
+
 /* Task 3 fix round 1: live-board partial apply, family drop, Run button, guards */
 const boardTasks = () => [
   { id: 'bx-x', PLANT: 'BX', MACHINE: 'BX-L1', RUN_TIME: 3, row_version: 1,

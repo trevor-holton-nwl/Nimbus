@@ -9,6 +9,8 @@ export interface OptimizerWorkerRequest {
   /** Remaining primary budget measured in the sender's monotonic clock. The
    * worker converts it to its own performance.now() origin on receipt. */
   deadlineDurationMs?: number;
+  /** The caller reads only the candidate's patches/scores (an alternate's KPIs): skip serializing the validation seam. */
+  kpiOnly?: boolean;
 }
 
 /** The evaluator request for a worker request: the carried `mode` is the single source of truth, so the worker, the
@@ -52,6 +54,8 @@ export interface OptimizerWorkerResponse {
   validation?: SerializedOptimizerValidation;
   error?: string;
   stack?: string;
+  /** Worker-side evaluation time in ms (handler-added measurement, not part of the candidate). */
+  evalMs?: number;
 }
 
 /** Build a clone-safe validation descriptor from the function-bearing search

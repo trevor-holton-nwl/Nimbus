@@ -3,7 +3,7 @@
 // tooling, and non-UI integrations) keep the synchronous Engine evaluator.
 import type { CandidateResult, EvaluationRequest, ScheduleSnapshot } from './setup-scheduler.mjs';
 import { evaluateSchedule, rehydrateOptimizerCandidate, SETUP_AWARE_NORMAL_BUDGET_MS } from './engine.mjs';
-import { Config, ErrorLog, Util } from '../platform/foundation.mjs';
+import { Config, ErrorLog, PerfMonitor, Util } from '../platform/foundation.mjs';
 import { evalRequestOf } from './optimizer-worker-contract.mjs';
 import type { OptimizerWorkerRequest, OptimizerWorkerResponse } from './optimizer-worker-contract.mjs';
 export type { OptimizerWorkerRequest, OptimizerWorkerResponse } from './optimizer-worker-contract.mjs';
@@ -18,15 +18,6 @@ export interface OptimizerWorkerLike {
 }
 
 export type OptimizerWorkerFactory = (url: string) => OptimizerWorkerLike | null;
-
-export interface OptimizerWorkerRunOptions {
-  /** Inject a fake worker in tests or an application-specific worker pool. */
-  workerFactory?: OptimizerWorkerFactory | null;
-  /** Explicitly retain the synchronous path when a caller needs it. */
-  syncEvaluator?: (snapshot: ScheduleSnapshot, request: EvaluationRequest) => CandidateResult;
-  signal?: AbortSignal;
-  workerUrl?: string;
-}
 
 function workerRequestWithRemainingDeadline(request: OptimizerWorkerRequest): OptimizerWorkerRequest {
   const duration = request.deadlineDurationMs === undefined
@@ -72,113 +63,355 @@ function defaultWorkerFactory(url: string): OptimizerWorkerLike | null {
   return new Worker(url, { type: 'module' });
 }
 
-/** Run one detached preview candidate. The request is immutable by contract;
- * the worker receives the same snapshot and clock options as the synchronous
- * evaluator, so the UI never compares candidates generated from live Store
- * state at different times. Abort terminates the dedicated worker, which is
- * the only reliable way to cancel a synchronous search already executing in a
- * separate thread. */
+export interface OptimizerWorkerSessionOptions {
+  /** Inject a fake worker in tests or an application-specific worker pool. */
+  workerFactory?: OptimizerWorkerFactory | null;
+  /** Explicitly retain the synchronous path when a caller needs it. */
+  syncEvaluator?: (snapshot: ScheduleSnapshot, request: EvaluationRequest) => CandidateResult;
+  workerUrl?: string;
+  /** Most workers alive at once (default 1). Requests beyond that wait in a queue, one request per worker. */
+  maxWorkers?: number;
+  /** Keep a worker alive after its request finishes so the next request skips the boot (default true). */
+  keepAlive?: boolean;
+  /** Aborting it terminates every worker and rejects every request still waiting or running. */
+  signal?: AbortSignal;
+}
+
+export interface OptimizerWorkerSessionRunOptions {
+  signal?: AbortSignal;
+  /** The caller reads only `patches`/score facts (an alternate's KPIs): the worker skips the validation serialization
+   *  and the client returns the candidate without a `validationContext`. Ignored on the synchronous path. */
+  kpiOnly?: boolean;
+}
+
+export interface OptimizerWorkerSession {
+  run(request: OptimizerWorkerRequest, options?: OptimizerWorkerSessionRunOptions): CandidateResult | Promise<CandidateResult>;
+  /** Boot idle workers ahead of use (up to `maxWorkers`), so their start overlaps another request. A failed spawn is ignored. */
+  prewarm(count: number): void;
+  /** Terminate every worker and reject whatever is still waiting or running. Safe to call twice. */
+  close(): void;
+  /** True while a request would go to a worker: a factory exists, no spawn has failed to yield one, the core is not stale. */
+  readonly workerBacked: boolean;
+  readonly stats: { spawned: number; terminated: number };
+}
+
+interface SessionPending {
+  request: OptimizerWorkerRequest;
+  kpiOnly: boolean;
+  long: boolean;
+  signal?: AbortSignal;
+  resolve: (candidate: CandidateResult) => void;
+  reject: (error: unknown) => void;
+  onAbort: () => void;
+  postedAt: number;
+}
+
+interface SessionSlot {
+  worker: OptimizerWorkerLike;
+  pending: SessionPending | null;
+  spawnedAt: number;
+  runs: number;
+  dead: boolean;
+  /** Spawned ahead of its first request (prewarm), so its boot overlapped other work. */
+  prewarmed: boolean;
+}
+
+/** A pool of at most `maxWorkers` detached optimizer workers that serves many preview requests. Each worker runs one
+ *  request at a time and is reused by the next, so a foreground Optimize (primary + two alternates) boots one or two
+ *  workers instead of three. Requests carry a runId and a worker only accepts the answer for its own request.
+ *  Abort of one request terminates its worker (the only way to stop a synchronous search); closing the session, or the
+ *  session signal, terminates all of them. After a stale compute core answer the session stops using workers. */
+export function createOptimizerWorkerSession(options: OptimizerWorkerSessionOptions = {}): OptimizerWorkerSession {
+  const factory = options.workerFactory === undefined ? defaultWorkerFactory : options.workerFactory;
+  const maxWorkers = Math.max(1, Math.floor(options.maxWorkers ?? 1));
+  const keepAlive = options.keepAlive !== false;
+  // The build id rides on the worker URL so the worker can load the classic compute core with the same cache-bust
+  // (the corporate proxy caches .js by URL; a stale core would push every preview to the main thread).
+  const defaultUrl = `${new URL('./optimizer-worker.mjs', import.meta.url).href}?v=${encodeURIComponent(String(Config.BUILD_ID))}`;
+  const slots: SessionSlot[] = [];
+  const queue: Array<{ request: OptimizerWorkerRequest; entry: SessionPending }> = [];
+  const stats = { spawned: 0, terminated: 0 };
+  let closed = false;
+  let stale = false;
+  let noWorker = false;
+
+  const syncEvaluate = (request: OptimizerWorkerRequest): CandidateResult =>
+    (options.syncEvaluator ?? evaluateSchedule)(request.snapshot, evalRequestOf(request));
+
+  const terminateSlot = (slot: SessionSlot): void => {
+    if (slot.dead) return;
+    slot.dead = true;
+    const at = slots.indexOf(slot);
+    if (at >= 0) slots.splice(at, 1);
+    slot.worker.onmessage = null;
+    slot.worker.onerror = null;
+    slot.worker.onmessageerror = null;
+    stats.terminated++;
+    slot.worker.terminate();
+  };
+
+  /** Spawn one worker, or null when none can be had. A throwing factory propagates so the caller can apply the
+   *  long-run rule (an exhaustive run must not land on the main thread). */
+  const spawn = (): SessionSlot | null => {
+    if (!factory || noWorker) return null;
+    const worker = factory(options.workerUrl ?? defaultUrl);
+    if (!worker) { noWorker = true; return null; }
+    stats.spawned++;
+    const slot: SessionSlot = { worker, pending: null, spawnedAt: performance.now(), runs: 0, dead: false, prewarmed: false };
+    slots.push(slot);
+    worker.onmessage = ({ data }): void => onMessage(slot, data);
+    worker.onerror = (event): void => settle(slot, true, p => p.reject(new Error(event.message || 'Optimizer worker failed.')));
+    worker.onmessageerror = (): void => settle(slot, true, p => p.reject(new Error('Optimizer worker response could not be read (message deserialisation failed).')));
+    return slot;
+  };
+
+  /** End the slot's request. `terminate` retires a worker that is broken, stale or not kept alive; otherwise it goes
+   *  back to the pool and takes the next queued request. The callback runs after the worker is released. */
+  function settle(slot: SessionSlot, terminate: boolean, callback: (pending: SessionPending) => void): void {
+    const pending = slot.pending;
+    if (!pending || slot.dead) return;
+    slot.pending = null;
+    pending.signal?.removeEventListener('abort', pending.onAbort);
+    if (terminate || !keepAlive || stale || closed) terminateSlot(slot);
+    callback(pending);
+    drain();
+  }
+
+  function dispatch(slot: SessionSlot, request: OptimizerWorkerRequest, entry: SessionPending): void {
+    slot.pending = entry;
+    entry.postedAt = performance.now();
+    try {
+      const posted = workerRequestWithRemainingDeadline(request);
+      slot.worker.postMessage(entry.kpiOnly ? { ...posted, kpiOnly: true } : posted);
+    } catch (error) {
+      settle(slot, true, p => p.reject(error));
+    }
+  }
+
+  /** The main-thread answer for a request no worker will serve. */
+  function fallback(request: OptimizerWorkerRequest, entry: SessionPending): void {
+    entry.signal?.removeEventListener('abort', entry.onAbort);
+    if (stale && entry.long) { entry.reject(staleCoreError()); return; }
+    try { entry.resolve(syncEvaluate(request)); } catch (error) { entry.reject(error); }
+  }
+
+  /** Hand queued requests to idle or newly spawned workers; with no worker to be had they take the fallback path. */
+  function drain(): void {
+    while (queue.length && !closed) {
+      const next = queue[0];
+      if (stale || noWorker) {
+        queue.shift();
+        fallback(next.request, next.entry);
+        continue;
+      }
+      let slot = slots.find(s => !s.pending && !s.dead) ?? null;
+      if (!slot && slots.length < maxWorkers) {
+        try {
+          slot = spawn();
+        } catch (error) {
+          queue.shift();
+          if (next.entry.long) {
+            next.entry.signal?.removeEventListener('abort', next.entry.onAbort);
+            next.entry.reject(error instanceof Error ? error : new Error(String(error)));
+          } else {
+            ErrorLog.warn('optimizer', 'Optimizer worker could not be created; evaluating on the main thread.', error);
+            fallback(next.request, next.entry);
+          }
+          continue;
+        }
+        if (!slot) continue;   // the factory yielded no worker: the next pass takes the fallback branch
+      }
+      if (!slot) break;
+      queue.shift();
+      const target = slot;
+      next.entry.signal?.removeEventListener('abort', next.entry.onAbort);
+      next.entry.onAbort = (): void => settle(target, true, p => p.reject(abortError()));
+      next.entry.signal?.addEventListener('abort', next.entry.onAbort, { once: true });
+      dispatch(slot, next.request, next.entry);
+    }
+  }
+
+  function onMessage(slot: SessionSlot, data: OptimizerWorkerResponse | undefined): void {
+    const pending = slot.pending;
+    if (!pending || !data || data.runId !== pending.request.runId) return;
+    const { request } = pending;
+    if (typeof data.evalMs === 'number') {
+      // Round trip minus search time, measured from the post: the first request on a worker that was spawned for it
+      // pays the boot (workerBoot); a reused or pre-warmed worker shows only clone + post back (workerReuse).
+      PerfMonitor.record(slot.runs === 0 && !slot.prewarmed ? 'Optimize.workerBoot' : 'Optimize.workerReuse', performance.now() - pending.postedAt - data.evalMs);
+    }
+    slot.runs++;
+    if ('error' in data && data.error !== undefined) {   // an empty message is still a failure
+      if (String(data.error).includes(COMPUTE_CORE_STALE)) {
+        // The worker realm loaded a cached compute core without the dated-period helpers. Every worker of this
+        // session shares that core, so stop using them: retire this one now, idle ones now, busy ones as they answer.
+        stale = true;
+        for (const other of [...slots]) if (other !== slot && !other.pending) terminateSlot(other);
+        if (pending.long) {
+          // No main-thread fallback for an exhaustive run (see isLongRunRequest): fail with a clear, actionable error.
+          ErrorLog.warn('optimizer', 'Optimizer worker has a stale compute core; the background run was refused.');
+          settle(slot, true, p => p.reject(staleCoreError()));
+          return;
+        }
+        settle(slot, true, p => {
+          // The main thread has the current core, so evaluate there instead of failing the preview (logged once per page).
+          if (!_staleCoreWarned) {
+            _staleCoreWarned = true;
+            ErrorLog.warn('optimizer', 'Optimizer worker has a stale compute core; evaluating on the main thread.');
+          }
+          try { p.resolve(syncEvaluate(request)); } catch (error) { p.reject(error); }
+        });
+        return;
+      }
+      settle(slot, true, p => {
+        const failure = new Error(data.error || 'Optimizer worker failed.');
+        if (data.stack) failure.stack = data.stack;   // the worker-side stack is the useful one
+        p.reject(failure);
+      });
+      return;
+    }
+    if (!data.candidate) {
+      settle(slot, true, p => p.reject(new Error('Optimizer worker returned no candidate.')));
+      return;
+    }
+    if (pending.kpiOnly) {
+      // The caller reads patches only: no validation was serialized, so there is nothing to rehydrate.
+      const kpi = data.candidate as CandidateResult;
+      settle(slot, false, p => p.resolve(kpi));
+      return;
+    }
+    if (!data.validation && data.candidate.status === 'invalid_horizon') {
+      // No proposal and no validation seam by design (see buildOptimizerWorkerResponse): hand it back as-is.
+      const invalid = data.candidate as CandidateResult;
+      settle(slot, false, p => p.resolve(invalid));
+      return;
+    }
+    try {
+      const rehydrated = rehydrateOptimizerCandidate(data.candidate, request.snapshot, data.validation);
+      settle(slot, false, p => p.resolve(rehydrated));
+    } catch (error) {
+      settle(slot, true, p => p.reject(error));
+    }
+  }
+
+  const close = (): void => {
+    if (closed) return;
+    closed = true;
+    options.signal?.removeEventListener('abort', close);
+    const waiting = queue.splice(0).map(item => item.entry);
+    const running = slots.map(slot => slot.pending).filter((p): p is SessionPending => !!p);
+    for (const slot of [...slots]) {
+      slot.pending = null;
+      terminateSlot(slot);
+    }
+    for (const entry of [...running, ...waiting]) {
+      entry.signal?.removeEventListener('abort', entry.onAbort);
+      entry.reject(abortError());
+    }
+  };
+  if (options.signal) {
+    if (options.signal.aborted) closed = true;
+    else options.signal.addEventListener('abort', close, { once: true });
+  }
+
+  return {
+    run(request, runOptions = {}): CandidateResult | Promise<CandidateResult> {
+      const signal = runOptions.signal;
+      if (closed || options.signal?.aborted || signal?.aborted) return Promise.reject(abortError());
+      // Validate the deadline BEFORE spawning: a bad one must throw while there is nothing to leak. A queued
+      // request recomputes it when it is posted.
+      workerRequestWithRemainingDeadline(request);
+      const long = isLongRunRequest(request);
+      if (stale && long) return Promise.reject(staleCoreError());
+      if (stale || noWorker || !factory) return syncEvaluate(request);
+      // Acquire a worker NOW (synchronously, as the one-shot client always did): an idle one, else a new one while
+      // under the cap. No worker to be had means the synchronous evaluator answers in this same tick; only a request
+      // that finds every worker busy waits in the queue.
+      let slot = slots.find(s => !s.pending && !s.dead) ?? null;
+      if (!slot && slots.length < maxWorkers) {
+        try {
+          slot = spawn();
+        } catch (error) {
+          // The browser refused to construct the worker (CSP, quota, a blocked module). An exhaustive run must not
+          // land on the main thread (see isLongRunRequest); a Normal run keeps the synchronous path.
+          if (long) return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+          ErrorLog.warn('optimizer', 'Optimizer worker could not be created; evaluating on the main thread.', error);
+          return syncEvaluate(request);
+        }
+        if (!slot) return syncEvaluate(request);
+      }
+      const acquired = slot;
+      return new Promise<CandidateResult>((resolve, reject) => {
+        const entry: SessionPending = {
+          request, kpiOnly: runOptions.kpiOnly === true, long, signal, resolve, reject, postedAt: 0,
+          onAbort: (): void => {
+            const at = queue.findIndex(item => item.entry === entry);
+            if (at >= 0) queue.splice(at, 1);
+            reject(abortError());
+          },
+        };
+        if (acquired) {
+          entry.onAbort = (): void => settle(acquired, true, p => p.reject(abortError()));
+          signal?.addEventListener('abort', entry.onAbort, { once: true });
+          dispatch(acquired, request, entry);
+          return;
+        }
+        signal?.addEventListener('abort', entry.onAbort, { once: true });
+        queue.push({ request, entry });
+        drain();
+      });
+    },
+    prewarm(count: number): void {
+      if (closed || stale || noWorker) return;
+      while (slots.length < Math.min(maxWorkers, Math.max(0, Math.floor(count)))) {
+        try {
+          const warmed = spawn();
+          if (!warmed) return;
+          warmed.prewarmed = true;
+        } catch (error) {
+          ErrorLog.warn('optimizer', 'Optimizer worker could not be pre-started.', error);
+          return;
+        }
+      }
+    },
+    close,
+    get workerBacked(): boolean {
+      return !closed && !stale && !noWorker && !!factory && (factory !== defaultWorkerFactory || typeof Worker === 'function');
+    },
+    stats,
+  };
+}
+
+export interface OptimizerWorkerRunOptions {
+  /** Inject a fake worker in tests or an application-specific worker pool. */
+  workerFactory?: OptimizerWorkerFactory | null;
+  /** Explicitly retain the synchronous path when a caller needs it. */
+  syncEvaluator?: (snapshot: ScheduleSnapshot, request: EvaluationRequest) => CandidateResult;
+  signal?: AbortSignal;
+  workerUrl?: string;
+}
+
+/** Run one detached preview candidate on a worker of its own (a one-request session that retires its worker when the
+ * request ends). The request is immutable by contract; the worker receives the same snapshot and clock options as the
+ * synchronous evaluator, so the UI never compares candidates generated from live Store state at different times.
+ * Abort terminates the dedicated worker, which is the only reliable way to cancel a synchronous search already
+ * executing in a separate thread. Use `createOptimizerWorkerSession` to share workers across several requests. */
 export function runOptimizerPreview(
   request: OptimizerWorkerRequest,
   options: OptimizerWorkerRunOptions = {},
 ): CandidateResult | Promise<CandidateResult> {
-  if (options.signal?.aborted) return Promise.reject(abortError());
-  const factory = options.workerFactory === undefined ? defaultWorkerFactory : options.workerFactory;
-  // The build id rides on the worker URL so the worker can load the classic compute core with the same cache-bust
-  // (the corporate proxy caches .js by URL; a stale core would push every preview to the main thread).
-  const defaultUrl = `${new URL('./optimizer-worker.mjs', import.meta.url).href}?v=${encodeURIComponent(String(Config.BUILD_ID))}`;
-  // Build the worker request BEFORE spawning: a bad deadline must throw while there is nothing to leak.
-  const workerRequest = workerRequestWithRemainingDeadline(request);
-  let worker: OptimizerWorkerLike | null = null;
-  try {
-    worker = factory?.(options.workerUrl ?? defaultUrl) ?? null;
-  } catch (error) {
-    // The browser refused to construct the worker (CSP, quota, a blocked module). An exhaustive run must not
-    // land on the main thread (see isLongRunRequest); a Normal run keeps the synchronous path.
-    if (isLongRunRequest(request)) return Promise.reject(error instanceof Error ? error : new Error(String(error)));
-    ErrorLog.warn('optimizer', 'Optimizer worker could not be created; evaluating on the main thread.', error);
-  }
-  if (!worker) {
-    const evaluator = options.syncEvaluator ?? evaluateSchedule;
-    return evaluator(request.snapshot, evalRequestOf(request));
-  }
-  const liveWorker = worker;
-
-  return new Promise<CandidateResult>((resolve, reject) => {
-    let settled = false;
-    const cleanup = (): void => {
-      if (options.signal) options.signal.removeEventListener('abort', onAbort);
-      liveWorker.onmessage = null;
-      liveWorker.onerror = null;
-      liveWorker.onmessageerror = null;
-      liveWorker.terminate();
-    };
-    const finish = (callback: () => void): void => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      callback();
-    };
-    const onAbort = (): void => finish(() => reject(abortError()));
-    liveWorker.onmessage = ({ data }): void => {
-      if (!data || data.runId !== request.runId) return;
-      if ('error' in data && data.error !== undefined) {   // an empty message is still a failure
-        if (String(data.error).includes(COMPUTE_CORE_STALE) && isLongRunRequest(request)) {
-          // No main-thread fallback for an exhaustive run (see isLongRunRequest): fail with a clear, actionable error.
-          ErrorLog.warn('optimizer', 'Optimizer worker has a stale compute core; the background run was refused.');
-          finish(() => reject(staleCoreError()));
-          return;
-        }
-        if (String(data.error).includes(COMPUTE_CORE_STALE)) {
-          // The worker realm loaded a cached compute core without the dated-period helpers. The main thread
-          // has the current core, so evaluate there instead of failing the preview (logged once per session).
-          finish(() => {
-            if (!_staleCoreWarned) {
-              _staleCoreWarned = true;
-              ErrorLog.warn('optimizer', 'Optimizer worker has a stale compute core; evaluating on the main thread.');
-            }
-            try {
-              resolve((options.syncEvaluator ?? evaluateSchedule)(request.snapshot, evalRequestOf(request)));
-            } catch (error) {
-              reject(error);
-            }
-          });
-          return;
-        }
-        finish(() => {
-          const failure = new Error(data.error || 'Optimizer worker failed.');
-          if (data.stack) failure.stack = data.stack;   // the worker-side stack is the useful one
-          reject(failure);
-        });
-        return;
-      }
-      if (!data.candidate) {
-        finish(() => reject(new Error('Optimizer worker returned no candidate.')));
-        return;
-      }
-      if (!data.validation && data.candidate.status === 'invalid_horizon') {
-        // No proposal and no validation seam by design (see buildOptimizerWorkerResponse): hand it back as-is.
-        const invalid = data.candidate;
-        finish(() => resolve(invalid));
-        return;
-      }
-      try {
-        const rehydrated = rehydrateOptimizerCandidate(
-          data.candidate, request.snapshot, data.validation,
-        );
-        finish(() => resolve(rehydrated));
-      } catch (error) {
-        finish(() => reject(error));
-      }
-    };
-    liveWorker.onerror = (event): void => finish(() => reject(new Error(event.message || 'Optimizer worker failed.')));
-    liveWorker.onmessageerror = (): void => finish(() => reject(new Error('Optimizer worker response could not be read (message deserialisation failed).')));
-    // The signal was checked at the top and nothing awaited since, so it cannot already be aborted here.
-    options.signal?.addEventListener('abort', onAbort, { once: true });
-    try {
-      liveWorker.postMessage(workerRequest);
-    } catch (error) {
-      finish(() => reject(error));
-    }
+  const session = createOptimizerWorkerSession({
+    workerFactory: options.workerFactory, syncEvaluator: options.syncEvaluator, workerUrl: options.workerUrl,
+    maxWorkers: 1, keepAlive: false,
   });
+  let result: CandidateResult | Promise<CandidateResult>;
+  try {
+    result = session.run(request, { signal: options.signal });
+  } catch (error) {
+    session.close();
+    throw error;
+  }
+  if (result instanceof Promise) return result.finally(() => session.close());
+  session.close();
+  return result;
 }

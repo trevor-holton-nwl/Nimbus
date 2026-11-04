@@ -19,7 +19,8 @@ import { Sandbox } from './sandbox.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
 import { Alerts, scheduleAlertsForPatches } from '../insights/services.mjs';
 import { Engine, snapshotSchedule, SETUP_AWARE_NORMAL_BUDGET_MS, SETUP_AWARE_EXHAUSTIVE_BUDGET_MS, effectiveFirmedIdSet, evaluateSchedule } from './engine.mjs';
-import { runOptimizerPreview } from './optimizer-worker-client.mjs';
+import { createOptimizerWorkerSession } from './optimizer-worker-client.mjs';
+import type { OptimizerWorkerFactory, OptimizerWorkerSession } from './optimizer-worker-client.mjs';
 import type { RemoveBacklogResult } from './scheduler-contract.mjs';
 import { applyPatchesToSnapshot, boundsWithRunContext, resolveTaskPlant, validateCandidate, validateCandidateForApply, toolingRuleForSnapshot } from './setup-scheduler.mjs';
 import type { CandidateDiagnostic, CandidateReason, CandidateResult, EvaluationRequest, SchedulePatch, ScheduleSnapshot } from './setup-scheduler.mjs';
@@ -1226,6 +1227,13 @@ function canonicalTaskBaselineValue(value: unknown): unknown {
   return value;
 }
 
+/** The two alternate plans compared against each primary mode (Backlog has none). */
+const ALT_MODE_MAP: Partial<Record<OptimizerMode, OptimizerMode[]>> = {
+  changeover: ['spt', 'duedate'],
+  spt: ['changeover', 'duedate'],
+  duedate: ['spt', 'changeover'],
+};
+
 function taskBaseline(tasks: ReadonlyArray<NimbusTask>): Map<string, string> {
   return new Map(tasks.map(task => [String(task.id), JSON.stringify(canonicalTaskBaselineValue(task))]));
 }
@@ -1242,6 +1250,10 @@ interface PreviewBacklogAudit {
 }
 interface PreviewComputeContext {
   signal?: AbortSignal; tick: () => Promise<void>; shouldStop?: () => boolean; runSeq?: number;
+  /** Test seam: the worker factory the run's worker session spawns with (default: a real module Worker). */
+  workerFactory?: OptimizerWorkerFactory | null;
+  /** Test seam: most workers alive at once (default: one less than the logical cores, at most 2 = one per alternate). */
+  maxWorkers?: number;
   /** Called once Plan A and its explanation are ready, before any alternate
    *  runs, with the result so far (`finalists: null`). Foreground only. */
   onPrimary?: (partial: PreviewResult) => void;
@@ -1751,11 +1763,32 @@ export const OptimizerPreview = {
     return step(() => gen.next());
   },
 
-  /** The compute body as a generator: every `yield` hands a promise to the driver. */
+  /** The compute body as a generator: every `yield` hands a promise to the driver. The run owns one worker session
+   *  (the primary and its alternates share it); it is closed however the run ends: result, error, or an abort (the
+   *  signal also closes it by itself, which terminates every worker and rejects every request still in flight). */
   *_computeSteps(
     mode: OptimizerMode,
     opts: OptimizerRunOptions,
+    ctx: PreviewComputeContext,
+  ): Generator<Promise<unknown>, PreviewResult, unknown> {
+    // Two alternates can run side by side, but never starve the page: leave one core for the main thread.
+    const cores = Number(globalThis.navigator?.hardwareConcurrency) || 2;
+    const session = createOptimizerWorkerSession({
+      workerFactory: ctx.workerFactory, syncEvaluator: evaluateSchedule, signal: ctx.signal,
+      maxWorkers: ctx.maxWorkers ?? Math.max(1, Math.min(2, cores - 1)),
+    });
+    try {
+      return yield* OptimizerPreview._computeStepsWith(mode, opts, ctx, session);
+    } finally {
+      session.close();
+    }
+  },
+
+  *_computeStepsWith(
+    mode: OptimizerMode,
+    opts: OptimizerRunOptions,
     { signal, tick, shouldStop = () => false, runSeq = 0, onPrimary }: PreviewComputeContext,
+    session: OptimizerWorkerSession,
   ): Generator<Promise<unknown>, PreviewResult, unknown> {
     const startedAt = performance.now();
     const plant = opts.plant ?? Store.selectedPlant;
@@ -1769,11 +1802,6 @@ export const OptimizerPreview = {
     // comment), so no other plant's calendar entries are ever needed here.
     const candidateSnapshot = snapshotSchedule(plant);
     const scopedTasks = candidateSnapshot.tasks.filter(task => resolveTaskPlant(task, candidateSnapshot) === plant);
-    const _snapT0 = performance.now();
-    // Kept only for the Undo entry if the planner applies.
-    const snapshot = structuredClone(scopedTasks);
-    const baseline = taskBaseline(snapshot);
-    PerfMonitor.record('Optimize.snapshot', performance.now() - _snapT0);
 
     // KPI inputs are scoped to what the user actually selected on screen 1 —
     // time window and (optionally) a subset of lines. Otherwise the before/after
@@ -1791,11 +1819,6 @@ export const OptimizerPreview = {
       return eMs >= winStart && s <= winEnd;
     };
 
-    // Pre-KPIs from the (filtered) snapshot — it IS the current state right now.
-    const _preKpiT0 = performance.now();
-    const preKpis = Util.scheduleKpis(snapshot.filter(inScope), 14, candidateSnapshot, candidateSnapshot.frozenHorizonEnd);
-    PerfMonitor.record('Optimize.preKPIs', performance.now() - _preKpiT0);
-
     // Evaluate the established placement algorithm against a detached read
     // model. Store changes only if the planner applies this candidate.
     // Phase 2 (Pkg D): the primary run's deadline is now an explicit,
@@ -1805,13 +1828,33 @@ export const OptimizerPreview = {
     // (deferred) alt run below no longer inherits a full fresh one.
     const _evalPrimaryT0 = performance.now();
     const deadlineAt = performance.now() + (opts.searchBudgetMs ?? SETUP_AWARE_NORMAL_BUDGET_MS);
-    const primaryEvaluation = runOptimizerPreview({
+    const primaryEvaluation = session.run({
       runId: `optimizer-preview-${runSeq}-primary`, mode, snapshot: candidateSnapshot,
       request: previewEvaluationRequest(mode, opts, plant, deadlineAt),
-    }, {
-      signal,
-      syncEvaluator: evaluateSchedule,
-    });
+    }, { signal });
+    // Start the second worker's boot while the primary searches: the alternates (below) then find it warm.
+    const altCount = ALT_MODE_MAP[mode]?.length ?? 0;
+    if (altCount > 0 && session.workerBacked) session.prewarm(altCount);
+    // The primary request is already posted (a worker clones the snapshot on postMessage), so the main-thread work that
+    // only the preview needs (the Undo copy, the baseline map and the Pre-KPIs) runs while the worker searches instead
+    // of before it starts (V-U2-13). Nothing below mutates candidateSnapshot, so the values are the same as before.
+    let snapshot: NimbusTask[];
+    let baseline: Map<string, string>;
+    let preKpis: OptimizerKpis;
+    try {
+      const _snapT0 = performance.now();
+      // Kept only for the Undo entry if the planner applies.
+      snapshot = structuredClone(scopedTasks);
+      baseline = taskBaseline(snapshot);
+      PerfMonitor.record('Optimize.snapshot', performance.now() - _snapT0);
+      // Pre-KPIs from the (filtered) snapshot — it IS the current state right now.
+      const _preKpiT0 = performance.now();
+      preKpis = Util.scheduleKpis(snapshot.filter(inScope), 14, candidateSnapshot, candidateSnapshot.frozenHorizonEnd);
+      PerfMonitor.record('Optimize.preKPIs', performance.now() - _preKpiT0);
+    } catch (error) {
+      if (primaryEvaluation instanceof Promise) primaryEvaluation.catch(() => undefined);   // never an unhandled rejection
+      throw error;
+    }
     const candidate = (primaryEvaluation instanceof Promise ? yield primaryEvaluation : primaryEvaluation) as CandidateResult;
     PerfMonitor.record('Optimize.evaluate.primary', performance.now() - _evalPrimaryT0);
     // A reversed or unparseable window yields no proposal at all: say why instead of rendering an empty plan.
@@ -1896,12 +1939,10 @@ export const OptimizerPreview = {
     // synchronous pass, so a single alt's up-to-SETUP_AWARE_DEADLINE_MS
     // search can't compound into a multi-alt main-thread freeze. All of
     // them finish before the preview is rendered or revealed.
-    const altModeMap: Partial<Record<OptimizerMode, OptimizerMode[]>> = {
-      changeover: ['spt', 'duedate'],
-      spt: ['changeover', 'duedate'],
-      duedate: ['spt', 'changeover'],
-    };
-    const altModes = altModeMap[mode] ?? [];
+    const altModes = ALT_MODE_MAP[mode] ?? [];
+    // On the worker path the alternates run side by side (their KPIs are all the comparison table needs, so they skip
+    // the validation serialization); the synchronous fallback keeps one alternate per tick so the spinner animates.
+    const concurrentAlts = altModes.length > 0 && session.workerBacked;
 
     // Compute every alternate BEFORE the first (and only) render, so the
     // popup opens once, fully populated; spinner-only until then. One alt
@@ -1909,7 +1950,50 @@ export const OptimizerPreview = {
     const finalists: OptimizerFinalist[] = [
       { label: 'A', mode, kpis: postKpis, whyNot: null },
     ];
-    for (let idx = 0; idx < altModes.length; idx++) {
+    if (concurrentAlts) {
+      yield tick();
+      if (signal?.aborted) { const e = new Error('Aborted'); e.name = 'AbortError'; throw e; }
+      if (shouldStop()) {
+        finalists.length = 1;
+      } else {
+        const _evalAltT0 = performance.now();
+        const launched = altModes.map((altMode, idx): Promise<{ value?: CandidateResult; error?: unknown }> => {
+          try {
+            const altDeadlineAt = performance.now() + SETUP_AWARE_NORMAL_BUDGET_MS;
+            const altEvaluation = session.run({
+              runId: `optimizer-preview-${runSeq}-alt-${idx}`, mode: altMode, snapshot: candidateSnapshot,
+              request: previewEvaluationRequest(altMode, { ...opts, searchBudgetMs: SETUP_AWARE_NORMAL_BUDGET_MS, exhaustive: false }, plant, altDeadlineAt),
+            }, { signal, kpiOnly: true });
+            return Promise.resolve(altEvaluation).then(value => ({ value }), error => ({ error }));
+          } catch (error) {
+            return Promise.resolve({ error });
+          }
+        });
+        const outcomes = (yield Promise.all(launched)) as Array<{ value?: CandidateResult; error?: unknown }>;
+        PerfMonitor.record('Optimize.evaluate.alt', performance.now() - _evalAltT0);
+        // A cancelled run (newer preview / discard) must not fall through to a render.
+        for (const outcome of outcomes) {
+          if (outcome.error instanceof Error && outcome.error.name === 'AbortError') throw outcome.error;
+        }
+        if (shouldStop()) {
+          finalists.length = 1;
+        } else {
+          outcomes.forEach((outcome, idx) => {
+            if (!outcome.value) return;   // this alt failed — omit it; other alts (and Plan A) still show
+            const _applyPatchesT0b = performance.now();
+            const altPostTasks = applyPatchesToSnapshot(candidateSnapshot.tasks, outcome.value.patches).filter(inScope);
+            PerfMonitor.record('Optimize.applyPatches', performance.now() - _applyPatchesT0b);
+            const altKpis = Util.scheduleKpis(altPostTasks, 14, candidateSnapshot, candidateSnapshot.frozenHorizonEnd);
+            finalists.push({
+              label: String.fromCharCode(66 + idx), // 'B', 'C', ...
+              mode: altModes[idx], kpis: altKpis,
+              whyNot: describeFinalistWhyNot(postKpis, altKpis),
+            });
+          });
+        }
+      }
+    }
+    for (let idx = 0; !concurrentAlts && idx < altModes.length; idx++) {
       yield tick();
       if (signal?.aborted) { const e = new Error('Aborted'); e.name = 'AbortError'; throw e; }
       // The foreground's shouldStop covers a superseded/discarded run and a
@@ -1920,13 +2004,10 @@ export const OptimizerPreview = {
       try {
         const _evalAltT0 = performance.now();
         const altDeadlineAt = performance.now() + SETUP_AWARE_NORMAL_BUDGET_MS;
-        const altEvaluation = runOptimizerPreview({
+        const altEvaluation = session.run({
           runId: `optimizer-preview-${runSeq}-alt-${idx}`, mode: altMode, snapshot: candidateSnapshot,
           request: previewEvaluationRequest(altMode, { ...opts, searchBudgetMs: SETUP_AWARE_NORMAL_BUDGET_MS, exhaustive: false }, plant, altDeadlineAt),
-        }, {
-          signal,
-          syncEvaluator: evaluateSchedule,
-        });
+        }, { signal });
         const altCandidate = (altEvaluation instanceof Promise ? yield altEvaluation : altEvaluation) as CandidateResult;
         PerfMonitor.record('Optimize.evaluate.alt', performance.now() - _evalAltT0);
         const _applyPatchesT0b = performance.now();
@@ -1966,6 +2047,7 @@ export const OptimizerPreview = {
     OptimizerPreview._render();
     OptimizerPreview._endLoadingState();
     previewRoot?.querySelector<HTMLElement>('.modal-head button')?.focus();
+    PerfMonitor.record('Optimize.firstPaint', performance.now() - result.startedAt);
   },
 
   /** Install every field of a (possibly primary-only) result and start the
