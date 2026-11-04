@@ -1793,9 +1793,8 @@ export const OptimizerPreview = {
     const startedAt = performance.now();
     const plant = opts.plant ?? Store.selectedPlant;
     if (!plant) throw new Error('computePreview requires a plant');
-    // Snapshot every task in the plant — the optimizer may touch any of
-    // them transitively (auto-reflow can ripple beyond the chosen window
-    // / lines), so the undo snapshot must stay unfiltered. `plant` scopes
+    // Snapshot every task in the plant for the detached run (the Undo copy is taken at Apply, from the kept ids only).
+    // `plant` scopes
     // only calendars (Phase 2, Pkg D clone reduction) — every consumer of
     // this snapshot's `calendars` only ever looks up a line that already
     // passed this same plant's task filter (see snapshotSchedule's doc
@@ -2648,7 +2647,7 @@ export const OptimizerPreview = {
       keptPatches = candidate.patches.filter(patch => survivors.has(String(patch.id)));
       validationDroppedIds = pruned.dropped.filter(id => !running.has(id));
     }
-    const committed = await OptimizerPreview._runGuardedCommit(OptimizerPreview._commitPatches(keptPatches, { ids: runningSkippedIds, reason: 'running' }, snap));
+    const committed = await OptimizerPreview._runGuardedCommit(OptimizerPreview._commitPatches(keptPatches, { ids: runningSkippedIds, reason: 'running' }));
     // Cancel at the tool confirm (or a task edit during it) commits nothing: no "dropped" toast for a plan that was not applied.
     if (committed && validationDroppedIds.length) {
       Toast.show(Util.t('toast.opt_apply_invalid_dropped', { count: validationDroppedIds.length }), 'warn', 7000);
@@ -2698,6 +2697,19 @@ export const OptimizerPreview = {
     }
   },
 
+  /** The Undo pre-image for an optimizer Apply: the kept patch ids plus every order of their distribution family
+   *  (PARENT_ORDER + MATERIAL_NUMBER, the grouping `_pruneAgainstLive` drops together), cloned from the live Store
+   *  right before the commit. Unrelated rows are not captured, so Undo leaves edits made to them alone. */
+  _undoPreImage(kept: ReadonlyArray<SchedulePatch>): NimbusTask[] {
+    const parentKey = (task: NimbusTask | undefined): string | null =>
+      task?.PARENT_ORDER ? `${task.PARENT_ORDER}\u0000${task.MATERIAL_NUMBER ?? ''}` : null;
+    const ids = new Set<string>(kept.map(patch => String(patch.id)));
+    const keys = new Set<string>();
+    for (const id of ids) { const key = parentKey(Store.tasks[id]); if (key) keys.add(key); }
+    if (keys.size) for (const task of Store.tasksArr) { const key = parentKey(task); if (key && keys.has(key)) ids.add(String(task.id)); }
+    return UndoStack.snapshotTasks([...ids]);
+  },
+
   /** Commit a (possibly filtered) set of preview patches: audit, apply, undo
    *  entry, toasts, teardown, and alert recompute. `skipped` carries the ids
    *  dropped before this call and why, so the caller owns the filtering. Resolves true only when the patches were
@@ -2705,9 +2717,7 @@ export const OptimizerPreview = {
   async _commitPatches(
     kept: ReadonlyArray<SchedulePatch>,
     skipped: { ids: string[]; reason: 'running' | 'changed' },
-    snapBeforeApply: NimbusTask[],
   ): Promise<boolean> {
-    const snap = snapBeforeApply;
     const candidate = OptimizerPreview._candidate;
     const mode = OptimizerPreview._mode;
     const plant = OptimizerPreview._plant;
@@ -2748,6 +2758,8 @@ export const OptimizerPreview = {
       }
     }
     OptimizerPreview._applying = true;
+    // Undo scope, taken AFTER the confirm and right before the apply: only the kept ids plus their distribution family.
+    const snap = OptimizerPreview._undoPreImage(kept);
     Engine.applySchedulePatches(kept);
     // Audit after the commit, so a failed apply never logs a run that did not happen.
     if (auditDetails && plant) {
@@ -2852,8 +2864,11 @@ export const OptimizerPreview = {
     if (hadDismissed) {
       Alerts.scheduleRecompute();
     } else {
+      // Candidate patches never change MACHINE, so the live row (or the pre-image) names the line. Patches dropped before
+      // the commit are not in the pre-image: their live row still answers.
       const byId = new Map(snap.map(t => [String(t.id), t]));
-      scheduleAlertsForPatches(candidate.patches, id => byId.get(String(id))?.MACHINE || 'Unknown', id => byId.get(String(id)));
+      const rowOf = (id: string | number): NimbusTask | undefined => byId.get(String(id)) ?? Store.tasks[String(id)];
+      scheduleAlertsForPatches(candidate.patches, id => rowOf(id)?.MACHINE || 'Unknown', id => rowOf(id));
     }
     return true;
   },
@@ -3294,10 +3309,8 @@ export const OptimizerPreview = {
     if (!pruned) { refuse(); return; }
     const kept = pruned.kept;
     const drop = new Set(pruned.dropped);
-    // snapshotSchedule(plant) already holds exactly this plant's tasks, cloned.
-    const undoSnapshot = [...live0.tasks];
     pv._applying = true;
-    await pv._commitPatches(kept, { ids: [...drop], reason: 'changed' }, undoSnapshot);
+    await pv._commitPatches(kept, { ids: [...drop], reason: 'changed' });
   },
 
   discard() {
