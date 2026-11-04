@@ -10,7 +10,7 @@ import type { RemoveBacklogResult } from './scheduler-contract.mjs';
 import {
   MS_PER_MINUTE, PRIORITY_FIELD_DEFAULTS, SCORE_HARD, SCORE_LATENESS, SCORE_LATE_COUNT, SCORE_OVER_CAP, SCORE_PATCHES,
   SCORE_POLICY, SCORE_SETUP, SCORE_UNCOVERED, capAwareSequence, makeScore,
-  plantSegmentFloor, plantSplitPolicy, plantToolingRule, plantUnknownSetupDefaultMinutes, plantUnknownSetupPolicy,
+  type PlanningReason, type PlanningReasonCode, plantSegmentFloor, plantSplitPolicy, plantToolingRule, plantUnknownSetupDefaultMinutes, plantUnknownSetupPolicy,
 } from './scheduler-contract.mjs';
 import { candidateAllDayWorkHours, candidateDefaultWorkHours, fitsMergedSpan } from '../calendar/calendar-engine.mjs';
 import { buildSetupResolutionIndex, normalizedValue, resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
@@ -613,7 +613,7 @@ export interface SetupRunContext {
    *  'excludeFromSearch'; read by finalizeCandidate/normalizer when the order
    *  ends the run queued, so the planner sees the missing transition instead
    *  of a generic no_fit_found. */
-  _setupExclusions: Map<string, { code: string; message: string }>;
+  _setupExclusions: Map<string, PlanningReason>;
   /** Lazy per-task-id memos. */
   _stateForOrder: Map<string, SetupStateKey | null>;
   _stateSignatureKey: Map<string, string | null>;
@@ -995,7 +995,7 @@ interface DueDateCandidate {
   /** Orders this sequence refused to admit under the 'excludeFromSearch' unknown-setup policy (both states known,
    * no matrix row), with the reason to show if they end the run unplaced. Carried on the candidate rather than
    * written to the run context so only the ACCEPTED sequence's exclusions are merged (see `applyCandidate`). */
-  setupExclusions?: Map<string, { code: string; message: string }>;
+  setupExclusions?: Map<string, PlanningReason>;
 }
 
 interface SearchRun {
@@ -1051,7 +1051,7 @@ function searchExhaustive(
 function noFitReason(
   candidate: Readonly<CandidateResult>,
   completeMessage = 'No fit found within the available capacity and planning window.',
-): { code: string; message: string } {
+): PlanningReason {
   if (candidate.diagnostics.limitReached) {
     return { code: 'search_limit', message: 'Search ended before a legal placement was found.' };
   }
@@ -1075,7 +1075,7 @@ function noFitReason(
  * on. A line with no window at all, or an order that merely failed to find room, keeps its existing reason. */
 function neverOverlongReason(
   snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask,
-): { code: string; message: string } | null {
+): PlanningReason | null {
   // Placement ignores the calendar (one continuous interval), so window-based reasons do not apply.
   if (bounds.runContext?.respectCalendar === false) return null;
   const plant = bounds.setup.plant;
@@ -1100,7 +1100,7 @@ function neverOverlongReason(
  * the `never` policy: a floor does not apply there, and `neverOverlongReason` already covers it. */
 function unfittableReason(
   snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask,
-): { code: string; message: string } | null {
+): PlanningReason | null {
   if (bounds.runContext?.respectCalendar === false) return null;
   const plant = bounds.setup.plant;
   if (splitOrderPolicyForSnapshot(snapshot, plant) === 'never') return null;
@@ -1131,8 +1131,8 @@ function unfittableReason(
  * change. Only `no_fit_found` is rewritten: `search_incomplete`/`search_limit` (unproven) and the calendar-fact
  * reasons (`overlong_never`, `segment_floor_unfittable`, `expired_window`) are never replaced. */
 function pushLimitAware(
-  bounds: Readonly<DueDateFirstBounds>, task: NimbusTask, reason: { code: string; message: string },
-): { code: string; message: string } {
+  bounds: Readonly<DueDateFirstBounds>, task: NimbusTask, reason: PlanningReason,
+): PlanningReason {
   if (reason.code !== 'no_fit_found') return reason;
   const ceiling = notAfterFor(bounds, task);
   if (!ceiling || !(+ceiling < +bounds.horizonEnd)) return reason;
@@ -3155,7 +3155,7 @@ function candidateForSequence(
   const patches: SchedulePatch[] = [];
   const explanation: CandidateReason[] = [];
   const missingEdges: MissingSetupEdge[] = [];
-  const setupExclusions = new Map<string, { code: string; message: string }>();
+  const setupExclusions = new Map<string, PlanningReason>();
   let setupMinutes = 0;
   let lateCount = 0;
   let latenessMinutes = 0;
@@ -6005,7 +6005,7 @@ export function attachDetachedValidationContext(
   const patches = new Map(candidate.patches.map(patch => [String(patch.id), patch]));
   const finalById = new Map(patchedTasksView(snapshot.tasks, candidate.patches).map(task => [String(task.id), task]));
   const dispositions: PlanningDisposition[] = [];
-  const reasonFor = (task: NimbusTask): { code: string; message: string } => (
+  const reasonFor = (task: NimbusTask): PlanningReason => (
     planningDefect(snapshot, bounds, task)
       ?? unfittableReason(snapshot, bounds, task)
       ?? pushLimitAware(bounds, task, { code: 'no_fit_found', message: 'The repair did not produce a valid scheduled interval.' })
@@ -6093,7 +6093,7 @@ function completionEnd(bounds: Readonly<DueDateFirstBounds>, task: NimbusTask, e
   return ceiling && ceiling < end ? ceiling : end;
 }
 
-type PlanningDefect = { code: string; message: string; tool_id?: string; available?: number; holders?: string[] };
+type PlanningDefect = { code: PlanningReasonCode; message: string; tool_id?: string; available?: number; holders?: string[] };
 
 /** T4: the part of `planningDefect` that depends only on the task and the
  * plant's configuration (missing SAP due date, run-time validity). The entry is
@@ -6622,12 +6622,12 @@ function toolHoldersDetail(cluster: ToolCluster, offender: string | null): strin
  * numbers that change run to run); the planner-visible wording is rendered from the structured fields. */
 function toolQueueReason(
   code: 'tool_contention' | 'tool_unavailable', tool: string, available: number, holders: string[], incomplete: boolean,
-): { code: string; message: string; tool_id: string; available: number; holders: string[]; incomplete?: true } {
+): { code: 'tool_contention' | 'tool_unavailable'; message: string; tool_id: string; available: number; holders: string[]; incomplete?: true } {
   const message = code === 'tool_unavailable' ? TOOL_UNAVAILABLE_MESSAGE : incomplete ? TOOL_CONTENTION_INCOMPLETE_MESSAGE : TOOL_CONTENTION_MESSAGE;
   return { code, message, tool_id: tool, available, holders, ...(incomplete ? { incomplete: true as const } : {}) };
 }
 
-function toolQueuePatch(id: string, reason: { code: string; message: string }): SchedulePatch {
+function toolQueuePatch(id: string, reason: PlanningReason): SchedulePatch {
   return { id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning', planning_reason: reason } };
 }
 
@@ -7275,11 +7275,11 @@ function repairCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<
       if (!held || (startById.get(f.taskId!) ?? 0) < (startById.get(held.taskId!) ?? 0)) earliestUnrecorded.set(f.line ?? '', f);
     }
     for (const f of earliestUnrecorded.values()) if (!reasonBy.has(f.taskId!)) reasonBy.set(f.taskId!, f);
-    const queueReason = (id: string): { code: string; message: string } => {
+    const queueReason = (id: string): PlanningReason => {
       const f = reasonBy.get(id);
       if (f?.code === 'setup_transition_unrecorded') return { code: f.code, message: f.message };
       if (f?.code === 'tool_overflow' && f.detail) return toolQueueReason('tool_contention', f.detail.tool, f.detail.available, [...f.detail.holders], false);
-      const generic = { code: 'no_fit_found', message: 'The proposed placement failed final capacity or setup validation.' };
+      const generic: PlanningReason = { code: 'no_fit_found', message: 'The proposed placement failed final capacity or setup validation.' };
       // O6: a date_window error caused by the end passing the push-forward ceiling is the limit's doing.
       if (f?.code !== 'date_window') return generic;
       const task = patchedById.get(id);
@@ -7299,7 +7299,7 @@ function repairCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<
     }
     const repaired = (result.dispositions ?? []).map(d => reasonBy.has(d.id) && d.status !== 'protected' ? { ...d, status: 'needs_planning' as const, reason: queueReason(d.id) } : d);
     // Nothing to queue or relabel this pass: re-validating would only repeat the same findings.
-    const sameReason = (a: { code: string; message: string } | null | undefined, b: { code: string; message: string }): boolean => !!a && a.code === b.code && a.message === b.message;
+    const sameReason = (a: { code: string; message: string } | null | undefined, b: PlanningReason): boolean => !!a && a.code === b.code && a.message === b.message;
     const changedAny = queuedNew
       || result.patches.some(patch => reasonBy.has(patch.id) && !protectedIds.has(patch.id) && (patch.changes.planning_status !== 'needs_planning' || !sameReason(patch.changes.planning_reason, queueReason(patch.id))))
       || (result.dispositions ?? []).some(d => reasonBy.has(d.id) && d.status !== 'protected' && (d.status !== 'needs_planning' || !sameReason(d.reason, queueReason(d.id))));

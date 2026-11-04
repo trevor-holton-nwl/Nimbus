@@ -273,3 +273,28 @@ export const SCORE_WIDTH = 8;
 export function makeScore(): number[] {
   return new Array<number>(SCORE_WIDTH).fill(0);
 }
+
+// ---------------------------------------------------------------------------
+// P3-5(e): the structured reasons an optimizer run queues an order under.
+// ---------------------------------------------------------------------------
+
+/** Every code the detached scheduler writes into a queued order's `planning_reason`. */
+export type PlanningReasonCode =
+  | 'expired_window'
+  | 'missing_due_date'
+  | 'invalid_runtime'
+  | 'no_fit_found'
+  | 'search_limit'
+  | 'search_incomplete'
+  | 'setup_transition_unrecorded'
+  | 'segment_floor_unfittable'
+  | 'push_limit_unmet'
+  | 'overlong_never'
+  | 'tool_contention'
+  | 'tool_unavailable';
+
+/** The code and message of a planning reason built by the detached scheduler. */
+export interface PlanningReason {
+  code: PlanningReasonCode;
+  message: string;
+}
