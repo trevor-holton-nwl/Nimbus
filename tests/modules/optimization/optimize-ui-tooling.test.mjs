@@ -6,9 +6,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { OptimizerPreview, toolFingerprint, ensureToolInventoryForRun } from '../../../frontend/optimization/optimize-ui.mjs';
-import { toolQueueSummary, confirmToolQueue } from '../../../frontend/optimization/tool-queue-confirm.mjs';
+import { toolQueueSummary, confirmToolQueue, raiseToolInventory } from '../../../frontend/optimization/tool-queue-confirm.mjs';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
-import { Toast, Modal } from '../../../frontend/platform/foundation.mjs';
+import { Toast, Modal, ErrorLog } from '../../../frontend/platform/foundation.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 import { validateCandidate } from '../../../frontend/optimization/setup-scheduler.mjs';
@@ -474,6 +474,91 @@ test('Raise inventory from the preview: confirm first (Cancel keeps the preview)
   } finally {
     Modal.confirm = prior.confirm; Modal.close = prior.close; Toast.show = prior.show; f.restore();
   }
+});
+
+test('Raise inventory: cancelling the plant-switch confirm shows no "closed" toast and navigates nowhere; a throwing confirm is caught and logged', async () => {
+  const plant = 'TQ-RAISE2';
+  setMd(plant, 'hard', []);
+  const f = openPreview(plant, [previewTask('rb-a', plant, 1)]);
+  const prior = { confirm: Modal.confirm, close: Modal.close, show: Toast.show, plantSwitch: Persistence.confirmPlantSwitch, warn: ErrorLog.warn };
+  const toasts = [], nav = [], warned = [];
+  Modal.confirm = async () => true;                       // accept "discard this plan"
+  Modal.close = () => {};
+  Toast.show = (m, k) => { toasts.push([String(m), k]); };
+  ErrorLog.warn = (...a) => { warned.push(a); };
+  try {
+    globalThis.NIMBUS = { App: { goto: s => nav.push(s), gotoMasterSub: s => nav.push(s) } };
+    OptimizerPreview._plant = 'TQ-RAISE2-OTHER';          // differs from Store.selectedPlant: the plant-switch guard runs
+    Persistence.confirmPlantSwitch = async () => false;   // the planner cancels the unsaved-edits confirm
+    await OptimizerPreview._raiseInventory('T1');
+    assert.deepEqual(nav, [], 'no navigation after Cancel');
+    assert.equal(toasts.length, 0, 'no "preview closed" toast when the raise did not happen');
+
+    Persistence.confirmPlantSwitch = async () => { throw new Error('boom'); };
+    assert.equal(await raiseToolInventory('TQ-RAISE2-OTHER', 'T1'), false, 'a failure resolves (never rejects)');
+    assert.ok(warned.some(w => /boom|Tool Inventory/.test(String(w[1]))), 'and is logged');
+    assert.deepEqual(nav, []);
+  } finally {
+    Modal.confirm = prior.confirm; Modal.close = prior.close; Toast.show = prior.show;
+    Persistence.confirmPlantSwitch = prior.plantSwitch; ErrorLog.warn = prior.warn; f.restore();
+  }
+});
+
+// Preview-Apply tail: the warning toasts and alert refresh that the deleted live apply tail used to own.
+async function applyWithTail(plantId, setup, { dismissed = false } = {}) {
+  setMd(plantId, 'off', []);
+  const f = openPreview(plantId, [previewTask(`${plantId}-a`, plantId, 2), previewTask(`${plantId}-b`, plantId, 1)]);
+  const prior = { show: Toast.show, clear: Alerts.clearDismissed, full: Alerts.scheduleRecompute, lines: Alerts.scheduleRecomputeLines };
+  const toasts = [];
+  const calls = { full: 0, lines: 0, cleared: 0 };
+  Toast.show = (m, k) => { toasts.push([String(m), k]); };
+  Alerts.clearDismissed = () => { calls.cleared++; return dismissed; };
+  Alerts.scheduleRecompute = () => { calls.full++; };
+  Alerts.scheduleRecomputeLines = () => { calls.lines++; };
+  try {
+    setup(OptimizerPreview._candidate, OptimizerPreview);
+    await OptimizerPreview.apply();
+    return { toasts, calls, has: re => toasts.some(([m]) => re.test(m)) };
+  } finally {
+    Toast.show = prior.show; Alerts.clearDismissed = prior.clear; Alerts.scheduleRecompute = prior.full; Alerts.scheduleRecomputeLines = prior.lines;
+    f.restore();
+  }
+}
+
+test('Preview Apply warns when lines were guarded (unchangedLines)', async () => {
+  const r = await applyWithTail('TQ-TAIL1', cand => { cand.unchangedLines = ['L1', 'L2']; });
+  assert.ok(r.has(/optimize_lines_guarded|guarded/i), JSON.stringify(r.toasts));
+  const none = await applyWithTail('TQ-TAIL1B', cand => { cand.unchangedLines = []; });
+  assert.ok(!none.has(/optimize_lines_guarded/), 'no guarded lines: no toast');
+});
+
+test('Preview Apply: the missing-setup summary toast fires, and is suppressed when the setup is synthetic', async () => {
+  const set = synthetic => (cand, pv) => {
+    pv._explanation.scheduledWithoutSetup = { orders: 2, lines: 1 };
+    pv._explanation.unplacedOrders = { orders: 0, lines: 0 };
+    pv._syntheticSetup = synthetic;
+  };
+  const shown = await applyWithTail('TQ-TAIL2', set(false));
+  assert.ok(shown.has(/optimize_missing_setup_summary/), JSON.stringify(shown.toasts));
+  const quiet = await applyWithTail('TQ-TAIL2B', set(true));
+  assert.ok(!quiet.has(/optimize_missing_setup_summary/), 'synthetic setup: summary suppressed');
+});
+
+test('Preview Apply: dismissed alerts force a full recompute; otherwise the recompute is scoped to the patched lines', async () => {
+  const withDismissed = await applyWithTail('TQ-TAIL3', () => {}, { dismissed: true });
+  assert.equal(withDismissed.calls.cleared, 1);
+  assert.equal(withDismissed.calls.full, 1, 'full recompute when something was dismissed');
+  assert.equal(withDismissed.calls.lines, 0, 'and no scoped one');
+  const clean = await applyWithTail('TQ-TAIL3B', () => {}, { dismissed: false });
+  assert.equal(clean.calls.full, 0);
+  assert.ok(clean.calls.lines >= 1, 'scoped recompute for the patched lines');
+});
+
+test('Preview Apply: distribution_separation findings raise the separation warning toast (as the old live tail did)', async () => {
+  const r = await applyWithTail('TQ-TAIL4', cand => {
+    cand.validationFindings = [{ code: 'distribution_separation', severity: 'warning', message: 'm' }, { code: 'distribution_separation', severity: 'warning', message: 'm2' }, { code: 'other', severity: 'warning', message: 'x' }];
+  });
+  assert.ok(r.has(/optimize_distribution_separation|sub-order/i), JSON.stringify(r.toasts));
 });
 
 test('Persistence.ensureToolInventoryCurrent: unchanged version is fresh without a re-read; a moved version re-reads; no baseline or a slow probe proceeds unfresh', async () => {

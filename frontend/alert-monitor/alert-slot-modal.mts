@@ -848,7 +848,7 @@ function _wire(): void {
   _el('asl-body')?.addEventListener('click', e => {
     const target = e.target as HTMLElement | null;
     const tool = target?.closest?.<HTMLElement>('[data-asl-raise]')?.dataset.aslRaise;
-    if (tool && _s) { const plant = _s.plant; AlertSlotModal.close(); raiseToolInventory(plant, tool); return; }
+    if (tool && _s) { const plant = _s.plant; AlertSlotModal.close(); void raiseToolInventory(plant, tool); return; }
     if (target?.closest?.<HTMLElement>('[data-asl-act="preview"]') && _s) {
       _s.previewOpen = !_s.previewOpen;
       _renderSelection(_s);

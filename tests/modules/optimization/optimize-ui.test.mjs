@@ -15,7 +15,7 @@ import { Alerts, Compute, Utilization } from '../../../frontend/insights/service
 import { Session } from '../../../frontend/security/session.mjs';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
-import { Engine } from '../../../frontend/optimization/engine.mjs';
+import { Engine, SETUP_AWARE_NORMAL_BUDGET_MS } from '../../../frontend/optimization/engine.mjs';
 import { runAndApply } from '../helpers/run-and-apply.mjs';
 import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
 import { buildOptimizerWorkerResponse } from '../../../frontend/optimization/optimizer-worker.mjs';
@@ -2183,6 +2183,30 @@ test('P2-1: the synchronous fallback keeps one alternate per tick (serial)', asy
   }
 });
 
+test('P2-1: with one worker the queued alternate is posted with the FULL alternate budget, not what is left of a launch-time deadline', async () => {
+  const fx = openSingleRevealFixture('SR', singleRevealTasks);
+  try {
+    OptimizerPreview._clear();
+    const posted = [];
+    const factory = () => ({
+      onmessage: null, onerror: null, onmessageerror: null,
+      postMessage(message) {
+        posted.push({ message, at: performance.now() });
+        const response = buildOptimizerWorkerResponse(message);
+        setTimeout(() => this.onmessage?.({ data: response }), message.runId.includes('-alt-') ? 60 : 0);   // each alternate takes 60 ms
+      },
+      terminate() {},
+    });
+    await OptimizerPreview.computePreview('spt', previewOpts, { tick: async () => {}, runSeq: 11, workerFactory: factory, maxWorkers: 1 });
+    const alts = posted.filter(p => p.message.runId.includes('-alt-'));
+    assert.equal(alts.length, 2);
+    assert.ok(alts[1].at - alts[0].at >= 50, 'the second alternate really waited behind the first');
+    for (const alt of alts) assert.equal(alt.message.deadlineDurationMs, SETUP_AWARE_NORMAL_BUDGET_MS, 'each alternate gets its own budget measured from its post');
+  } finally {
+    fx.restore();
+  }
+});
+
 test('P2-1 cancel: Cancel while the alternates run terminates every worker and applies nothing', async () => {
   const fx = openSingleRevealFixture('SR', singleRevealTasks);
   try {
@@ -2722,6 +2746,30 @@ test('P0-13: cancelling the calendar confirm re-shows the Optimize dialog instea
     assert.equal(calls.bg + calls.fg, 0);
   }));
 
+// A checkbox toggled while a pre-run confirm is open must not change the run: Run reads the dialog before its first await.
+test('run() reads the firmed/calendar checkboxes when Run is clicked, not after the confirms resolve', () =>
+  withCalendarGate('failed', true, async (calls, chk) => {
+    const firmed = makeSandboxElement('opt-chk-firmed');
+    const calendar = makeSandboxElement('opt-chk-calendar');
+    firmed.checked = true;
+    calendar.checked = true;
+    const baseGet = globalThis.document.getElementById;
+    globalThis.document.getElementById = id => (id === 'opt-chk-firmed' ? firmed : id === 'opt-chk-calendar' ? calendar : baseGet(id));
+    try {
+      let captured = null;
+      OptimizerPreview.runWithPreview = async (mode, opts) => { captured = opts; };
+      Modal.confirm = async () => { firmed.checked = false; calendar.checked = false; return true; };   // the planner flips them mid-confirm
+      chk.checked = false;
+      await OptimizeDialog.run();
+      await wait(20);
+      assert.ok(captured, 'the run started');
+      assert.equal(captured.respectFirmed, true, 'respectFirmed is the value at the click');
+      assert.equal(captured.respectCalendar, true, 'respectCalendar is the value at the click');
+    } finally {
+      globalThis.document.getElementById = baseGet;
+    }
+  }));
+
 // P0-14: no stuck spinner on early returns or exceptions.
 test('P0-14: an exception in the pre-run steps restores the Run button, drops the spinner and logs', () =>
   withCalendarGate('failed', false, async (calls, chk) => {
@@ -2787,7 +2835,7 @@ test('P0-15: a reversed window shows the invalid-horizon reason in the failure c
       startDate: new Date('2026-08-03T08:00:00'), endDate: new Date('2026-08-01T08:00:00') });
     for (let i = 0; i < 200 && fx.root.classList.contains('opt-pv-loading'); i++) await wait(10);
     assert.ok(!fx.root.classList.contains('opt-pv-loading'));
-    assert.match(fx.body.innerHTML, /horizon must end after/);
+    assert.match(fx.body.innerHTML, /opt_horizon_invalid|both dates must be valid/);
     assert.equal(OptimizerPreview._previewDiagnostics?.[0]?.code, 'candidate-evaluation-failed');
   } finally {
     fx.restore();

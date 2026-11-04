@@ -60,6 +60,7 @@ window.__NIMBUS_LOCALES.es = {
   'toast.optimize_plant_no_timezone': 'La planta {{plant}} no tiene una zona horaria válida, por lo que NIMBUS no la optimizará. Pida a un administrador que establezca la zona horaria de esta planta en Datos maestros.',
   'toast.select_lines_to_opt':         'Seleccione al menos una máquina para optimizar, o cambie a Planta completa.',
   'toast.opt_window_invalid':          'La fecha y hora Hasta debe ser posterior a la fecha y hora Desde.',
+  'toast.opt_horizon_invalid':         'El optimizador no pudo usar esta ventana: ambas fechas deben ser válidas y el final debe ser posterior al inicio.',
   'toast.opt_apply_running_skipped':  '{{count}} pedido(s) entraron en ejecución mientras la vista previa estaba abierta y se dejaron sin cambios.',
   'toast.opt_apply_invalid_dropped': '{{count}} pedido(s) de la vista previa ya no encajan en el plan actual y se dejaron como están.',
   'toast.plant_no_timezone':  'La planta {{plant}} no tiene una zona horaria válida, por lo que NIMBUS no puede saber qué pedidos están en ejecución o congelados. Pida a un administrador que configure la zona horaria de la planta en Datos maestros.',

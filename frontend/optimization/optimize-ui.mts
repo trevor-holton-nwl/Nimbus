@@ -796,6 +796,10 @@ export const OptimizeDialog = (() => {
     const bgEl = document.getElementById('opt-chk-background') as HTMLInputElement | null;
     // Exhaustive runs in the background: no preview spinner, the planner keeps working.
     const exhaustive = bgEl?.checked === true && mode !== 'backlog';
+    // Snapshot the checkboxes NOW: the confirms and the rank-map fetch below are awaited, and the planner can flip a
+    // box while one is open. The run uses what was ticked when Run was clicked.
+    const respectFirmed = sfEl?.checked ?? true;
+    const respectCalendarChecked = scEl?.checked ?? true;
 
     // Remember the chosen strategy/window/options as this user's optimizer
     // defaults so the dialog pre-fills the same way next time (feature: optimizer
@@ -803,9 +807,9 @@ export const OptimizeDialog = (() => {
     try {
       Session.setPref('optimizerDefaults', {
         mode, preset: _preset,
-        respectFirmed:   sfEl?.checked ?? true,
+        respectFirmed,
         // In Backlog the box is forced on for the run: save what the planner chose, not the forced value.
-        respectCalendar: mode === 'backlog' ? (_calendarBeforeBacklog ?? scEl?.checked ?? true) : (scEl?.checked ?? true),
+        respectCalendar: mode === 'backlog' ? (_calendarBeforeBacklog ?? respectCalendarChecked) : respectCalendarChecked,
       });
     } catch (err) { ErrorLog.warn('optimizer', `Could not save optimizer defaults: ${err instanceof Error ? err.message : String(err)}`); }
 
@@ -924,8 +928,8 @@ export const OptimizeDialog = (() => {
       lines:           linesScope,
       startDate:       winStart ?? (() => { const d = Store.plantNow(plant) ?? Store.serverNow(); d.setSeconds(0, 0); return d; })(),
       endDate:         winEnd   ?? new Date((Store.plantNow(plant) ?? Store.serverNow()).getTime() + 28 * Config.MS_DAY),
-      respectFirmed:   sfEl?.checked ?? true,
-      respectCalendar: mode === 'backlog' ? true : (scEl?.checked ?? true),
+      respectFirmed,
+      respectCalendar: mode === 'backlog' ? true : respectCalendarChecked,
       runAt:           Store.serverNow(),
       searchBudgetMs:  exhaustive ? SETUP_AWARE_EXHAUSTIVE_BUDGET_MS : SETUP_AWARE_NORMAL_BUDGET_MS,
       exhaustive,
@@ -1891,7 +1895,8 @@ export const OptimizerPreview = {
     PerfMonitor.record('Optimize.evaluate.primary', performance.now() - _evalPrimaryT0);
     // A reversed or unparseable window yields no proposal at all: say why instead of rendering an empty plan.
     if (candidate.status === 'invalid_horizon') {
-      throw new Error(candidate.explanation[0]?.message || Util.t('toast.opt_window_invalid'));
+      // The engine's English message stays in the diagnostics/logs; the planner reads the translated reason.
+      throw new Error(Util.t('toast.opt_horizon_invalid'));
     }
 
     // Post-KPIs are calculated from detached patched task values.
@@ -1994,6 +1999,9 @@ export const OptimizerPreview = {
             const altDeadlineAt = performance.now() + SETUP_AWARE_NORMAL_BUDGET_MS;
             const altEvaluation = session.run({
               runId: `optimizer-preview-${runSeq}-alt-${idx}`, mode: altMode, snapshot: candidateSnapshot,
+              // A relative budget, converted when the request is POSTED: with one worker an alternate queues behind the
+              // other, and a launch-time absolute deadline would leave it ~0 ms (the old serial path gave each a fresh budget).
+              deadlineDurationMs: SETUP_AWARE_NORMAL_BUDGET_MS,
               request: previewEvaluationRequest(altMode, { ...opts, searchBudgetMs: SETUP_AWARE_NORMAL_BUDGET_MS, exhaustive: false }, plant, altDeadlineAt),
             }, { signal, kpiOnly: true });
             return Promise.resolve(altEvaluation).then(value => ({ value }), error => ({ error }));
@@ -2720,8 +2728,9 @@ export const OptimizerPreview = {
       OptimizerPreview._clear();
       Modal.close('modal-opt-preview');
     }
-    await raiseToolInventory(plant, tool);
-    if (previewOpen) Toast.show(Util.t('toast.opt_tool_raise_closed'), 'info', 7000);
+    const raised = await raiseToolInventory(plant, tool);
+    // The preview is already closed; say so only when the planner actually went to Tool Inventory (not after a cancelled plant switch).
+    if (previewOpen && raised) Toast.show(Util.t('toast.opt_tool_raise_closed'), 'info', 7000);
   },
 
   /** Await an apply-tail promise and route a failure to ErrorLog, so it is never silent. */
@@ -2767,7 +2776,9 @@ export const OptimizerPreview = {
     const toolSummary = toolQueueSummary(candidate, kept);
     // No await when there is nothing to confirm: the commit stays synchronous exactly as before.
     if (toolSummary.queued.length) {
-      OptimizerPreview._applying = true;   // set before the await so a second Apply gesture cannot start a second commit
+      // Set before the await. It does not block a second Apply (apply() has no _applying check); it makes the task watch
+      // ignore the engine's own writes while this commit is under way (see the 'engine' guard in the task subscriber).
+      OptimizerPreview._applying = true;
       // The confirm is async and a planner can still edit tasks behind it: remember what the kept patches' orders looked
       // like, and refuse to commit if any of them changed (or vanished) before the answer arrived.
       const before = taskBaseline(kept.map(patch => Store.tasks[String(patch.id)]).filter((task): task is NimbusTask => !!task));
@@ -2860,7 +2871,8 @@ export const OptimizerPreview = {
     UndoStack.push(`Optimization (${mode})${plant ? ' · ' + plant : ''}`,
       () => UndoStack.restoreTasks(snap), snap.map(t => t.id));
     Toast.show(Util.t('toast.opt_applied'), 'success');
-    // Fire warning toasts — matching the warning toasts the old live apply tail fired
+    // Fire warning toasts, the same set the deleted live apply tail fired (missing setup, needs planning, left in place,
+    // distribution separation, guarded lines).
     if (OptimizerPreview._explanation) {
       const { scheduledWithoutSetup, unplacedOrders } = OptimizerPreview._explanation;
       if (scheduledWithoutSetup.orders && !OptimizerPreview._syntheticSetup) {
@@ -2879,6 +2891,12 @@ export const OptimizerPreview = {
           lines: unplacedOrders.lines,
         }), 'warn');
       }
+    }
+    // Sub-order distribution separation (SAP aggregate work center -> per-machine sub-orders): parents whose siblings
+    // landed in different calendar buckets. A scheduling-outcome fact, not a setup-data one, so not gated on synthetic setup.
+    const distributionSeparationCount = candidate.validationFindings?.filter(finding => finding.code === 'distribution_separation').length ?? 0;
+    if (distributionSeparationCount) {
+      Toast.show(Util.t('toast.optimize_distribution_separation', { parents: distributionSeparationCount }), 'warn');
     }
     if (candidate.unchangedLines.length) {
       Toast.show(Util.t('toast.optimize_lines_guarded', { count: candidate.unchangedLines.length }), 'warn');
@@ -3568,7 +3586,8 @@ export const SandboxAdapter = {
       // Diff the pre-sandbox snapshot to also propagate blackouts DELETED in-session,
       // so a delete-then-promote doesn't resurrect the block on next hydration. (F3)
       // Include every plant touched by the trial, not just the plant selected at
-      // promote time: plant selection remains editable while What-If is active.
+      // promote time. A header plant switch now ends the trial (P0-20), so this is normally just the plant the trial
+      // started in plus whatever its changes touched; the add stays as a safety net.
       if (Store.selectedPlant) affectedPlants?.add(Store.selectedPlant);
       for (const plant of affectedPlants || []) {
         // Store._state.blocks/.plantBlocks direct touch — deliberate, out of scope
