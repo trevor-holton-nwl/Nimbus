@@ -780,11 +780,12 @@ test('P2-4: applyPartial (Apply what still fits) scopes Undo to the surviving ke
   }
 });
 
-test('P2-4: the Undo stack still holds at most 10 entries', () => {
+test('P2-4: the Undo stack holds at most MAX (50) entries and evicts the oldest', () => {
   const prior = UndoStack._entries.slice();
   UndoStack._entries.length = 0;
   try {
-    for (let i = 0; i < 12; i++) UndoStack.push(`e${i}`, () => {}, ['x']);
+    assert.equal(UndoStack.MAX, 50);
+    for (let i = 0; i < 52; i++) UndoStack.push(`e${i}`, () => {}, ['x']);
     assert.equal(UndoStack._entries.length, UndoStack.MAX);
     assert.equal(UndoStack._entries[0].label, 'e2');
   } finally { UndoStack._entries.length = 0; UndoStack._entries.push(...prior); }

@@ -2750,7 +2750,7 @@ window.__NIMBUS_LOCALES.pt = {
   'am.rank_n': 'Posição {{n}}',
   'am.group_fix_n': 'Mover {{n}} pedidos',
   'am.group_fix_n_one': 'Mover 1 pedido',
-  'am.group_fix_confirm': 'Mover {{n}} pedidos para fora do conflito agora? Desfazer mantém os últimos 10 movimentos.',
+  'am.group_fix_confirm': 'Mover {{n}} pedidos para fora do conflito agora? Desfazer mantém os últimos 50 movimentos.',
   'am.group_fix_done': '{{n}} pedidos movidos',
   'am.group_fix_done_one': '1 pedido movido',
   'am.group_ack_n': 'Reconhecer {{n}}…',

@@ -119,6 +119,8 @@ interface UndoEntry {
   at: number;
   /** Task ids this entry restores (optional; entries without ids are never invalidated). */
   ids?: string[];
+  /** Cloned task rows this entry holds (the unit of the stack's row budget). Defaults to ids.length, else 1. */
+  cost?: number;
 }
 
 // Two DI seams replace what used to be direct references from Store into modules
@@ -1231,18 +1233,34 @@ export const Store = {
 };
 
 /* =============================================================================
-   UNDO STACK — minimal, in-memory, destructive ops only (10 levels).
+   UNDO STACK — minimal, in-memory, destructive ops only (50 levels, 20,000-row budget).
    Used by drag-commits and unschedule actions in the Interaction module.
    ========================================================================== */
 export const UndoStack = {
-  MAX: 10,
+  MAX: 50,
+  /** Total cloned-row budget across the held stacks (a plant-wide optimizer entry or a What-If whole-board entry can
+   *  be thousands of rows). Oldest entries go first; the newest entry is always kept even if it alone exceeds this. */
+  MAX_ROWS: 20000,
   _entries: [] as UndoEntry[],
 
-  push(label: string, undoFn: UndoEntry['undoFn'], ids?: Iterable<string | number>): void {
+  /** Rows held across the given stacks: the sum of each entry's cost. */
+  rowCount(...stacks: UndoEntry[][]): number {
+    let n = 0;
+    for (const st of stacks) for (const e of st) n += e.cost ?? e.ids?.length ?? 1;
+    return n;
+  },
+  /** Evict the oldest entries of `stack` while the TOTAL over `all` exceeds the budget; the newest entry stays. */
+  _enforceBudget(stack: UndoEntry[], all: UndoEntry[][] = [stack]): void {
+    while (stack.length > 1 && this.rowCount(...all) > this.MAX_ROWS) stack.shift();
+  },
+
+  push(label: string, undoFn: UndoEntry['undoFn'], ids?: Iterable<string | number>, opts?: { cost?: number }): void {
     const entry: UndoEntry = { label, undoFn, at: Date.now() };
     if (ids) entry.ids = [...ids].map(String);
+    entry.cost = opts?.cost ?? entry.ids?.length ?? 1;
     this._entries.push(entry);
     if (this._entries.length > this.MAX) this._entries.shift();
+    this._enforceBudget(this._entries);
     Store.emit({ type: 'undo:pushed', label });
   },
   /** Drop every entry whose ids intersect `ids` (D31): after a server-side
@@ -1304,6 +1322,10 @@ export const UndoStack = {
     // `firmed` is deliberately NOT restored: the manual firm is a separate planner edit that
     // only setFirmed/replaceFirmedIds may change (they mark it firm-dirty). Restoring it here
     // flipped a firm without a marker, so the save sent no FIRMED and the UI diverged from the server.
+    // A row removed since the snapshot (plant switch, purge, scenario-created row) cannot be restored: updateMany would
+    // skip it but still emit its id, and the dirty tracker would count a phantom unsaved id.
+    snapshot = snapshot.filter(s => Store.tasks[s.id] != null);
+    if (!snapshot.length) return;
     const patches = snapshot.map(s => {
       const { firmed: _firmed, ...rest } = s;
       // OQ21: undo restores the FINISH. The restored start is only a placeholder, so the row is flagged stale and
@@ -1323,6 +1345,14 @@ export const UndoStack = {
     }
   },
 };
+
+// A wholesale task load (plant switch, reload, What-If discard) replaces every row: the held snapshots no longer
+// describe the board, and the dirty/baseline sets are reset by the same event. Every tasks:bulk emitter was audited
+// (Persistence.load and friends, Sandbox discard / plant-switch exit, headless hydrate): none pushes an entry and THEN
+// emits tasks:bulk. Sandbox.exit(true) pushes without any setTasks. Time Machine restore uses updateMany, not tasks:bulk.
+Store.subscribe(evt => {
+  if (evt.type === 'tasks:bulk') UndoStack._entries.length = 0;
+}, 'UndoStack.clearOnBulk');
 
 // Snapshot attached to error-level ErrorLog entries (ctx.state.platform).
 try {

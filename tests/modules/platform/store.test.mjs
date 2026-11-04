@@ -179,9 +179,62 @@ test('Store.siblingsByParent reflects Store.removeTask (in-place splice, caught 
   Store.setSelectedPlant(priorPlant, 'unit-test');
 });
 
-test('UndoStack.push caps at MAX(10) entries', () => {
+test('UndoStack.push caps at MAX (50) entries, oldest evicted', () => {
+  UndoStack._entries = [];
+  assert.equal(UndoStack.MAX, 50);
   for (let i = 0; i < 12; i++) UndoStack.push(`entry-${i}`, () => {});
-  assert.ok(UndoStack._entries.length <= UndoStack.MAX);
+  assert.equal(UndoStack._entries.length, 12, 'the old cap of 10 is gone');
+  for (let i = 12; i < 60; i++) UndoStack.push(`entry-${i}`, () => {});
+  assert.equal(UndoStack._entries.length, 50);
+  assert.equal(UndoStack._entries[0].label, 'entry-10');
+  assert.equal(UndoStack._entries.at(-1).label, 'entry-59');
+  UndoStack._entries = [];
+});
+
+test('UndoStack row budget: cost defaults to ids.length (or 1), oldest evicted, newest always kept', () => {
+  UndoStack._entries = [];
+  const B = UndoStack.MAX_ROWS;
+  assert.equal(B, 20000);
+  UndoStack.push('noids', () => {});
+  assert.equal(UndoStack._entries[0].cost, 1);
+  UndoStack.push('three', () => {}, ['a', 'b', 'c']);
+  assert.equal(UndoStack._entries[1].cost, 3);
+  UndoStack.push('explicit', () => {}, ['a'], { cost: 7 });
+  assert.equal(UndoStack._entries[2].cost, 7);
+  assert.equal(UndoStack.rowCount(UndoStack._entries), 11);
+  UndoStack._entries = [];
+  UndoStack.push('old1', () => {}, ['a'], { cost: 9000 });
+  UndoStack.push('old2', () => {}, ['a'], { cost: 9000 });
+  UndoStack.push('big', () => {}, ['a'], { cost: 5000 });   // 23000 > 20000: oldest goes
+  assert.deepEqual(UndoStack._entries.map(e => e.label), ['old2', 'big']);
+  UndoStack.push('huge', () => {}, ['a'], { cost: B + 5 });  // alone over budget: everything older goes, newest stays
+  assert.deepEqual(UndoStack._entries.map(e => e.label), ['huge']);
+  UndoStack._entries = [];
+});
+
+test('tasks:bulk clears the undo stack (plant switch / reload / What-If discard)', () => {
+  UndoStack._entries = [];
+  UndoStack.push('a', () => {}, ['x']);
+  Store.setTasks([{ id: 'bulk1' }], 'persistence');
+  assert.equal(UndoStack._entries.length, 0);
+  UndoStack.push('b', () => {}, ['x']);
+  Store.updateTask('bulk1', { RUN_TIME: '3' }, 'unit-test');   // task:update is not a bulk load
+  assert.equal(UndoStack._entries.length, 1);
+  UndoStack._entries = [];
+});
+
+test('restoreTasks drops ids no longer in the Store: no event, no phantom ids', () => {
+  Store.setTasks([{ id: 'live1', RUN_TIME: '2' }], 'unit-test');
+  const gone = { id: 'gone1', RUN_TIME: '5' };
+  const events = [];
+  const off = Store.subscribe(evt => { if (evt.type === 'tasks:bulkUpdate') events.push(evt); });
+  UndoStack.restoreTasks([gone]);
+  assert.equal(events.length, 0, 'nothing left to restore: no emit');
+  UndoStack.restoreTasks([gone, { id: 'live1', RUN_TIME: '9' }]);
+  off();
+  assert.equal(events.length, 1);
+  assert.deepEqual(events[0].ids.map(String), ['live1']);
+  assert.equal(Store.tasks['gone1'], undefined);
 });
 
 test('UndoStack.push emits undo:pushed with the entry label', () => {

@@ -2993,7 +2993,7 @@ window.__NIMBUS_LOCALES.en = {
   'am.rank_n': 'Rank {{n}}',
   'am.group_fix_n': 'Move {{n}} orders',
   'am.group_fix_n_one': 'Move 1 order',
-  'am.group_fix_confirm': 'Move {{n}} orders out of conflict now? Undo keeps the last 10 moves.',
+  'am.group_fix_confirm': 'Move {{n}} orders out of conflict now? Undo keeps the last 50 moves.',
   'am.group_fix_done': '{{n}} orders moved',
   'am.group_fix_done_one': '1 order moved',
   'am.group_ack_n': 'Acknowledge {{n}}…',

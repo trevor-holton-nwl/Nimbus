@@ -328,7 +328,7 @@ reassignments the design doc calls out by name:
 
 - **`{ type: 'undo:pushed', label }`** — a new `Store` event emitted at the
   end of `UndoStack.push(label, undoFn)` (`schedule-state.mjs`), right after
-  the entry is appended and the MAX(10) trim runs. `TimeMachine.init()`
+  the entry is appended and the MAX(50) trim runs. `TimeMachine.init()`
   (`nimbus-intelligence.js`) used to do `const origPush =
   UndoStack.push.bind(UndoStack); UndoStack.push = (label, undoFn) => {
   origPush(label, undoFn); TimeMachine._snapshotAuto(label); };` — reassigning

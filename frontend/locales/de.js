@@ -2790,7 +2790,7 @@ window.__NIMBUS_LOCALES.de = {
   'am.rank_n': 'Rang {{n}}',
   'am.group_fix_n': '{{n}} Aufträge verschieben',
   'am.group_fix_n_one': '1 Auftrag verschieben',
-  'am.group_fix_confirm': '{{n}} Aufträge jetzt aus dem Konflikt verschieben? Rückgängig umfasst die letzten 10 Verschiebungen.',
+  'am.group_fix_confirm': '{{n}} Aufträge jetzt aus dem Konflikt verschieben? Rückgängig umfasst die letzten 50 Verschiebungen.',
   'am.group_fix_done': '{{n}} Aufträge verschoben',
   'am.group_fix_done_one': '1 Auftrag verschoben',
   'am.group_ack_n': '{{n}} quittieren…',
