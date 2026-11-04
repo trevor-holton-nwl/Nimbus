@@ -133,3 +133,19 @@ test('a server row flagged runtime_schedule_mismatch gets no baseline from a loa
   Persistence._refreshTasks(['A']); await tick();
   assert.equal(Persistence._savedBaseline.has('A'), false, 'a refreshed stale-flagged row gets none either');
 });
+
+test('settleRestored clears a stale move note THROUGH the Store (views refresh) with a source the dirty tracker skips', t => {
+  fixture(t);
+  Store.setTasks([Persistence._prepTask(rowFor('A'))], 'persistence');
+  Persistence._recordBaseline('A', 1, keyOf('A'));
+  const same = new Date('2026-10-01T08:00:00');
+  Store.tasks.A.systemMove = { from: same, to: new Date(same), reason: 'reversal' };
+  Persistence._dirtyIds.add('A');
+  const events = [];
+  const off = Store.subscribe(evt => { if (evt.type === 'tasks:bulkUpdate' || evt.type === 'task:update') events.push(evt); });
+  try { Persistence.settleRestored(['A']); } finally { off(); }
+  assert.equal(Store.tasks.A.systemMove, null);
+  assert.equal(events.length, 1, 'one emit so Gantt / Inspector repaint');
+  assert.equal(events[0].source, 'engine-runtime-reconcile-display');
+  assert.equal(Persistence._dirtyIds.has('A'), false, 'the display-only write does not dirty the settled row');
+});

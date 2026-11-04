@@ -348,6 +348,7 @@ export const Persistence = {
   settleRestored(ids: Iterable<string>): void {
     if (Sandbox.active || Persistence._saveInFlight) return;
     let settled = false;
+    const displayPatches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
     for (const raw of ids) {
       const id = String(raw);
       if (!Persistence._dirtyIds.has(id)) continue;
@@ -361,12 +362,16 @@ export const Persistence = {
       Persistence.discardDirty(id);
       Persistence._dirtySource.delete(id);
       // Session notes that describe a move to the very place the row now sits are stale.
+      const cleared: Partial<NimbusTask> = {};
       for (const note of ['systemMove', 'derivationIssue'] as const) {
         const n = live[note] as { from?: Date; to?: Date } | null | undefined;
-        if (n?.from instanceof Date && n?.to instanceof Date && n.from.getTime() === n.to.getTime()) live[note] = null;
+        if (n?.from instanceof Date && n?.to instanceof Date && n.from.getTime() === n.to.getTime()) cleared[note] = null;
       }
+      if (Object.keys(cleared).length) displayPatches.push({ id, changes: cleared });
       settled = true;
     }
+    // Through the Store so Gantt / Inspector repaint; the display source is skipped by the dirty tracker.
+    if (displayPatches.length) Store.updateMany(displayPatches, 'engine-runtime-reconcile-display');
     if (settled) { Persistence._syncUnsaved(); Persistence._autosave(); }
   },
   _syncUnsaved(): void {
