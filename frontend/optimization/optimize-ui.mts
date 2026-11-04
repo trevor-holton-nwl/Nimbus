@@ -1847,7 +1847,8 @@ export const OptimizerPreview = {
       if (s == null) return false;
       const e = Util.scheduledEnd(t);
       const eMs = e ? e.getTime() : s;
-      return eMs >= winStart && s <= winEnd;
+      // Strict overlap of [s, eMs) with [winStart, winEnd): an order that only touches a window edge is out of scope.
+      return s < winEnd && eMs > winStart;
     };
 
     // Evaluate the established placement algorithm against a detached read

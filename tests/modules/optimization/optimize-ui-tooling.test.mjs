@@ -735,3 +735,23 @@ test('P4-3: _markTaskStale inserts the banner under the header without calling _
     OptimizerPreview._render = priorRender; OptimizerPreview.stale = priorStale; els.delete('opt-preview-body');
   }
 });
+
+test('P4-3 (V-U2-09): KPI scope is a strict overlap with the window; an order that only touches an edge is out', async () => {
+  const plant = 'TQ-KPI';
+  setMd(plant, 'off', undefined);
+  const at = (h) => new Date(2026, 7, 10, h);
+  const row = (id, s, e) => ({ ...previewTask(id, plant, 1), start_date: s, end_date: e });
+  const f = openPreview(plant, [previewTask('kp-seed', plant, 1)]);
+  try {
+    Store.setTasks([
+      row('kp-before', at(6), at(8)),    // ends exactly at the window start: out
+      row('kp-after', at(16), at(18)),   // starts exactly at the window end: out
+      row('kp-in', at(7), at(9)),        // overlaps the start edge: in
+      row('kp-inside', at(10), at(12)),  // inside: in
+    ], 'unit-test');
+    const result = await OptimizerPreview.computePreview('spt', {
+      plant, respectCalendar: false, startDate: at(8), endDate: at(16), now: at(8),
+    }, { tick: async () => {}, runSeq: 99 });
+    assert.equal(result.explanation.impact.production.before, 2, 'only the two overlapping orders are in the KPI window');
+  } finally { f.restore(); }
+});
