@@ -722,9 +722,14 @@ export const Persistence = {
         let restoredDirtyIds: string[] = [];
         // Undo-settle baseline: the server row's own edit key, taken BEFORE the cache overlay touches it.
         const serverKeys = new Map<string, string>();
+        // Normalized on a SHALLOW CLONE with no id: the real row must keep its original flow (overlay first, then
+        // setTasks normalizes), and _normalizeDates writes Store.firmedIds for any row that carries an id.
         for (const t of tasks) {
-          Store._normalizeDates(t);
-          serverKeys.set(String(t.id), Persistence._baselineKey(Persistence._taskEditSnapshot(t)));
+          const { id, ...rest } = t;
+          const probe = rest as NimbusTask;
+          Store._normalizeDates(probe);
+          probe.id = String(id);
+          serverKeys.set(String(id), Persistence._baselineKey(Persistence._taskEditSnapshot(probe)));
         }
         if (!discardLocalEdits && cacheData?.tasks?.length) {
           const optimizerIds = new Set<string>(cacheData._optimizerDirtyIds ?? []);

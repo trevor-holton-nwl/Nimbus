@@ -104,3 +104,18 @@ test('settleRestored un-dirties only a row that equals its baseline at the same 
   assert.equal(Persistence._dirtySource.has('A'), false);
   assert.equal(Persistence._dirtyIds.has('B'), true);
 });
+
+test('load keeps its original order: a row from an older server (no planning_status) is overlaid BEFORE it is normalized, so the overlaid cached dates are still snapped', async t => {
+  fixture(t);
+  const old = id => rowFor(id, { planning_status: undefined });
+  Store.setTasks([Persistence._prepTask(old('A'))], 'persistence');
+  Store.updateTask('A', { start_date: new Date('2026-10-01T12:07:00'), end_date: new Date('2026-10-01T15:07:00') }, 'table');
+  Store.tasks.A.planning_status = undefined;
+  Persistence._dirtyIds.add('A'); Persistence._saveCache();
+  t.mock.method(Util, 'fetchTraced', async url => ({ ok: true, json: async () =>
+    url.includes('/tasks?') ? { data: [old('A')], meta: {}, links: [] } : url.endsWith('/system-settings') ? {} : { rows: [] } }));
+  await Persistence.load({ plant: 'P' }); await tick();
+  assert.equal(Store.tasks.A.start_date.getHours(), 12, 'precondition: the cached edit was overlaid');
+  assert.equal(Store.tasks.A.start_date.getMinutes() % 15, 0, 'setTasks snapped the overlaid dates, as before the baseline change');
+  assert.equal(Store.tasks.A.planning_status, 'scheduled');
+});
