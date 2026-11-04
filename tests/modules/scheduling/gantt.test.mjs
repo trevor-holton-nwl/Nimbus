@@ -4770,6 +4770,38 @@ test('Interaction.promptMoveBy: cancel does nothing; a pick applies the delta', 
   } finally { Modal.choose = priorChoose; fx.restore(); restoreClock(); }
 });
 
+// Regression: the header unsaved badge became a <button>; focus left on it (or Save) swallowed Ctrl+Z.
+test('Undo/Redo chords act with a plain button focused; text fields and dropdowns still ignore', () => {
+  const priorActive = Timeline._ganttActive;
+  const priorUndo = UndoStack.pop, priorRedo = UndoStack.popRedo;
+  const priorEntries = UndoStack._entries, priorRedoStack = UndoStack._redo;
+  const calls = [];
+  UndoStack.pop = () => { calls.push('undo'); return null; };
+  UndoStack.popRedo = () => { calls.push('redo'); return null; };
+  Timeline._ganttActive = () => true;
+  try {
+    UndoStack._entries = [{ label: 'u', undoFn() {}, at: 0 }];
+    UndoStack._redo = [{ label: 'r', undoFn() {}, at: 0 }];
+    const press = (target, over) => {
+      Interaction._onKeyDown({ key: 'z', ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, defaultPrevented: false, target, preventDefault() {}, ...over });
+    };
+    for (const target of [{ tagName: 'BODY' }, { tagName: 'DIV' }, { tagName: 'BUTTON', id: 'schedule-unsaved' }, { tagName: 'BUTTON', id: 'save' }]) {
+      const t = { closest: () => null, ...target };
+      calls.length = 0;
+      press(t, { ctrlKey: true });
+      press(t, { ctrlKey: true, shiftKey: true, key: 'Z' });
+      press(t, { ctrlKey: true, key: 'y' });
+      assert.deepEqual(calls, ['undo', 'redo', 'redo'], target.tagName + ' ' + (target.id || ''));
+    }
+    calls.length = 0;
+    for (const tagName of ['INPUT', 'TEXTAREA', 'SELECT']) press({ tagName, closest: () => null }, { ctrlKey: true });
+    assert.deepEqual(calls, [], 'text fields and dropdowns keep Ctrl+Z');
+  } finally {
+    Timeline._ganttActive = priorActive; UndoStack.pop = priorUndo; UndoStack.popRedo = priorRedo;
+    UndoStack._entries = priorEntries; UndoStack._redo = priorRedoStack;
+  }
+});
+
 // Redo keys (Stage 3): Ctrl/Cmd+Shift+Z everywhere, Ctrl+Y on Windows/Linux only; the Undo key is unchanged.
 test('Redo keys: Ctrl/Cmd+Shift+Z and Ctrl+Y redo, Ctrl+Z undoes, Ctrl+Shift+Z is never an Undo', () => {
   const priorActive = Timeline._ganttActive;

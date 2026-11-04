@@ -2943,10 +2943,11 @@ export function bulkTouchesExpandedLine(
 
 /** True when a global Gantt shortcut must not act on this keydown target: text fields, dropdowns, buttons and
  *  combobox widgets own their own keys (arrows, Delete, F), so the Gantt handler stays out of their way. */
-export function shortcutTargetIgnored(t: { tagName?: string; isContentEditable?: boolean; getAttribute?: (n: string) => string | null } | null | undefined): boolean {
+export function shortcutTargetIgnored(t: { tagName?: string; isContentEditable?: boolean; getAttribute?: (n: string) => string | null } | null | undefined, opts?: { allowButton?: boolean }): boolean {
   if (!t) return false;
   const tag = t.tagName || '';
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'BUTTON') return true;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  if (tag === 'BUTTON' && !opts?.allowButton) return true;
   if (t.isContentEditable) return true;
   return typeof t.getAttribute === 'function' && t.getAttribute('role') === 'combobox';
 }
@@ -6517,9 +6518,12 @@ export const Interaction = {
       return;
     }
     // Ignore when typing in inputs; dropdowns and buttons keep their own keys (arrows, Delete, F).
-    if (shortcutTargetIgnored(e.target as HTMLElement | null)) return;
-
+    // Undo/Redo chords still act with a plain button focused (the header badge or Save keeps focus after a click or
+    // after the unsaved dialog closes); a button has no Ctrl+Z of its own.
     const mod = e.metaKey || e.ctrlKey;
+    const zy = typeof e.key === 'string' ? e.key.toLowerCase() : '';
+    const historyChord = mod && !e.altKey && (zy === 'z' || (zy === 'y' && e.ctrlKey && !e.shiftKey));
+    if (shortcutTargetIgnored(e.target as HTMLElement | null, { allowButton: historyChord })) return;
 
     // Save and Escape stay global; Undo, Delete, F and arrow navigation act only while the Gantt tab is showing.
     const onGantt = Timeline._ganttActive();
