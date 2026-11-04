@@ -17,7 +17,7 @@
 // two-way ESM cycle with that module (see optimization/engine.mjs's header
 // comment for the full mechanics) — `Alerts.applyFix`'s auto-fix action
 // calls `Engine.splitOrderPolicyFor`/`schedulePatchFor`/`autoReflow`/
-// `runAndApply`, while Engine's own `runAndApply`/`autoReflow`/
+// `evaluateSchedule`, while Engine's own `applySchedulePatches`/`autoReflow`/
 // `reconcileRuntimeSchedules` call `Alerts.clearDismissed`/
 // `scheduleRecompute`/`scheduleRecomputeLines`/`scheduleAlertsForPatches`
 // (this file). This dependency predates this phase (sibling top-level
@@ -674,7 +674,7 @@ export const Compute = (() => {
 // them when called, well after module evaluation completes.
 const _ALERTS_MIN_DEBOUNCE_MS = 90;
 const _ALERTS_MAX_DEBOUNCE_MS = 500;
-/** What the live `Engine.runAndApply` tail told the planner after an apply, restated for the detached overload fix so
+/** What the (since deleted) live `Engine.runAndApply` tail told the planner after an apply, restated for the detached overload fix so
  *  the move to a detached candidate drops nothing: orders placed without a setup transition, distribution siblings
  *  separated, orders queued/left unplaced (Needs Planning, with the tooling share) and lines left guarded. The Needs
  *  Planning toast shows even for a quiet batch (a queued order is the one outcome the planner must not miss); the other
@@ -1046,7 +1046,7 @@ export const Alerts = {
       }
       if (toolQueueSummary(candidate, candidate.patches).queued.length && !(await confirmToolQueue(candidate, candidate.patches))) return false;
       // Undo scope, taken AFTER the evaluate and the confirm and right before the apply: a SUPERSET of what the optimizer
-      // can move. The line-day part is every task on this line that runAndApply would NOT treat as aged/out-of-window (its
+      // can move. The line-day part is every task on this line that the detached evaluator (`Engine._evaluateDetached`) would NOT treat as aged/out-of-window (its
       // free-set predicate, null-dated tasks included; keying on dayKey(start) missed cross-midnight orders). The UNION
       // with the candidate's own patch ids covers a patch outside that filter (e.g. a distribution sibling on another
       // line), so Undo restores exactly what the apply touched.
@@ -1108,7 +1108,7 @@ export const Alerts = {
 };
 
 /** Phase 3 (Pkg E): shared post-apply alert-recompute scoping for optimizer
- *  patches (used by both Engine.runAndApply's setup-aware branch and
+ *  patches (used by both the detached evaluateSchedule/applySchedulePatches path and
  *  OptimizerPreview.apply). The optimizer only ever shifts dates within a
  *  line — never moves a task across lines/machines — which is exactly the
  *  invariant scheduleRecomputeLines' doc comment above requires of its

@@ -1038,7 +1038,7 @@ export const Plant = {
       const label = Util.t(`constraint.${f.field_key}`);
       // The "not yet used in sequencing" badge that used to render here for every
       // non-colorWheel field was removed once Stage 3 wired ALL FOUR registered
-      // fields into Engine._sortTerms (docs/scheduling_priority.md Stage 3) — it had
+      // fields into the optimizer ordering (docs/scheduling_priority.md Stage 3) — it had
       // become a false statement on the very screen where an admin configures the
       // field. Deliberately removed rather than reworded: whether this card should
       // instead carry a "verify your coverage" caution is a separate copy decision.
@@ -2145,7 +2145,7 @@ export const Plant = {
       if (!seqPanelEl) return;
       // flattenConstraints reads the plant's PERSISTED tree
       // (Store.masterData.plants[*].constraints) — the very same source
-      // Engine._sortTerms ranks from. That is deliberate: this panel states
+      // the evaluator ranks from (rankForTask). That is deliberate: this panel states
       // what the optimizer would do right now, not what an unsaved edit hopes
       // for. saveConstraints() re-renders it the moment a write is confirmed
       // (and reverts the whole tree if the write fails), so it converges
@@ -2406,8 +2406,8 @@ export const Plant = {
       // toggles work regardless, since enabling a field with no list is a
       // harmless no-op: every rank lookup just returns 999999).
       //
-      // Stage 3: reads the same Store.priorityRankMaps that Engine._sortTerms
-      // ranks from, via the shared Engine.hasPriorityRanks, instead of the old
+      // Stage 3: reads the same Store.priorityRankMaps that the evaluator
+      // (rankForTask) ranks from, via the shared Engine.hasPriorityRanks, instead of the old
       // plant-wide-only `GET /color-wheel/{plant}` probe. Two reasons: this hint
       // and OptimizeDialog's badge / pre-Run confirm were two independent
       // readings of "does this plant have a list" that could disagree, and the

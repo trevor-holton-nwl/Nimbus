@@ -188,7 +188,7 @@ export interface ConstraintConfig {
   /** Stage 3: a field nested under a field is mathematically identical to the
    *  next key in a lexicographic sort (docs/scheduling_priority.md "Sub-sort
    *  model" decision) — Engine.flattenConstraints (Task 4) turns this into the
-   *  same flat key list _sortTerms already consumes. Purely additive: cached
+   *  same flat key list the evaluator (policyKeyForTask) already consumes. Purely additive: cached
    *  `plants` rows with no `children` still parse as leaf nodes, so this is
    *  NOT a SCHEMA_VERSION bump (N17). */
   children?: ConstraintConfig[];
@@ -197,7 +197,7 @@ export interface ConstraintConfig {
 /** {machine_or_empty: {field_key: {NORMALIZED_VALUE: RANK}}} — matches
  *  brain.PLANT_LISTS' native shape verbatim (GET /priority-rank-maps does no
  *  reshaping, since it's on the optimizer's hot path). Machine-first because
- *  Engine._sortTerms' per-task term resolves "this order's machine, else
+ *  the evaluator's per-task rankForTask resolves "this order's machine, else
  *  plant-wide" before it knows which field it's looking up. */
 export type PriorityRankMaps = Record<string, Record<string, Record<string, number>>>;
 

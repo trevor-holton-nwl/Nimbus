@@ -68,7 +68,7 @@ export function serializeOptimizerValidation(
   const context = candidate.validationContext;
   if (!context) return undefined;
   const { bounds, snapshot } = context;
-  // `ignorePlantWindow` and `ignoreToolRule` are set only by Remove Backlog (engine.runAndApply). They ARE serialized: the
+  // `ignorePlantWindow` and `ignoreToolRule` are set only by Remove Backlog (the Remove Backlog path). They ARE serialized: the
   // headless backlog step (Jobs W4b) re-validates at apply time from this descriptor, and without them the validator would
   // enforce the plant window and the tool rule that Backlog is exempt from and drop its patches. The tooling rule and the inventory are NEVER carried in bounds: the validator re-derives both from
   // `snapshot.masterData` (Tool Inventory Wave 6), and `toolPass` on the candidate says the overflow pass has run.

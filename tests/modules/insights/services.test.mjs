@@ -32,7 +32,7 @@ import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
 const require = createRequire(import.meta.url);
 globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
 
-// Engine.autoReflow/runAndApply's early-return guards call Toast.show(Util.t(...)) —
+// Engine.autoReflow/evaluateSchedule's early-return guards call Toast.show(Util.t(...)) —
 // platform/foundation.mjs's Toast/Util reference bare `window`/`document`, same
 // split-realm quirk documented in tests/modules/helpers/load-legacy-app.mjs. A
 // minimal stub (matching that harness's approach) keeps those guard paths a real
@@ -594,7 +594,7 @@ test('scheduleAlertsForPatches still scopes to lines when no moved task carries 
 
 // ---------------------------------------------------------------------------
 // effectiveFirmedIdSet -- the single fold the setup-aware branch of
-// runAndApply uses to decide which orders are immovable for a run, and the
+// Engine._evaluateDetached uses to decide which orders are immovable for a run, and the
 // bugfix pinned here: respectFirmed gates manual firms only; SAP's firm flag never
 // locks (2026-10-27), and the running/frozen fold is unconditional.
 // ---------------------------------------------------------------------------
