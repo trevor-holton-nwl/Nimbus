@@ -6894,6 +6894,30 @@ test('P0-8: a failed placement after an unknown-predecessor admission leaves no 
   assert.equal(result.missingEdges.some(edge => edge.reason === 'initial-state-unknown' && edge.successorOrderId === 'p08-big'), false);
 });
 
+test('master-data line lookup keys plant and machine unambiguously', () => {
+  // Plant "P1" + machine "L 1" and plant "P1 L" + machine "1" both flattened to "P1 L 1" under a space-joined key, so
+  // the lookalike's setup_compatible:false (listed first) was applied to the real line.
+  const only = { ...scheduledTask('key-blue', 1, 'BLUE', '2026-08-03T10:00:00'), MACHINE: 'L 1' };
+  const snapshot = setupSnapshot([only]);
+  snapshot.calendars = { 'L 1': { workHours: OPEN_HOURS } };
+  snapshot.masterData = {
+    plants: [{ plant: 'P1' }],
+    lines: [
+      { plant: 'P1 L', machine: '1', setup_compatible: false, setup_compatibility_reason: 'lookalike' },
+      { plant: 'P1', machine: 'L 1', setup_compatible: true },
+    ],
+  };
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 0)] });
+  setup.machine_states = [{ ...setup.machine_states[0], machine: 'L 1' }];
+  const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup));
+  assert.equal(result.missingEdges.some(edge => edge.reason === 'setup-compatibility-disabled'), false, 'the lookalike row must not disable line "L 1"');
+  assert.ok(patchFor(result, 'key-blue'));
+  // Control: the same line is disabled when its own row says so.
+  snapshot.masterData = { plants: [{ plant: 'P1' }], lines: [{ plant: 'P1', machine: 'L 1', setup_compatible: false, setup_compatibility_reason: 'real' }] };
+  const disabled = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup));
+  assert.ok(disabled.missingEdges.some(edge => edge.line === 'L 1' && edge.reason === 'setup-compatibility-disabled'));
+});
+
 test('P0-9: a setup-incompatible line emits no missing_setup finding or scheduled-without-setup edge', () => {
   const incompatible = scheduledTask('p09-blue', 1, 'BLUE', '2026-08-03T10:00:00');
   const snapshot = setupSnapshot([incompatible]);
