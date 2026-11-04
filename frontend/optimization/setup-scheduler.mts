@@ -8,7 +8,8 @@
 
 import type { RemoveBacklogResult } from './scheduler-contract.mjs';
 import {
-  MS_PER_MINUTE, PRIORITY_FIELD_DEFAULTS, capAwareSequence,
+  MS_PER_MINUTE, PRIORITY_FIELD_DEFAULTS, SCORE_HARD, SCORE_LATENESS, SCORE_LATE_COUNT, SCORE_OVER_CAP, SCORE_PATCHES,
+  SCORE_POLICY, SCORE_SETUP, SCORE_UNCOVERED, capAwareSequence, makeScore,
   plantSegmentFloor, plantSplitPolicy, plantToolingRule, plantUnknownSetupDefaultMinutes, plantUnknownSetupPolicy,
 } from './scheduler-contract.mjs';
 import { candidateAllDayWorkHours, candidateDefaultWorkHours, fitsMergedSpan } from '../calendar/calendar-engine.mjs';
@@ -883,44 +884,14 @@ export const SETUP_AWARE_CONVERGENCE_WINDOW = 2000;
  * its current dates, not dropped). */
 export const SETUP_AWARE_TAIL_OVERRUN_MS = 1000;
 
-/** Score index carrying the count of uncovered-but-admitted transitions in a
- * candidate (A2). Appended, never inserted: `score[5]` is read as setup-minute
- * savings elsewhere (`evaluateMinChangeover`/`selectThroughputCandidate`), so
- * renumbering would corrupt the min-changeover accept/reject decision.
- * Compared explicitly in `compareCandidate` immediately after `policyKey` —
- * never folded into the mode-permuted `terms` list — so it stays mode-
- * independent: fewest uncovered edges outranks every term except the over-cap
- * tier (SCORE_OVER_CAP), which sits just ahead of it (after `policyKey`) and is
- * a no-op for unprotected orders now that the push limit is hard. This ordering is
- * mode-independent EXCEPT for `'due-date'` (2026-09-09), whose dedicated
- * `compareDueDateCandidate` puts lateness (score[2]/score[3]) and even
- * `policyKey` itself ahead of both this tier and SCORE_OVER_CAP — see that
- * function. */
-const SCORE_UNCOVERED = 6;
-
-/** Score index carrying the count of over-cap orders in a candidate
- * (due-date push-forward limit, 2026-09-09): an order whose scheduled end
- * exceeds `bounds.notAfter(task)`. Appended, never inserted — same rule as
- * SCORE_UNCOVERED above. Compared in `compareCandidate` immediately after
- * `policyKey` and BEFORE the coverage tier (SCORE_UNCOVERED): on a plant with
- * no real matrix, coverage is effectively same-signature grouping, so the cap
- * must outrank it or a changeover saving could push an order arbitrarily far
- * past its cap. Null/absent `bounds.notAfter` means every candidate's
- * score[SCORE_OVER_CAP] is 0 — a provable no-op default. The ceiling is
- * HARD (an order past it is queued, never placed), so this term is also 0 for
- * every unprotected order; it can only count a protected/firmed order that
- * already sits past its ceiling. Kept for score-vector arity. Mode-independent
- * except for `'due-date'`, where `compareDueDateCandidate` still compares this
- * tier second (right after hard feasibility) but ahead of `policyKey` — see
- * that function's own comment. */
-const SCORE_OVER_CAP = 7;
-
 /** The canonical hard-infeasible score vector (`score[0] = 1`), now 8-wide so
  * every candidate — feasible or not — carries the same arity as `score[
  * SCORE_OVER_CAP]`. Arity is not type-enforced (`score` is `number[]`), so
  * this exists to keep every literal in one place rather than drifting. */
 function infeasibleScore(): number[] {
-  return [1, 0, 0, 0, 0, 0, 0, 0];
+  const score = makeScore();
+  score[SCORE_HARD] = 1;
+  return score;
 }
 
 /** The canonical zero (fully-neutral) 8-wide score vector — every
@@ -928,7 +899,7 @@ function infeasibleScore(): number[] {
  * now calls this instead, so widening the vector again means editing one
  * function rather than re-auditing every call site. */
 function zeroScore(): number[] {
-  return [0, 0, 0, 0, 0, 0, 0, 0];
+  return makeScore();
 }
 
 export interface PlanningDisposition {
@@ -3062,13 +3033,13 @@ function longestMergedSpanMs(windows: Iterable<{ s: number; e: number } | null>)
  * now sit ahead of `policyKey`, unlike every other mode where `policyKey`
  * comes first. */
 function compareDueDateCandidate(left: DueDateCandidate, right: DueDateCandidate): number {
-  const hardConstraintDelta = (left.score[0] ?? 0) - (right.score[0] ?? 0);
+  const hardConstraintDelta = (left.score[SCORE_HARD] ?? 0) - (right.score[SCORE_HARD] ?? 0);
   if (hardConstraintDelta) return hardConstraintDelta;
   const overCapDelta = (left.score[SCORE_OVER_CAP] ?? 0) - (right.score[SCORE_OVER_CAP] ?? 0);
   if (overCapDelta) return overCapDelta;
-  const lateCountDelta = (left.score[2] ?? 0) - (right.score[2] ?? 0);
+  const lateCountDelta = (left.score[SCORE_LATE_COUNT] ?? 0) - (right.score[SCORE_LATE_COUNT] ?? 0);
   if (lateCountDelta) return lateCountDelta;
-  const latenessDelta = (left.score[3] ?? 0) - (right.score[3] ?? 0);
+  const latenessDelta = (left.score[SCORE_LATENESS] ?? 0) - (right.score[SCORE_LATENESS] ?? 0);
   if (latenessDelta) return latenessDelta;
   const maxLatenessDelta = (left.maxLatenessMinutes ?? 0) - (right.maxLatenessMinutes ?? 0);
   if (maxLatenessDelta) return maxLatenessDelta;
@@ -3076,9 +3047,9 @@ function compareDueDateCandidate(left: DueDateCandidate, right: DueDateCandidate
   if (policyDelta) return policyDelta;
   const coverageDelta = (left.score[SCORE_UNCOVERED] ?? 0) - (right.score[SCORE_UNCOVERED] ?? 0);
   if (coverageDelta) return coverageDelta;
-  const patchesDelta = (left.score[4] ?? 0) - (right.score[4] ?? 0);
+  const patchesDelta = (left.score[SCORE_PATCHES] ?? 0) - (right.score[SCORE_PATCHES] ?? 0);
   if (patchesDelta) return patchesDelta;
-  const setupDelta = (left.score[5] ?? 0) - (right.score[5] ?? 0);
+  const setupDelta = (left.score[SCORE_SETUP] ?? 0) - (right.score[SCORE_SETUP] ?? 0);
   if (setupDelta) return setupDelta;
   return ordinalCompare(left.sequenceKey, right.sequenceKey);
 }
@@ -3109,7 +3080,7 @@ function compareCandidate(left: DueDateCandidate, right: DueDateCandidate,
   if (mode === 'min-changeover' || mode === 'spt') {
     return compareObjectiveFacts(fragmentObjectiveFacts(left), fragmentObjectiveFacts(right), mode);
   }
-  const hardConstraintDelta = (left.score[0] ?? 0) - (right.score[0] ?? 0);
+  const hardConstraintDelta = (left.score[SCORE_HARD] ?? 0) - (right.score[SCORE_HARD] ?? 0);
   if (hardConstraintDelta) return hardConstraintDelta;
   // Ordinal, not localeCompare: policyKey is zero-padded ASCII digits joined
   // by `|`/` ` (see `ordinalCompare`), and this comparison runs on every
@@ -3143,11 +3114,13 @@ function compareCandidate(left: DueDateCandidate, right: DueDateCandidate,
   // compareObjectiveFacts), while
   // Throughput may prefer setup savings and is constrained by its explicit
   // post-evaluation slip gate below.
-  const terms = mode === 'throughput' ? [5, 2, 3, 4] : [2, 3, 4, 5];
+  const terms = mode === 'throughput'
+    ? [SCORE_SETUP, SCORE_LATE_COUNT, SCORE_LATENESS, SCORE_PATCHES]
+    : [SCORE_LATE_COUNT, SCORE_LATENESS, SCORE_PATCHES, SCORE_SETUP];
   for (const index of terms) {
     const delta = (left.score[index] ?? 0) - (right.score[index] ?? 0);
     if (delta) return delta;
-    if (index === 3) {
+    if (index === SCORE_LATENESS) {
       const maxLatenessDelta = (left.maxLatenessMinutes ?? 0) - (right.maxLatenessMinutes ?? 0);
       if (maxLatenessDelta) return maxLatenessDelta;
     }
@@ -3541,18 +3514,23 @@ function candidateForSequence(
     }
   }
 
+  // Lower is better. The due-date objective intentionally remains ahead of
+  // admitted work and setup consumption; the sequence key is the final tie.
+  // score[SCORE_OVER_CAP] (due-date push-forward limit) and
+  // score[SCORE_UNCOVERED] (A2) are both compared in compareCandidate
+  // immediately after policyKey, ahead of every term below — over-cap first.
+  const score = makeScore();
+  score[SCORE_POLICY] = policyScore(snapshot, bounds.setup.plant, line, sequence, bounds.runContext);
+  score[SCORE_LATE_COUNT] = lateCount;
+  score[SCORE_LATENESS] = latenessMinutes;
+  score[SCORE_PATCHES] = -patches.length;
+  score[SCORE_SETUP] = setupMinutes;
+  score[SCORE_UNCOVERED] = uncoveredEdgeCount;
+  score[SCORE_OVER_CAP] = overCapCount;
   return {
     feasible: true,
     patches,
-    // Lower is better. The due-date objective intentionally remains ahead of
-    // admitted work and setup consumption; the sequence key is the final tie.
-    // score[SCORE_OVER_CAP] (due-date push-forward limit) and
-    // score[SCORE_UNCOVERED] (A2) are both compared in compareCandidate
-    // immediately after policyKey, ahead of every term below — over-cap first.
-    score: [
-      0, policyScore(snapshot, bounds.setup.plant, line, sequence, bounds.runContext), lateCount, latenessMinutes, -patches.length,
-      setupMinutes, uncoveredEdgeCount, overCapCount,
-    ],
+    score,
     policyKey: policyKeyForSequence(snapshot, bounds.setup.plant, line, sequence, bounds.runContext),
     sequenceKey: sequence.map(taskId).join('|'),
     admissionKey: admissionKey(snapshot, bounds, line, sequence, patches, fragment.end),
@@ -5898,7 +5876,7 @@ export function selectThroughputCandidate(
   const before = lateOrderFacts(snapshot.tasks, dueScope);
   const afterTasks = patchedTasksView(snapshot.tasks, candidate.patches);
   const after = lateOrderFacts(afterTasks, dueScope);
-  const savings = Math.max(0, (baseline.score[5] ?? 0) - (candidate.score[5] ?? 0));
+  const savings = Math.max(0, (baseline.score[SCORE_SETUP] ?? 0) - (candidate.score[SCORE_SETUP] ?? 0));
   const slips = [...after.entries()].flatMap(([id, fact]) => {
     const prior = before.get(id)?.end;
     return prior === null || prior === undefined || fact.end === null ? [] : [{ id, minutes: Math.max(0, fact.end - prior) }];
@@ -7653,12 +7631,12 @@ function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Reado
     ...actualMissing,
   ]);
   const objective = objectiveFactsForCandidate(snapshot, bounds, { ...result, missingEdges: finalMissingEdges });
-  score[0] = objective.hardErrors;
-  score[1] = [...orderedFinalByLine].reduce((sum, [line, lineTasks]) => sum + policyScore(snapshot, bounds.setup.plant, line, lineTasks, bounds.runContext), 0);
-  score[2] = objective.lateCount;
-  score[3] = objective.latenessMinutes;
-  score[4] = -objective.scheduledCount;
-  score[5] = objective.setupMinutes;
+  score[SCORE_HARD] = objective.hardErrors;
+  score[SCORE_POLICY] = [...orderedFinalByLine].reduce((sum, [line, lineTasks]) => sum + policyScore(snapshot, bounds.setup.plant, line, lineTasks, bounds.runContext), 0);
+  score[SCORE_LATE_COUNT] = objective.lateCount;
+  score[SCORE_LATENESS] = objective.latenessMinutes;
+  score[SCORE_PATCHES] = -objective.scheduledCount;
+  score[SCORE_SETUP] = objective.setupMinutes;
   score[SCORE_UNCOVERED] = objective.uncoveredEdges;
   score[SCORE_OVER_CAP] = objective.overCap;
   const diagnostics: SearchDiagnostics = {
@@ -7999,14 +7977,14 @@ function admissionKey(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<Due
 
 function fragmentObjectiveFacts(candidate: Readonly<DueDateCandidate>): ObjectiveFacts {
   return {
-    hardErrors: candidate.score[0] ?? 0,
+    hardErrors: candidate.score[SCORE_HARD] ?? 0,
     overCap: candidate.score[SCORE_OVER_CAP] ?? 0,
-    lateCount: candidate.score[2] ?? 0,
-    latenessMinutes: candidate.score[3] ?? 0,
+    lateCount: candidate.score[SCORE_LATE_COUNT] ?? 0,
+    latenessMinutes: candidate.score[SCORE_LATENESS] ?? 0,
     maxLatenessMinutes: candidate.maxLatenessMinutes ?? 0,
     uncoveredEdges: candidate.score[SCORE_UNCOVERED] ?? 0,
-    setupMinutes: candidate.score[5] ?? 0,
-    scheduledCount: Math.max(0, -(candidate.score[4] ?? 0)),
+    setupMinutes: candidate.score[SCORE_SETUP] ?? 0,
+    scheduledCount: Math.max(0, -(candidate.score[SCORE_PATCHES] ?? 0)),
     instabilityMinutes: candidate.instabilityMinutes ?? 0,
     productiveRuntimeKey: candidate.productiveRuntimeKey ?? '',
     productiveRuntimeMinutes: candidate.productiveRuntimeMinutes ?? 0,
