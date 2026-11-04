@@ -1295,6 +1295,9 @@ export const UndoStack = {
   /** Registered by the engine: true when the post-restore reconcile will process this (restored) row. Only such a
    *  row is flagged stale by restoreTasks, because only the reconcile ever clears the flag (U23). Null = every row. */
   willRederive: null as null | ((task: NimbusTask) => boolean),
+  /** Registered by the engine (platform cannot import Persistence): runs after afterRestore returned, with the restored
+   *  ids, so rows that provably equal their last saved state stop counting as unsaved. Not called by Time Machine. */
+  afterSettle: null as null | ((ids: string[]) => void),
   restoreTasks(snapshot: NimbusTask[]): void {
     // planning_reason is defaulted explicitly: a snapshot of a scheduled order may not
     // carry the key, and an undone Unschedule must not leave its reason behind.
@@ -1316,6 +1319,7 @@ export const UndoStack = {
     if (patches.length) {
       const wasDirty = new Set(snapshot.filter(s => UndoStack._wasDirty.has(s)).map(s => String(s.id)));
       UndoStack.afterRestore?.(patches.map(p => String(p.id)), wasDirty);
+      UndoStack.afterSettle?.(patches.map(p => String(p.id)));
     }
   },
 };
