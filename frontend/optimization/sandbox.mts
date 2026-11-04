@@ -111,7 +111,7 @@ export const Sandbox = {
         Store.replaceFirmedIds(new Set(snap.firmedIds), 'undo');
         Store.emit({ type: 'sandbox:reverted', source: 'undo', promoted });
         return true;
-      }, snap.tasks.map((t) => t.id));
+      }, snap.tasks.map((t) => t.id), { cost: Store.tasksArr.length });
     } else {
       // Discard: restore the pre-enter snapshot wholesale. Each replaceX() below
       // fires its own '<field>:replace' event (distinct from that field's normal

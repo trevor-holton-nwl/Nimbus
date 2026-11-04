@@ -89,6 +89,20 @@ test('undoing a promoted scenario re-syncs periods that exist only in the promot
   }
 });
 
+test('What-If discard clears the undo stack; Apply keeps its own entry (no tasks:bulk in the promote flow)', () => {
+  UndoStack._entries.length = 0;
+  Sandbox.exit(false);
+  Sandbox.enter();
+  UndoStack.push('pre-existing', () => {}, ['x']);
+  Sandbox.exit(false);   // discard -> setTasks(..., 'sandbox') -> tasks:bulk
+  assert.equal(UndoStack._entries.length, 0);
+  Sandbox.enter();
+  Sandbox.exit(true);    // apply -> pushes 'Discard What-If scenario', must survive
+  assert.equal(UndoStack._entries.length, 1);
+  assert.equal(UndoStack._entries[0].label, 'Discard What-If scenario');
+  UndoStack._entries.length = 0;
+});
+
 test('Sandbox.enter snapshots current state and flips active/mode', () => {
   Store.setTasks([{ id: 'sb1', RUN_TIME: '1' }], 'unit-test');
   assert.equal(Store.mode(), 'live');

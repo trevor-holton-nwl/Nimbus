@@ -3177,6 +3177,8 @@ UndoStack.willRederive = (task: NimbusTask): boolean => {
 };
 // F10: the snapshot records which rows already carried unsaved edits (the platform cannot see Persistence).
 UndoStack.dirtyProbe = (id: string): boolean => Persistence.isDirty(id);
+// An undo that returns a row to its last saved state clears its unsaved mark (Persistence.settleRestored).
+UndoStack.afterSettle = (ids: string[]): void => Persistence.settleRestored(ids);
 
 /**
  * Evaluate against the existing placement algorithm, but with its reads bound

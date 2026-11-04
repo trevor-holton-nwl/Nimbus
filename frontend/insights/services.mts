@@ -1061,7 +1061,7 @@ export const Alerts = {
       Store.setLastOptimize(new Date(), 'engine');
       Alerts.clearDismissed();
       Alerts.scheduleRecompute();
-      UndoStack.push(`Auto-fix overload ${line} ${day}`, () => UndoStack.restoreTasks(snap), snap.map(t => t.id));
+      UndoStack.push(`Auto-fix overload ${line} ${day}`, () => UndoStack.restoreTasks(snap), snap.map(t => t.id), { redo: true });
       Alerts.dismiss(alertId);
       reportOverloadFixTail(candidate, quiet);
       return true;

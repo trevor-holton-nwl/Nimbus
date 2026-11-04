@@ -1598,14 +1598,14 @@ export const Table = {
   _pushEditUndo(id: string, snap: NimbusTask[], kind: ManualEditKind): void {
     const task = Store.tasks[id];
     UndoStack.push(Util.t(MANUAL_EDIT_UNDO_KEY[kind], { order: (task && (task.text || task.ORDER)) || id }),
-                   () => UndoStack.restoreTasks(snap), [id]);
+                   () => UndoStack.restoreTasks(snap), [id], { redo: true });
   },
 
   /** One undo entry for a (PV, machine) pair write, mirroring the Gantt drop's "Move ..." entry. */
   _pushPairUndo(id: string, snap: NimbusTask[]): void {
     const task = Store.tasks[id];
     UndoStack.push(Util.t('undo.pair_override', { order: (task && (task.text || task.ORDER)) || id }),
-                   () => UndoStack.restoreTasks(snap), [id]);
+                   () => UndoStack.restoreTasks(snap), [id], { redo: true });
   },
 
   _onSelectionChanged(): void {

@@ -36,6 +36,7 @@ import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Calendar } from '../../../frontend/calendar/calendar-engine.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
+import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
 import { Toast, Util, Config, ErrorLog } from '../../../frontend/platform/foundation.mjs';
 import { App } from '../../../frontend/shell/application-shell.mjs';
 import { evaluateOptimizerWorkerRequest } from '../../../frontend/optimization/optimizer-worker.mjs';
@@ -4867,6 +4868,263 @@ describe('reconcile (finish-anchored)', () => {
       priorDirty.forEach(id => Persistence._dirtyIds.add(id)); priorForce.forEach(id => Persistence._forceIds.add(id));
       fx.restore();
     }
+  });
+
+  // Undo settles the unsaved count: a row that returns to its last saved state stops counting as unsaved.
+  describe('undo settles unsaved state', () => {
+    const SETTLE_SETS = ['_dirtyIds', '_forceIds', '_firmDirtyIds', '_conflictedIds', '_dirtySource', '_refreshRetry'];
+    function settleFx(extraRows = {}) {
+      const fx = recFixture();
+      const unsubscribe = Store.subscribe(evt => App._trackDirty(evt), 'settle-dirty');
+      const prior = SETTLE_SETS.map(k => [k, Persistence[k] instanceof Map ? new Map(Persistence[k]) : new Set(Persistence[k])]);
+      for (const k of SETTLE_SETS) Persistence[k].clear();
+      const badge = { hidden: true, textContent: '' };
+      const priorDoc = globalThis.document;
+      globalThis.document = { getElementById: id => (id === 'schedule-unsaved' ? badge : null) };
+      const priorUndo = UndoStack._entries.slice();
+      UndoStack._entries.length = 0;
+      const placed = (id, day, over = {}) => fx.task(id, { user_scheduled: true, runtime_schedule_mismatch: false, row_version: 3,
+        original_end_date: at(day, 17), start_date: at(day, 13), end_date: at(day, 17), ...over });
+      Store.setTasks([placed('s1', 24), placed('s2', 25), placed('s3', 26), ...Object.values(extraRows).map(f => f(placed))], 'unit-test');
+      // The server-sourced baseline a load / save / refresh would have recorded for these clean rows.
+      for (const t of Store.tasksArr) Persistence._recordBaseline(String(t.id), t.row_version, Persistence._baselineKey(Persistence._taskEditSnapshot(t)));
+      const ids = ['s1', 's2', 's3'];
+      const apply = (source = 'engine') => Store.updateMany(ids.map(id => ({ id, changes: { start_date: at(21, 7), end_date: at(21, 11) } })), source);
+      return {
+        fx, badge, ids, apply,
+        cleanup() {
+          unsubscribe();
+          for (const [k, v] of prior) {
+            Persistence[k].clear();
+            if (v instanceof Map) v.forEach((val, key) => Persistence[k].set(key, val)); else v.forEach(e => Persistence[k].add(e));
+          }
+          Persistence._savedBaseline.clear();
+          globalThis.document = priorDoc;
+          UndoStack._entries.length = 0; UndoStack._entries.push(...priorUndo);
+          fx.restore();
+        },
+      };
+    }
+
+    test('Apply 3 patches on a clean board then Undo: nothing unsaved, badge empty', () => {
+      const s = settleFx();
+      try {
+        const snapshot = UndoStack.snapshotTasks(s.ids);
+        s.apply();
+        assert.equal(Persistence._dirtyIds.size, 3, 'precondition: the Apply dirtied all three');
+        assert.equal(s.badge.hidden, false);
+        UndoStack.restoreTasks(snapshot);
+        assert.equal(Persistence._dirtyIds.size, 0);
+        assert.equal(Persistence._forceIds.size, 0);
+        assert.equal(Persistence._dirtySource.size, 0);
+        assert.equal(s.badge.hidden, true);
+        assert.equal(s.badge.textContent, '');
+        for (const id of s.ids) assert.equal(Store.tasks[id].runtime_schedule_mismatch, false);
+      } finally { s.cleanup(); }
+    });
+
+    test('a manual drag of a clean placed row then Ctrl+Z (UndoStack.pop) is clean again', () => {
+      const s = settleFx();
+      try {
+        const snapshot = UndoStack.snapshotTasks(['s1']);
+        UndoStack.push('drag', () => UndoStack.restoreTasks(snapshot), ['s1']);
+        Store.updateTask('s1', { start_date: at(21, 7), end_date: at(21, 11) }, 'drag');
+        assert.equal(Persistence._dirtyIds.has('s1'), true);
+        UndoStack.pop();
+        assert.equal(Persistence._dirtyIds.has('s1'), false);
+        assert.equal(s.badge.hidden, true);
+      } finally { s.cleanup(); }
+    });
+
+    test('Apply, Save, Undo stays dirty (the saved baseline moved past the pre-Apply state)', () => {
+      const s = settleFx();
+      try {
+        const snapshot = UndoStack.snapshotTasks(s.ids);
+        s.apply();
+        // What a successful save does: new row_version, the sent state becomes the baseline, the marks clear.
+        for (const id of s.ids) {
+          Store.tasks[id].row_version = 4;
+          Persistence._recordBaseline(id, 4, Persistence._baselineKey(Persistence._taskEditSnapshot(Store.tasks[id])));
+          Persistence.discardDirty(id); Persistence._dirtySource.delete(id);
+        }
+        UndoStack.restoreTasks(snapshot);
+        assert.equal(Persistence._dirtyIds.size, 3, 'the undone rows differ from what the server now holds');
+      } finally { s.cleanup(); }
+    });
+
+    test('a row version that moved since the baseline (a pulled-in server change) stays dirty', () => {
+      const s = settleFx();
+      try {
+        const snapshot = UndoStack.snapshotTasks(s.ids);
+        s.apply();
+        Store.tasks.s1.row_version = 9;
+        UndoStack.restoreTasks(snapshot);
+        assert.equal(Persistence._dirtyIds.has('s1'), true);
+        assert.equal(Persistence._dirtyIds.has('s2'), false);
+      } finally { s.cleanup(); }
+    });
+
+    test('a row dirty before the Apply stays dirty after Undo', () => {
+      const s = settleFx();
+      try {
+        Store.updateTask('s1', { start_date: at(24, 9), end_date: at(24, 13) }, 'drag');
+        assert.equal(Persistence._dirtyIds.has('s1'), true);
+        const snapshot = UndoStack.snapshotTasks(s.ids);
+        s.apply();
+        UndoStack.restoreTasks(snapshot);
+        assert.equal(Persistence._dirtyIds.has('s1'), true, 'it still differs from the saved row');
+        assert.equal(Persistence._dirtyIds.has('s2'), false);
+        assert.equal(Persistence._dirtyIds.has('s3'), false);
+        assert.notEqual(s.badge.textContent, '');
+      } finally { s.cleanup(); }
+    });
+
+    test('a grid RUN_TIME edit on an already-dirty row, then Apply and Undo: stays dirty', () => {
+      const s = settleFx();
+      try {
+        Store.updateTask('s2', { RUN_TIME: '5' }, 'table');
+        assert.equal(Persistence._dirtyIds.has('s2'), true);
+        const snapshot = UndoStack.snapshotTasks(s.ids);
+        s.apply();
+        UndoStack.restoreTasks(snapshot);
+        assert.equal(Persistence._dirtyIds.has('s2'), true);
+        assert.equal(String(Store.tasks.s2.RUN_TIME), '5');
+        assert.equal(Persistence._dirtyIds.has('s1'), false);
+      } finally { s.cleanup(); }
+    });
+
+    test('Undo with the stale-run-time flag left set stays dirty', () => {
+      const s = settleFx();
+      const priorAfter = UndoStack.afterRestore;
+      try {
+        const snapshot = UndoStack.snapshotTasks(s.ids);
+        s.apply();
+        UndoStack.afterRestore = null;   // the reconcile that clears the flag does not run
+        UndoStack.restoreTasks(snapshot);
+        assert.equal(Store.tasks.s1.runtime_schedule_mismatch, true);
+        assert.equal(Persistence._dirtyIds.size, 3);
+      } finally { UndoStack.afterRestore = priorAfter; s.cleanup(); }
+    });
+
+    test('Undo while a row is conflicted, awaiting a refresh retry, or a save is in flight keeps it dirty', () => {
+      const s = settleFx();
+      try {
+        const snapshot = UndoStack.snapshotTasks(s.ids);
+        s.apply();
+        Persistence._conflictedIds.add('s1');
+        Persistence._refreshRetry.set('s2', { baseline: undefined, sent: undefined });
+        UndoStack.restoreTasks(snapshot);
+        assert.equal(Persistence._dirtyIds.has('s1'), true, 'conflicted');
+        assert.equal(Persistence._dirtyIds.has('s2'), true, 'refresh retry pending');
+        assert.equal(Persistence._dirtyIds.has('s3'), false);
+        s.apply();
+        Persistence._conflictedIds.clear(); Persistence._refreshRetry.clear();
+        Persistence._saveInFlight = true;
+        try {
+          UndoStack.restoreTasks(snapshot);
+          assert.equal(Persistence._dirtyIds.size, 3, 'a save in flight: no row settles');
+        } finally { Persistence._saveInFlight = false; }
+      } finally { s.cleanup(); }
+    });
+
+    test('Undo inside What-If (Sandbox.active) un-dirties nothing', () => {
+      const s = settleFx();
+      try {
+        const snapshot = UndoStack.snapshotTasks(s.ids);
+        s.apply();
+        Sandbox.active = true;
+        try { UndoStack.restoreTasks(snapshot); } finally { Sandbox.active = false; }
+        assert.equal(Persistence._dirtyIds.size, 3);
+      } finally { Sandbox.active = false; s.cleanup(); }
+    });
+
+    test('a row without a saved baseline or without a row_version stays dirty', () => {
+      const s = settleFx({ nover: place => place('s4', 27, { row_version: null }), nobase: place => place('s5', 28) });
+      try {
+        Persistence._savedBaseline.delete('s5');
+        const ids = ['s4', 's5'];
+        const snapshot = UndoStack.snapshotTasks(ids);
+        Store.updateMany(ids.map(id => ({ id, changes: { start_date: at(21, 7), end_date: at(21, 11) } })), 'engine');
+        UndoStack.restoreTasks(snapshot);
+        assert.equal(Persistence._dirtyIds.has('s4'), true, 'null row_version: nothing to prove equality against');
+        assert.equal(Persistence._dirtyIds.has('s5'), true, 'no baseline: unknown');
+      } finally { s.cleanup(); }
+    });
+
+    test('an undo that re-firms after the restore (palette / Slot modal pattern) stays dirty', () => {
+      const s = settleFx();
+      try {
+        const snapshot = UndoStack.snapshotTasks(['s1']);
+        Store.updateTask('s1', { start_date: at(21, 7), end_date: at(21, 11) }, 'alerts');
+        UndoStack.push('slot', () => { UndoStack.restoreTasks(snapshot); Store.setFirmed(['s1'], true, 'undo'); }, ['s1']);
+        UndoStack.pop();
+        assert.equal(Persistence._dirtyIds.has('s1'), true, 'the firm change is its own unsaved edit');
+        assert.equal(Persistence._firmDirtyIds.has('s1'), true);
+      } finally { s.cleanup(); }
+    });
+
+    // Redo (Stage 3): a Redo re-dirties what the Undo settled, and settles again when it lands back on the saved state.
+    const pushApply = (s, snapshot) => UndoStack.push('apply', () => UndoStack.restoreTasks(snapshot), s.ids, { redo: true });
+
+    test('Redo: Apply 3 -> Undo 0 -> Redo 3 -> Undo 0 unsaved, with the exact post-Apply rows and no stale flag', () => {
+      const s = settleFx();
+      try {
+        const snapshot = UndoStack.snapshotTasks(s.ids);
+        s.apply();
+        pushApply(s, snapshot);
+        const post = s.ids.map(id => [Store.tasks[id].start_date.getTime(), Store.tasks[id].end_date.getTime()]);
+        assert.equal(Persistence._dirtyIds.size, 3);
+        UndoStack.pop();
+        assert.equal(Persistence._dirtyIds.size, 0);
+        assert.equal(s.badge.hidden, true);
+        assert.ok(UndoStack.popRedo());
+        assert.equal(Persistence._dirtyIds.size, 3, 'the Redo changed the rows again: unsaved');
+        assert.equal(s.badge.hidden, false);
+        s.ids.forEach((id, i) => {
+          assert.deepEqual([Store.tasks[id].start_date.getTime(), Store.tasks[id].end_date.getTime()], post[i], `${id} exact post-Apply rows`);
+          assert.equal(Store.tasks[id].runtime_schedule_mismatch, false, 'exact Redo sets no stale-run-time flag');
+        });
+        UndoStack.pop();
+        assert.equal(Persistence._dirtyIds.size, 0, 'the second Undo settles again');
+        assert.equal(s.badge.hidden, true);
+      } finally { UndoStack._redo = []; s.cleanup(); }
+    });
+
+    test('Redo back to the saved state settles: Apply, Save, Undo is dirty, Redo is clean', () => {
+      const s = settleFx();
+      try {
+        const snapshot = UndoStack.snapshotTasks(s.ids);
+        s.apply();
+        pushApply(s, snapshot);
+        // A successful save: the server now holds the applied rows at a new version.
+        for (const id of s.ids) {
+          Store.tasks[id].row_version = 4;
+          Persistence._recordBaseline(id, 4, Persistence._baselineKey(Persistence._taskEditSnapshot(Store.tasks[id])));
+          Persistence.discardDirty(id); Persistence._dirtySource.delete(id);
+        }
+        assert.equal(Persistence._dirtyIds.size, 0);
+        UndoStack.pop();
+        assert.equal(Persistence._dirtyIds.size, 3, 'undone rows differ from what the server holds');
+        assert.ok(UndoStack.popRedo());
+        assert.equal(Persistence._dirtyIds.size, 0, 'Redo returned the rows to the saved state: settled');
+        assert.equal(s.badge.hidden, true);
+      } finally { UndoStack._redo = []; s.cleanup(); }
+    });
+
+    test('Redo does not run the engine reconcile (afterRestore)', () => {
+      const s = settleFx();
+      const priorAfter = UndoStack.afterRestore;
+      try {
+        const snapshot = UndoStack.snapshotTasks(s.ids);
+        s.apply();
+        pushApply(s, snapshot);
+        UndoStack.pop();
+        let reconciles = 0;
+        UndoStack.afterRestore = (...a) => { reconciles++; return priorAfter?.(...a); };
+        UndoStack.popRedo();
+        assert.equal(reconciles, 0);
+      } finally { UndoStack.afterRestore = priorAfter; UndoStack._redo = []; s.cleanup(); }
+    });
   });
 
   test('overlong under a never-split plant queues the row (overlong_never); run time zero places nothing and says so', () => {

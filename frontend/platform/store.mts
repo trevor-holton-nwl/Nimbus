@@ -119,6 +119,14 @@ interface UndoEntry {
   at: number;
   /** Task ids this entry restores (optional; entries without ids are never invalidated). */
   ids?: string[];
+  /** Cloned task rows this entry holds (the unit of the stack's row budget). Defaults to ids.length, else 1. */
+  cost?: number;
+  /** Opt-in: this entry's undo is purely restoreTasks, so popping it also records a redo entry. */
+  redo?: boolean;
+  /** Redo-stack entries only: the live rows the undo overwrote (restored by Redo as-is). */
+  redoSnap?: NimbusTask[];
+  /** Redo-stack entries only: the undone entry, silently re-pushed onto the undo stack by Redo. */
+  original?: UndoEntry;
 }
 
 // Two DI seams replace what used to be direct references from Store into modules
@@ -1231,18 +1239,40 @@ export const Store = {
 };
 
 /* =============================================================================
-   UNDO STACK — minimal, in-memory, destructive ops only (10 levels).
+   UNDO STACK — minimal, in-memory, destructive ops only (50 levels, 20,000-row budget).
    Used by drag-commits and unschedule actions in the Interaction module.
    ========================================================================== */
 export const UndoStack = {
-  MAX: 10,
+  MAX: 50,
+  /** Total cloned-row budget across the held stacks (a plant-wide optimizer entry or a What-If whole-board entry can
+   *  be thousands of rows). Oldest entries go first; the newest entry is always kept even if it alone exceeds this. */
+  MAX_ROWS: 20000,
   _entries: [] as UndoEntry[],
+  /** Undone redoable entries, newest last (see popRedo). Shares the row budget with _entries. */
+  _redo: [] as UndoEntry[],
+  /** Set by pop() around a redoable undo: restoreTasks pushes the live rows it is about to overwrite into it. */
+  _capture: null as NimbusTask[] | null,
 
-  push(label: string, undoFn: UndoEntry['undoFn'], ids?: Iterable<string | number>): void {
+  /** Rows held across the given stacks: the sum of each entry's cost. */
+  rowCount(...stacks: UndoEntry[][]): number {
+    let n = 0;
+    for (const st of stacks) for (const e of st) n += e.cost ?? e.ids?.length ?? 1;
+    return n;
+  },
+  /** Evict the oldest entries of `stack` while the TOTAL over `all` exceeds the budget; the newest entry stays. */
+  _enforceBudget(stack: UndoEntry[], all: UndoEntry[][] = [stack]): void {
+    while (stack.length > 1 && this.rowCount(...all) > this.MAX_ROWS) stack.shift();
+  },
+
+  push(label: string, undoFn: UndoEntry['undoFn'], ids?: Iterable<string | number>, opts?: { cost?: number; redo?: true }): void {
     const entry: UndoEntry = { label, undoFn, at: Date.now() };
     if (ids) entry.ids = [...ids].map(String);
+    entry.cost = opts?.cost ?? entry.ids?.length ?? 1;
+    if (opts?.redo) entry.redo = true;
+    this._redo = [];   // a new action ends the redo line
     this._entries.push(entry);
     if (this._entries.length > this.MAX) this._entries.shift();
+    this._enforceBudget(this._entries);
     Store.emit({ type: 'undo:pushed', label });
   },
   /** Drop every entry whose ids intersect `ids` (D31): after a server-side
@@ -1252,6 +1282,18 @@ export const UndoStack = {
     const hit = new Set([...ids].map(String));
     if (!hit.size) return;
     this._entries = this._entries.filter(e => !e.ids || !e.ids.some(id => hit.has(id)));
+    this._redo = this._redo.filter(e => !e.ids || !e.ids.some(id => hit.has(id)));
+  },
+  /** Keep the TOTAL rows over both stacks within the budget: evict the oldest entry of either stack, but never the
+   *  newest redo entry (the one just recorded). */
+  _trimShared(): void {
+    while (this.rowCount(this._entries, this._redo) > this.MAX_ROWS) {
+      const oldestUndo = this._entries[0];
+      const oldestRedo = this._redo.length > 1 ? this._redo[0] : undefined;
+      if (oldestUndo && (!oldestRedo || oldestUndo.at <= oldestRedo.at)) this._entries.shift();
+      else if (oldestRedo) this._redo.shift();
+      else break;
+    }
   },
   /** True while an async undo (e.g. the What-If confirm) is still pending: a second
    *  Ctrl+Z must not pop an OLDER entry and undo out of order. */
@@ -1260,20 +1302,45 @@ export const UndoStack = {
     if (this._busy) return null;
     const e = this._entries.pop();
     if (!e) return null;
+    const capture: NimbusTask[] | null = e.redo ? [] : null;
     const done = (r: void | boolean): void => {
       this._busy = false;
       if (r === false) { this._entries.push(e); return; } // aborted: keep the entry, no toast
+      if (!capture) this._redo = [];   // a non-redoable undo changed the board in a way Redo cannot replay
+      else if (capture.length) {
+        // The rows the undo actually overwrote; the entry's own snapshot stays inside e.undoFn for the next undo.
+        this._redo.push({ label: e.label, undoFn: e.undoFn, at: Date.now(), ids: capture.map(t => String(t.id)),
+          cost: capture.length + (e.cost ?? e.ids?.length ?? 1), redoSnap: capture, original: e });
+        this._trimShared();
+      }
       Toast.show(Util.t('toast.undone', { label: e.label }), 'success');
     };
     const fail = (err: unknown): void => { this._busy = false; ErrorLog.error('undo', `${e.label}: ${(err as Error).message}`); };
     try {
-      const r = e.undoFn();
+      this._capture = capture;
+      let r: void | boolean | Promise<void | boolean>;
+      try { r = e.undoFn(); } finally { this._capture = null; }   // capture is synchronous inside restoreTasks
       if (r && typeof (r as Promise<void | boolean>).then === 'function') {
         this._busy = true;
         (r as Promise<void | boolean>).then(done, fail);
       } else done(r as void | boolean);
     } catch (err) { fail(err); }
     return e;
+  },
+  /** Re-apply the newest undone redoable entry: write the rows its undo overwrote back as they were (exact, no
+   *  re-derivation) and silently put the original entry back on the undo stack (no undo:pushed: the Time Machine
+   *  auto-snapshot listens to that). Returns null when there is nothing to redo or nothing could be restored. */
+  popRedo(): UndoEntry | null {
+    if (this._busy) return null;
+    const r = this._redo.pop();
+    if (!r || !r.redoSnap || !r.original) return null;
+    if (!r.redoSnap.some(t => Store.tasks[t.id] != null)) return null;   // every row left the Store since: nothing to redo
+    this.restoreTasks(r.redoSnap, { exact: true });
+    this._entries.push(r.original);
+    if (this._entries.length > this.MAX) this._entries.shift();
+    this._trimShared();
+    Toast.show(Util.t('toast.redone', { label: r.label }), 'success');
+    return r;
   },
   /** Take a snapshot of the given task ids so they can be restored. */
   snapshotTasks(ids: string[]): NimbusTask[] {
@@ -1295,14 +1362,30 @@ export const UndoStack = {
   /** Registered by the engine: true when the post-restore reconcile will process this (restored) row. Only such a
    *  row is flagged stale by restoreTasks, because only the reconcile ever clears the flag (U23). Null = every row. */
   willRederive: null as null | ((task: NimbusTask) => boolean),
-  restoreTasks(snapshot: NimbusTask[]): void {
+  /** Registered by the engine (platform cannot import Persistence): runs after afterRestore returned, with the restored
+   *  ids, so rows that provably equal their last saved state stop counting as unsaved. Not called by Time Machine. */
+  afterSettle: null as null | ((ids: string[]) => void),
+  /** `exact` (Redo): write the snapshot rows as they are: no stale-run-time flag and
+   *  no re-derive (the rows are a real earlier state, not a placeholder); the settle rule still runs. */
+  restoreTasks(snapshot: NimbusTask[], opts?: { exact?: boolean }): void {
     // planning_reason is defaulted explicitly: a snapshot of a scheduled order may not
     // carry the key, and an undone Unschedule must not leave its reason behind.
     // `firmed` is deliberately NOT restored: the manual firm is a separate planner edit that
     // only setFirmed/replaceFirmedIds may change (they mark it firm-dirty). Restoring it here
     // flipped a firm without a marker, so the save sent no FIRMED and the UI diverged from the server.
+    // A row removed since the snapshot (plant switch, purge, scenario-created row) cannot be restored: updateMany would
+    // skip it but still emit its id, and the dirty tracker would count a phantom unsaved id.
+    snapshot = snapshot.filter(s => Store.tasks[s.id] != null);
+    if (!snapshot.length) return;
+    // Redo capture: the live rows this restore is about to overwrite (after the missing-id filter, before the write).
+    if (UndoStack._capture) UndoStack._capture.push(...UndoStack.snapshotTasks(snapshot.map(s => String(s.id))));
+    const exact = !!opts?.exact;
     const patches = snapshot.map(s => {
       const { firmed: _firmed, ...rest } = s;
+      if (exact) {
+        return { id: s.id, changes: { ...rest, planning_reason: s.planning_reason ?? null,
+          row_version: Store.tasks[s.id]?.row_version ?? s.row_version } };
+      }
       // OQ21: undo restores the FINISH. The restored start is only a placeholder, so the row is flagged stale and
       // the engine re-derives the start from the finish under the current run time (afterRestore below).
       // A row the reconcile will not process (no machine, an overtime/overlong
@@ -1315,10 +1398,34 @@ export const UndoStack = {
     Store.updateMany(patches, 'undo');
     if (patches.length) {
       const wasDirty = new Set(snapshot.filter(s => UndoStack._wasDirty.has(s)).map(s => String(s.id)));
-      UndoStack.afterRestore?.(patches.map(p => String(p.id)), wasDirty);
+      if (!exact) UndoStack.afterRestore?.(patches.map(p => String(p.id)), wasDirty);
+      UndoStack.afterSettle?.(patches.map(p => String(p.id)));
     }
   },
 };
+
+// A wholesale task load (plant switch, reload, What-If discard) replaces every row: the held snapshots no longer
+// describe the board, and the dirty/baseline sets are reset by the same event. Every tasks:bulk emitter was audited
+// (Persistence.load and friends, Sandbox discard / plant-switch exit, headless hydrate): none pushes an entry and THEN
+// emits tasks:bulk. Sandbox.exit(true) pushes without any setTasks. Time Machine restore uses updateMany, not tasks:bulk.
+Store.subscribe(evt => {
+  if (evt.type === 'tasks:bulk') { UndoStack._entries.length = 0; UndoStack._redo.length = 0; }
+}, 'UndoStack.clearOnBulk');
+
+// A write to a row a redo entry would overwrite makes that entry stale (a refresh / conflict pull-in, a PRT / note / PV
+// edit, a firm, a calendar sync): Redo could otherwise overwrite the newer value and then pass the version check.
+// The undo's own writes and the engine's runtime reconcile (which rewrites derived fields of the very rows an undo or
+// redo just touched) do not count.
+Store.subscribe(evt => {
+  if (!UndoStack._redo.length) return;
+  if (evt.source === 'undo' || evt.source === 'engine-runtime-reconcile' || evt.source === 'engine-runtime-reconcile-display') return;
+  let touched: string[];
+  if (evt.type === 'task:update') touched = [String(evt.id)];
+  else if (evt.type === 'tasks:bulkUpdate') touched = ((evt.ids as Array<string | number> | undefined) ?? []).map(String);
+  else return;
+  const hit = new Set(touched);
+  UndoStack._redo = UndoStack._redo.filter(e => !e.ids || !e.ids.some(id => hit.has(id)));
+}, 'UndoStack.pruneRedo');
 
 // Snapshot attached to error-level ErrorLog entries (ctx.state.platform).
 try {

@@ -318,6 +318,50 @@ export const Persistence = {
     Persistence._currentLoadedPlant = null;
     Persistence._syncUnsaved();
   },
+  /** Undo-settle baseline: per order, the last SERVER-sourced saved state (the `_taskEditSnapshot` key, minus the
+   *  per-edit `source`/`FIRMED` markers, plus the row_version it was taken at). Recorded only from a server load of a row
+   *  no cached edit was overlaid on, a successful save (what was sent + the new version) and an applied refresh row;
+   *  cleared on every tasks:bulk. A row with no entry is "unknown" and an undo never un-dirties it. */
+  _savedBaseline: new Map<string, { version: NimbusTask['row_version']; key: string }>(),
+  /** The comparable key of an edit snapshot: the per-edit markers differ after an undo and are not saved content. */
+  _baselineKey(snapshot: Record<string, unknown>): string {
+    const { source: _source, FIRMED: _firmed, ...rest } = snapshot;
+    return JSON.stringify(rest);
+  },
+  _baselineKeyFromJson(json: string | undefined): string | null {
+    if (json === undefined) return null;
+    try { return Persistence._baselineKey(JSON.parse(json) as Record<string, unknown>); } catch { return null; }
+  },
+  _recordBaseline(id: string, version: NimbusTask['row_version'], key: string | null): void {
+    if (key === null || version == null) { Persistence._savedBaseline.delete(id); return; }
+    Persistence._savedBaseline.set(id, { version, key });
+  },
+  /** After an undo restore wrote its rows: un-dirty every restored row that provably equals what was last saved.
+   *  Default is dirty: any missing proof leaves the row exactly as it was (see the plan's Stage 1 rule). */
+  settleRestored(ids: Iterable<string>): void {
+    if (Sandbox.active || Persistence._saveInFlight) return;
+    let settled = false;
+    for (const raw of ids) {
+      const id = String(raw);
+      if (!Persistence._dirtyIds.has(id)) continue;
+      const live = Store.tasks[id];
+      const base = Persistence._savedBaseline.get(id);
+      if (!live || !base) continue;
+      if (live.row_version == null || live.row_version !== base.version) continue;
+      if (live.runtime_schedule_mismatch) continue;
+      if (Persistence._firmDirtyIds.has(id) || Persistence._conflictedIds.has(id) || Persistence._refreshRetry.has(id)) continue;
+      if (Persistence._baselineKey(Persistence._taskEditSnapshot(live)) !== base.key) continue;
+      Persistence.discardDirty(id);
+      Persistence._dirtySource.delete(id);
+      // Session notes that describe a move to the very place the row now sits are stale.
+      for (const note of ['systemMove', 'derivationIssue'] as const) {
+        const n = live[note] as { from?: Date; to?: Date } | null | undefined;
+        if (n?.from instanceof Date && n?.to instanceof Date && n.from.getTime() === n.to.getTime()) live[note] = null;
+      }
+      settled = true;
+    }
+    if (settled) { Persistence._syncUnsaved(); Persistence._autosave(); }
+  },
   _syncUnsaved(): void {
     const badge = typeof document === 'undefined' ? null : document.getElementById('schedule-unsaved');
     if (!badge) return;
@@ -676,6 +720,12 @@ export const Persistence = {
         // Overlay user-explicitly-moved positions from localStorage. Only tasks
         // where the cached start differs from the cached original baseline are overlaid.
         let restoredDirtyIds: string[] = [];
+        // Undo-settle baseline: the server row's own edit key, taken BEFORE the cache overlay touches it.
+        const serverKeys = new Map<string, string>();
+        for (const t of tasks) {
+          Store._normalizeDates(t);
+          serverKeys.set(String(t.id), Persistence._baselineKey(Persistence._taskEditSnapshot(t)));
+        }
         if (!discardLocalEdits && cacheData?.tasks?.length) {
           const optimizerIds = new Set<string>(cacheData._optimizerDirtyIds ?? []);
           const dirtyIds = cacheData._dirtyIds == null ? null : new Set<string>(cacheData._dirtyIds);
@@ -688,6 +738,16 @@ export const Persistence = {
 
         acceptDiscard();
         const setResult = Store.setTasks(tasks, 'persistence');
+        // setTasks cleared the baseline (tasks:bulk). A row with a cached overlay or an optimizer-dirty mark is not the
+        // server row any more, so it gets no baseline (unknown = stays dirty on undo).
+        {
+          const overlaid = new Set<string>(restoredDirtyIds);
+          if (!discardLocalEdits) for (const id of cacheData?._optimizerDirtyIds ?? []) overlaid.add(String(id));
+          for (const [id, key] of serverKeys) {
+            const live = Store.tasks[id];
+            if (live && !overlaid.has(id)) Persistence._recordBaseline(id, live.row_version, key);
+          }
+        }
         for (const id of restoredDirtyIds) Persistence._dirtyIds.add(id);
         for (const id of (discardLocalEdits ? [] : cacheData?._optimizerDirtyIds) ?? []) {
           if (Store.tasks[id]) { Persistence._dirtyIds.add(id); Persistence._forceIds.add(id); }
@@ -1776,6 +1836,9 @@ export const Persistence = {
     ].map(String));
     const savedIds: string[] = [];
     const rejectedToRefresh: string[] = [];
+    // Undo-settle baseline: the server now holds exactly what was sent, at the version it returned (also when a newer
+    // local edit keeps the row dirty: the baseline is the server state, not the live row).
+    for (const id of Object.keys(versions)) Persistence._recordBaseline(String(id), versions[id], Persistence._baselineKeyFromJson(sentSnapshot.get(String(id))));
     for (const id of accounted) {
       // R8: an id being "accounted for" by this response is necessary but not
       // sufficient to clear its dirty flag. If the user edited this task AGAIN
@@ -1961,6 +2024,7 @@ export const Persistence = {
           if (ingest.notes !== undefined && !Persistence.noteUnsaved(String(row.id))) tk.notes = ingest.notes;
           Store._normalizeDates(tk);
           tk.row_version = row.row_version as number | null;
+          Persistence._recordBaseline(String(row.id), tk.row_version, Persistence._baselineKey(Persistence._taskEditSnapshot(tk)));
           Persistence._dirtyIds.delete(String(row.id));
           Persistence._forceIds.delete(String(row.id));
           Persistence._conflictedIds.delete(String(row.id));
@@ -2254,6 +2318,7 @@ Store.subscribe(evt => {
   if (evt.type === 'tasks:bulk') {
     taskCollectionGeneration++;
     taskEditGenerations.clear();
+    Persistence._savedBaseline.clear();
     Persistence._refreshRetry.clear();
     if (evt.source === 'persistence') Persistence._conflictedIds.clear();
     return;

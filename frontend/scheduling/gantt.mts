@@ -6108,7 +6108,7 @@ export const Interaction = {
           });
 
           UndoStack.push(Util.t('undo.move_orders', { count: movedIds.length }),
-            () => { UndoStack.restoreTasks(snap); Alerts.scheduleRecompute(); }, movedIds);
+            () => { UndoStack.restoreTasks(snap); Alerts.scheduleRecompute(); }, movedIds, { redo: true });
           return;
         } finally { Calendar._endRun(); }
       }
@@ -6180,7 +6180,7 @@ export const Interaction = {
     Timeline.noteDropLines(new Set([fromLine, newLine]), new Set([newLine]));
 
     UndoStack.push(Util.t('undo.move_order', { order: (Store.tasks[id] && Store.tasks[id].text) || id }),
-                   () => UndoStack.restoreTasks(snap), [id]);
+                   () => UndoStack.restoreTasks(snap), [id], { redo: true });
     if (patch.PRODUCTION_VERSION != null && patch.PRODUCTION_VERSION !== fromPv) {
       Toast.show(Util.t('toast.pv_switched', { order: Util.orderNumber(t), pv: patch.PRODUCTION_VERSION, machine: newLine }), 'info', 4000);
     }
@@ -6263,7 +6263,7 @@ export const Interaction = {
       const snap = UndoStack.snapshotTasks(moveIds);
       Store.updateMany(patches, 'interaction');
       UndoStack.push(Util.t('undo.move_orders_by', { count: moveIds.length, delta: Interaction._moveByLabel(ms) }),
-        () => { UndoStack.restoreTasks(snap); Alerts.scheduleRecompute(); }, moveIds);
+        () => { UndoStack.restoreTasks(snap); Alerts.scheduleRecompute(); }, moveIds, { redo: true });
       Alerts.scheduleRecompute();
     }
     Interaction._reportBatchMove({ moved: patches.length, total: tasks.length, skipped, firmed: firmed.length, running: running.length });
@@ -6531,6 +6531,17 @@ export const Interaction = {
       return;
     }
 
+    // Redo: Ctrl/Cmd+Shift+Z everywhere; Ctrl+Y on Windows/Linux only (Cmd+Y opens History in Chrome on macOS, and Ctrl+Y
+    // in AG Grid toggles range mode: the defaultPrevented guard at the top of this handler leaves that to the grid).
+    // Always consumed here so Ctrl+Shift+Z never falls through to another shortcut.
+    const keyLower = e.key.toLowerCase();
+    const mac = typeof navigator !== 'undefined' && /mac|iphone|ipad/i.test(navigator.platform || '');
+    if ((mod && e.shiftKey && !e.altKey && keyLower === 'z') || (e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey && !mac && keyLower === 'y')) {
+      if (!onGantt) return;
+      if (UndoStack._redo.length) { e.preventDefault(); UndoStack.popRedo(); }
+      return;
+    }
+
     // Save
     if (mod && !e.shiftKey && e.key.toLowerCase() === 's') {
       e.preventDefault();
@@ -6602,7 +6613,7 @@ export const Interaction = {
     Store.updateMany(patches, 'interaction');
     Alerts.scheduleRecompute();
     UndoStack.push(Util.t('undo.unschedule_orders', { count: eligibleIds.length }),
-                   () => UndoStack.restoreTasks(snap), eligibleIds);
+                   () => UndoStack.restoreTasks(snap), eligibleIds, { redo: true });
     Toast.show(
       eligibleIds.length === ids.length
         ? Util.t('toast.unscheduled_orders', { count: eligibleIds.length })

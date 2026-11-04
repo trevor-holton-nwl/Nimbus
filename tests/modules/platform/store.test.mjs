@@ -179,9 +179,62 @@ test('Store.siblingsByParent reflects Store.removeTask (in-place splice, caught 
   Store.setSelectedPlant(priorPlant, 'unit-test');
 });
 
-test('UndoStack.push caps at MAX(10) entries', () => {
+test('UndoStack.push caps at MAX (50) entries, oldest evicted', () => {
+  UndoStack._entries = [];
+  assert.equal(UndoStack.MAX, 50);
   for (let i = 0; i < 12; i++) UndoStack.push(`entry-${i}`, () => {});
-  assert.ok(UndoStack._entries.length <= UndoStack.MAX);
+  assert.equal(UndoStack._entries.length, 12, 'the old cap of 10 is gone');
+  for (let i = 12; i < 60; i++) UndoStack.push(`entry-${i}`, () => {});
+  assert.equal(UndoStack._entries.length, 50);
+  assert.equal(UndoStack._entries[0].label, 'entry-10');
+  assert.equal(UndoStack._entries.at(-1).label, 'entry-59');
+  UndoStack._entries = [];
+});
+
+test('UndoStack row budget: cost defaults to ids.length (or 1), oldest evicted, newest always kept', () => {
+  UndoStack._entries = [];
+  const B = UndoStack.MAX_ROWS;
+  assert.equal(B, 20000);
+  UndoStack.push('noids', () => {});
+  assert.equal(UndoStack._entries[0].cost, 1);
+  UndoStack.push('three', () => {}, ['a', 'b', 'c']);
+  assert.equal(UndoStack._entries[1].cost, 3);
+  UndoStack.push('explicit', () => {}, ['a'], { cost: 7 });
+  assert.equal(UndoStack._entries[2].cost, 7);
+  assert.equal(UndoStack.rowCount(UndoStack._entries), 11);
+  UndoStack._entries = [];
+  UndoStack.push('old1', () => {}, ['a'], { cost: 9000 });
+  UndoStack.push('old2', () => {}, ['a'], { cost: 9000 });
+  UndoStack.push('big', () => {}, ['a'], { cost: 5000 });   // 23000 > 20000: oldest goes
+  assert.deepEqual(UndoStack._entries.map(e => e.label), ['old2', 'big']);
+  UndoStack.push('huge', () => {}, ['a'], { cost: B + 5 });  // alone over budget: everything older goes, newest stays
+  assert.deepEqual(UndoStack._entries.map(e => e.label), ['huge']);
+  UndoStack._entries = [];
+});
+
+test('tasks:bulk clears the undo stack (plant switch / reload / What-If discard)', () => {
+  UndoStack._entries = [];
+  UndoStack.push('a', () => {}, ['x']);
+  Store.setTasks([{ id: 'bulk1' }], 'persistence');
+  assert.equal(UndoStack._entries.length, 0);
+  UndoStack.push('b', () => {}, ['x']);
+  Store.updateTask('bulk1', { RUN_TIME: '3' }, 'unit-test');   // task:update is not a bulk load
+  assert.equal(UndoStack._entries.length, 1);
+  UndoStack._entries = [];
+});
+
+test('restoreTasks drops ids no longer in the Store: no event, no phantom ids', () => {
+  Store.setTasks([{ id: 'live1', RUN_TIME: '2' }], 'unit-test');
+  const gone = { id: 'gone1', RUN_TIME: '5' };
+  const events = [];
+  const off = Store.subscribe(evt => { if (evt.type === 'tasks:bulkUpdate') events.push(evt); });
+  UndoStack.restoreTasks([gone]);
+  assert.equal(events.length, 0, 'nothing left to restore: no emit');
+  UndoStack.restoreTasks([gone, { id: 'live1', RUN_TIME: '9' }]);
+  off();
+  assert.equal(events.length, 1);
+  assert.deepEqual(events[0].ids.map(String), ['live1']);
+  assert.equal(Store.tasks['gone1'], undefined);
 });
 
 test('UndoStack.push emits undo:pushed with the entry label', () => {
@@ -581,4 +634,210 @@ test('Store.setAlerts changedIds marks a task whose alert-type set changed, not 
     Store.setAlerts([mk('a1', 'late', 't1'), mk('a2', 'late', 't2'), mk('a3', 'late', 't3')], 'unit-test');
     assert.deepEqual([...seen.at(-1)].sort(), ['t1', 't3'], 'a lost type and a brand-new task are both marked');
   } finally { off(); Store.setAlerts(priorAlerts, 'unit-test'); }
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Redo (Stage 3): rows-only, opt-in; captured pre-undo rows are restored exactly.
+// ---------------------------------------------------------------------------------------------------------------
+function redoFx(n = 3) {
+  globalThis.window ??= {};   // Util.t reads window.__NIMBUS_LOCALES (popRedo toasts outside the try/catch pop has)
+  const rows = [];
+  for (let i = 1; i <= n; i++) rows.push({ id: `rd${i}`, RUN_TIME: '2', row_version: 5, start_date: new Date('2026-01-01T08:00:00Z'), end_date: new Date('2026-01-01T10:00:00Z') });
+  Store.setTasks(rows, 'unit-test');
+  UndoStack._entries = []; UndoStack._redo = [];
+  const ids = rows.map(r => r.id);
+  // The edit + its entry, built like the Gantt/grid/Apply call sites do.
+  const edit = (label, patch, opts = { redo: true }, only = ids) => {
+    const snap = UndoStack.snapshotTasks(only);
+    Store.updateMany(only.map(id => ({ id, changes: patch })), 'interaction');
+    UndoStack.push(label, () => UndoStack.restoreTasks(snap), only, opts ?? undefined);
+  };
+  return { ids, edit };
+}
+
+test('Redo restores the exact pre-undo rows; undo, redo, undo cycles', () => {
+  const { edit } = redoFx();
+  edit('E1', { RUN_TIME: '9' });
+  assert.equal(UndoStack.pop()?.label, 'E1');
+  assert.equal(Store.tasks.rd1.RUN_TIME, '2');
+  assert.equal(UndoStack._redo.length, 1);
+  assert.equal(UndoStack._entries.length, 0);
+  assert.equal(UndoStack.popRedo()?.label, 'E1');
+  assert.equal(Store.tasks.rd1.RUN_TIME, '9');
+  assert.equal(Store.tasks.rd3.RUN_TIME, '9');
+  assert.equal(UndoStack._redo.length, 0);
+  assert.equal(UndoStack._entries.length, 1, 'the original entry is back on the undo stack');
+  UndoStack.pop();
+  assert.equal(Store.tasks.rd1.RUN_TIME, '2', 'a further undo returns to the pre-edit values');
+  assert.equal(UndoStack._redo.length, 1);
+});
+
+test('Redo keeps the LIVE row_version and the exact captured values (no re-derivation)', () => {
+  const { edit } = redoFx(1);
+  edit('E1', { RUN_TIME: '9', start_date: new Date('2026-01-02T08:00:00Z') });
+  UndoStack.pop();
+  Store.tasks.rd1.row_version = 8;   // a pulled-in version while undone
+  UndoStack.popRedo();
+  assert.equal(Store.tasks.rd1.row_version, 8);
+  assert.equal(Store.tasks.rd1.start_date.toISOString(), '2026-01-02T08:00:00.000Z', 'the captured start is written as-is');
+});
+
+test('{exact:true} sets no runtime_schedule_mismatch, runs no afterRestore, still runs afterSettle and strips firmed', () => {
+  const { ids } = redoFx(1);
+  const calls = [];
+  const prior = [UndoStack.afterRestore, UndoStack.afterSettle, UndoStack.willRederive];
+  UndoStack.afterRestore = () => calls.push('restore'); UndoStack.afterSettle = () => calls.push('settle'); UndoStack.willRederive = () => true;
+  try {
+    const snap = UndoStack.snapshotTasks(ids).map(s => ({ ...s, RUN_TIME: '7', firmed: true }));
+    UndoStack.restoreTasks(snap, { exact: true });
+    assert.deepEqual(calls, ['settle']);
+    assert.equal(Store.tasks.rd1.RUN_TIME, '7');
+    assert.notEqual(Store.tasks.rd1.runtime_schedule_mismatch, true);
+    assert.equal(Store.tasks.rd1.firmed, false, 'firmed is never restored');
+    calls.length = 0;
+    UndoStack.restoreTasks(snap);   // the default (undo) mode still flags and re-derives
+    assert.deepEqual(calls, ['restore', 'settle']);
+    assert.equal(Store.tasks.rd1.runtime_schedule_mismatch, true);
+  } finally { [UndoStack.afterRestore, UndoStack.afterSettle, UndoStack.willRederive] = prior; }
+});
+
+test('a new push clears the redo stack', () => {
+  const { edit } = redoFx();
+  edit('E1', { RUN_TIME: '9' });
+  UndoStack.pop();
+  assert.equal(UndoStack._redo.length, 1);
+  UndoStack.push('other', () => {});
+  assert.equal(UndoStack._redo.length, 0);
+});
+
+test('only entries pushed with {redo:true} become redoable', () => {
+  const { edit } = redoFx();
+  edit('plain', { RUN_TIME: '9' }, null);
+  UndoStack.pop();
+  assert.equal(UndoStack._redo.length, 0);
+  assert.equal(UndoStack.popRedo(), null);
+});
+
+test('invalidate prunes redo entries too', () => {
+  const { edit } = redoFx(3);
+  edit('E1', { RUN_TIME: '9' }, { redo: true }, ['rd1']);
+  edit('E2', { RUN_TIME: '9' }, { redo: true }, ['rd2']);
+  UndoStack.pop(); UndoStack.pop();
+  assert.equal(UndoStack._redo.length, 2);
+  UndoStack.invalidate(['rd1']);
+  assert.deepEqual(UndoStack._redo.map(e => e.label), ['E2']);
+});
+
+test('tasks:bulk clears the redo stack', () => {
+  const { edit } = redoFx();
+  edit('E1', { RUN_TIME: '9' });
+  UndoStack.pop();
+  Store.setTasks([{ id: 'other' }], 'persistence');
+  assert.equal(UndoStack._redo.length, 0);
+});
+
+test('popping a non-redoable entry clears redo only when it succeeds; an aborted (false) one does not', () => {
+  const { edit } = redoFx();
+  edit('E2', { RUN_TIME: '8' });
+  UndoStack.pop();
+  assert.equal(UndoStack._redo.length, 1);
+  UndoStack._entries.push({ label: 'nr-abort', undoFn: () => false, at: 0, ids: [] });
+  UndoStack.pop();
+  assert.equal(UndoStack._redo.length, 1, 'aborted: redo kept');
+  assert.equal(UndoStack._entries.length, 1, 'aborted: entry kept');
+  UndoStack._entries.length = 0;
+  UndoStack._entries.push({ label: 'nr-ok', undoFn: () => {}, at: 0, ids: [] });
+  UndoStack.pop();
+  assert.equal(UndoStack._redo.length, 0, 'a successful non-redoable undo clears redo');
+});
+
+test('silent re-push on Redo emits no undo:pushed; a normal push does', () => {
+  const { edit } = redoFx();
+  const events = [];
+  const off = Store.subscribe(evt => { if (evt.type === 'undo:pushed') events.push(evt.label); });
+  try {
+    edit('E1', { RUN_TIME: '9' });
+    assert.deepEqual(events, ['E1']);
+    UndoStack.pop();
+    UndoStack.popRedo();
+    assert.deepEqual(events, ['E1'], 'Redo re-pushed the entry silently');
+    assert.equal(UndoStack._entries.length, 1);
+  } finally { off(); }
+});
+
+test('the row budget is shared by the undo and redo stacks: oldest first across both, newest redo entry stays', () => {
+  const { edit } = redoFx(1);
+  const B = UndoStack.MAX_ROWS;
+  UndoStack._entries = []; UndoStack._redo = [];
+  UndoStack.push('old', () => {}, ['rd1'], { cost: B - 10 });
+  edit('redoable', { RUN_TIME: '9' }, { redo: true });
+  UndoStack.pop();
+  assert.equal(UndoStack._redo.length, 1);
+  assert.ok(UndoStack.rowCount(UndoStack._entries, UndoStack._redo) <= B);
+  // A big redo entry arrives: the older undo entry goes, the redo entry stays.
+  UndoStack._redo.push({ label: 'huge', at: Date.now(), cost: B - 5, ids: ['rd1'], redoSnap: [], undoFn: () => {} });
+  UndoStack._trimShared();
+  assert.ok(UndoStack._redo.some(e => e.label === 'huge'), 'the newest redo entry always stays');
+  assert.equal(UndoStack._entries.length, 0, 'oldest-first across both stacks: the undo entry went');
+  assert.ok(UndoStack.rowCount(UndoStack._entries, UndoStack._redo) <= B);
+});
+
+test('a non-undo write to a redo entry id prunes it; undo / reconcile / unrelated writes do not', () => {
+  const { edit } = redoFx(3);
+  edit('E1', { RUN_TIME: '9' }, { redo: true }, ['rd1']);
+  edit('E2', { RUN_TIME: '9' }, { redo: true }, ['rd2']);
+  UndoStack.pop(); UndoStack.pop();
+  assert.equal(UndoStack._redo.length, 2);
+  Store.updateTask('rd1', { notes: 'x' }, 'undo');
+  Store.updateMany([{ id: 'rd1', changes: { notes: 'y' } }], 'engine-runtime-reconcile');
+  Store.updateMany([{ id: 'rd2', changes: { notes: 'y' } }], 'engine-runtime-reconcile-display');
+  Store.updateTask('rd3', { notes: 'z' }, 'table');
+  assert.equal(UndoStack._redo.length, 2, 'none of those touch a redo entry from a foreign writer');
+  Store.updateTask('rd1', { PRT: 'p' }, 'table');
+  assert.deepEqual(UndoStack._redo.map(e => e.label), ['E2'], 'task:update prunes');
+  Store.updateMany([{ id: 'rd2', changes: { notes: 'q' } }], 'refresh');
+  assert.equal(UndoStack._redo.length, 0, 'tasks:bulkUpdate prunes');
+});
+
+test('Redo of an entry whose rows were removed from the Store is a safe no-op', () => {
+  const { edit } = redoFx(2);
+  edit('E1', { RUN_TIME: '9' });
+  UndoStack.pop();
+  Store.removeTask('rd1', 'unit-test'); Store.removeTask('rd2', 'unit-test');
+  const events = [];
+  const off = Store.subscribe(evt => { if (evt.type === 'tasks:bulkUpdate') events.push(evt); });
+  let r;
+  try { r = UndoStack.popRedo(); } finally { off(); }
+  assert.equal(r, null);
+  assert.equal(events.length, 0);
+  assert.equal(UndoStack._entries.length, 0, 'nothing restored, nothing re-pushed');
+  assert.equal(UndoStack._redo.length, 0);
+});
+
+test('12 undos deep, Redo some, then a new action clears the rest', () => {
+  const { edit } = redoFx(1);
+  for (let i = 1; i <= 12; i++) edit(`E${i}`, { RUN_TIME: String(100 + i) });
+  for (let i = 0; i < 12; i++) UndoStack.pop();
+  assert.equal(Store.tasks.rd1.RUN_TIME, '2');
+  assert.equal(UndoStack._redo.length, 12);
+  for (let i = 1; i <= 5; i++) assert.equal(UndoStack.popRedo()?.label, `E${i}`);
+  assert.equal(Store.tasks.rd1.RUN_TIME, '105');
+  assert.equal(UndoStack._redo.length, 7);
+  edit('new', { RUN_TIME: '55' });
+  assert.equal(UndoStack._redo.length, 0);
+});
+
+test('Redo is blocked while an async undo is pending (_busy), and an async redoable undo still captures', async () => {
+  const { ids } = redoFx(1);
+  const snap = UndoStack.snapshotTasks(ids);
+  Store.updateTask('rd1', { RUN_TIME: '9' }, 'unit-test');
+  let release;
+  UndoStack.push('async', () => { UndoStack.restoreTasks(snap); return new Promise(r => { release = r; }); }, ids, { redo: true });
+  UndoStack.pop();
+  assert.equal(UndoStack.popRedo(), null);
+  release();
+  await new Promise(r => setTimeout(r, 0));
+  assert.equal(UndoStack._redo.length, 1);
+  assert.equal(UndoStack.popRedo()?.label, 'async');
+  assert.equal(Store.tasks.rd1.RUN_TIME, '9');
 });
