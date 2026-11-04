@@ -2943,13 +2943,30 @@ export function bulkTouchesExpandedLine(
 
 /** True when a global Gantt shortcut must not act on this keydown target: text fields, dropdowns, buttons and
  *  combobox widgets own their own keys (arrows, Delete, F), so the Gantt handler stays out of their way. */
-export function shortcutTargetIgnored(t: { tagName?: string; isContentEditable?: boolean; getAttribute?: (n: string) => string | null } | null | undefined, opts?: { allowButton?: boolean }): boolean {
+export function shortcutTargetIgnored(t: { tagName?: string; isContentEditable?: boolean; getAttribute?: (n: string) => string | null } | null | undefined): boolean {
   if (!t) return false;
   const tag = t.tagName || '';
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
-  if (tag === 'BUTTON' && !opts?.allowButton) return true;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'BUTTON') return true;
   if (t.isContentEditable) return true;
   return typeof t.getAttribute === 'function' && t.getAttribute('role') === 'combobox';
+}
+
+const _TEXT_INPUT_TYPES: ReadonlySet<string> = new Set(['', 'text', 'search', 'number', 'email', 'url', 'tel', 'password', 'date', 'datetime-local', 'time', 'month', 'week']);
+
+/** True when an Undo/Redo chord (Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z, Ctrl+Y) must be left to the target because it is real
+ *  text entry: a text-like INPUT, a TEXTAREA, contenteditable, or an open AG Grid cell editor. Buttons, selects,
+ *  checkboxes, radios, range/color/file inputs and combobox widgets have no Ctrl+Z of their own, and a bar drag does not
+ *  move focus (vis-timeline's Hammer uses preventDefault:'mouse'), so a stale focus there must not swallow Undo. */
+export function historyChordIgnored(t: { tagName?: string; isContentEditable?: boolean; type?: string; getAttribute?: (n: string) => string | null; closest?: (s: string) => unknown } | null | undefined): boolean {
+  if (!t) return false;
+  if (t.isContentEditable) return true;
+  const tag = t.tagName || '';
+  if (tag === 'TEXTAREA') return true;
+  if (typeof t.closest === 'function' && t.closest('.ag-cell-edit-wrapper, .ag-popup-editor')) return true;
+  if (tag !== 'INPUT') return false;
+  const attr = typeof t.getAttribute === 'function' ? t.getAttribute('type') : null;
+  const type = String(attr ?? t.type ?? '').toLowerCase();
+  return _TEXT_INPUT_TYPES.has(type);
 }
 
 /** The row an Up/Down arrow moves to: the neighbour of `current` in the rendered row order, or null at an edge
@@ -6518,12 +6535,12 @@ export const Interaction = {
       return;
     }
     // Ignore when typing in inputs; dropdowns and buttons keep their own keys (arrows, Delete, F).
-    // Undo/Redo chords still act with a plain button focused (the header badge or Save keeps focus after a click or
-    // after the unsaved dialog closes); a button has no Ctrl+Z of its own.
+    // Undo/Redo chords ignore only real text entry (historyChordIgnored): a bar drag does not move focus, so a button,
+    // select or checkbox used earlier may still hold it, and none of them has a Ctrl+Z of its own.
     const mod = e.metaKey || e.ctrlKey;
     const zy = typeof e.key === 'string' ? e.key.toLowerCase() : '';
     const historyChord = mod && !e.altKey && (zy === 'z' || (zy === 'y' && e.ctrlKey && !e.shiftKey));
-    if (shortcutTargetIgnored(e.target as HTMLElement | null, { allowButton: historyChord })) return;
+    if (historyChord ? historyChordIgnored(e.target as HTMLElement | null) : shortcutTargetIgnored(e.target as HTMLElement | null)) return;
 
     // Save and Escape stay global; Undo, Delete, F and arrow navigation act only while the Gantt tab is showing.
     const onGantt = Timeline._ganttActive();
@@ -6531,7 +6548,9 @@ export const Interaction = {
     // Undo
     if (mod && !e.shiftKey && e.key.toLowerCase() === 'z') {
       if (!onGantt) return;
-      if (UndoStack._entries.length) { e.preventDefault(); UndoStack.pop(); }
+      e.preventDefault();
+      if (UndoStack._entries.length) UndoStack.pop();
+      else Toast.show(Util.t('toast.nothing_to_undo'), 'info');
       return;
     }
 
@@ -6542,7 +6561,9 @@ export const Interaction = {
     const mac = typeof navigator !== 'undefined' && /mac|iphone|ipad/i.test(navigator.platform || '');
     if ((mod && e.shiftKey && !e.altKey && keyLower === 'z') || (e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey && !mac && keyLower === 'y')) {
       if (!onGantt) return;
-      if (UndoStack._redo.length) { e.preventDefault(); UndoStack.popRedo(); }
+      e.preventDefault();
+      if (UndoStack._redo.length) UndoStack.popRedo();
+      else Toast.show(Util.t('toast.nothing_to_redo'), 'info');
       return;
     }
 

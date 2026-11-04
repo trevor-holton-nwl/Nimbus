@@ -181,6 +181,8 @@ window.__NIMBUS_LOCALES.en = {
   'toast.backend_unreachable_cache':   '⚠ Backend unreachable — showing cached data. Some orders may be missing.',
   'toast.backend_unreachable_empty':   'Cannot reach the server, so no orders are shown. NIMBUS keeps retrying and will reload automatically when it is back.',
   'toast.nothing_to_save':             'Nothing to save.',
+  'toast.nothing_to_undo':             'Nothing to undo.',
+  'toast.nothing_to_redo':             'Nothing to redo.',
   'toast.save_handler_error':          'Saved, but the screen could not finish updating. Reload to see the saved state.',
   'toast.backend_recovered':           'Backend recovered — reloading data',
   'toast.data_integrity_gap':          '⚠ {{count}} order(s) lost between backend and UI — see Log',

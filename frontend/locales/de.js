@@ -150,6 +150,8 @@ window.__NIMBUS_LOCALES.de = {
   'toast.backend_unreachable_cache':   '⚠ Server nicht erreichbar — Cache-Daten werden angezeigt. Einige Aufträge könnten fehlen.',
   'toast.backend_unreachable_empty':   'Der Server ist nicht erreichbar, daher werden keine Aufträge angezeigt. NIMBUS versucht es weiter und lädt automatisch neu, sobald er wieder erreichbar ist.',
   'toast.nothing_to_save':             'Nichts zu speichern.',
+  'toast.nothing_to_undo':             'Nichts rückgängig zu machen.',
+  'toast.nothing_to_redo':             'Nichts zu wiederholen.',
   'toast.save_handler_error':          'Gespeichert, aber die Ansicht konnte nicht fertig aktualisiert werden. Neu laden, um den gespeicherten Stand zu sehen.',
   'toast.backend_recovered':           'Server wiederhergestellt — Daten werden neu geladen',
   'toast.data_integrity_gap':          '⚠ {{count}} Auftrag/Aufträge zwischen Server und UI verloren — Protokoll ansehen',

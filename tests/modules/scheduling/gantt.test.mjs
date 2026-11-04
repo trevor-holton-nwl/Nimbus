@@ -4771,7 +4771,7 @@ test('Interaction.promptMoveBy: cancel does nothing; a pick applies the delta', 
 });
 
 // Regression: the header unsaved badge became a <button>; focus left on it (or Save) swallowed Ctrl+Z.
-test('Undo/Redo chords act with a plain button focused; text fields and dropdowns still ignore', () => {
+test('Undo/Redo chords act with a plain button focused; text fields still ignore', () => {
   const priorActive = Timeline._ganttActive;
   const priorUndo = UndoStack.pop, priorRedo = UndoStack.popRedo;
   const priorEntries = UndoStack._entries, priorRedoStack = UndoStack._redo;
@@ -4794,12 +4794,124 @@ test('Undo/Redo chords act with a plain button focused; text fields and dropdown
       assert.deepEqual(calls, ['undo', 'redo', 'redo'], target.tagName + ' ' + (target.id || ''));
     }
     calls.length = 0;
-    for (const tagName of ['INPUT', 'TEXTAREA', 'SELECT']) press({ tagName, closest: () => null }, { ctrlKey: true });
-    assert.deepEqual(calls, [], 'text fields and dropdowns keep Ctrl+Z');
+    for (const tagName of ['INPUT', 'TEXTAREA']) press({ tagName, closest: () => null }, { ctrlKey: true });
+    assert.deepEqual(calls, [], 'text fields keep Ctrl+Z');
   } finally {
     Timeline._ganttActive = priorActive; UndoStack.pop = priorUndo; UndoStack.popRedo = priorRedo;
     UndoStack._entries = priorEntries; UndoStack._redo = priorRedoStack;
   }
+});
+
+// Regression: a bar drag does not move focus, so a control used earlier (select, checkbox, filter box) kept it
+// and swallowed Ctrl+Z with no feedback. Only real text entry may keep the chord.
+function _historyHarness() {
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
+  const priorActive = Timeline._ganttActive;
+  Timeline._ganttActive = () => true;
+  const toasts = [];
+  const priorToast = Toast.show;
+  Toast.show = (msg, type) => { toasts.push({ msg, type }); };
+  const press = (target, over = {}) => {
+    const ev = { key: 'z', ctrlKey: true, metaKey: false, shiftKey: false, altKey: false, defaultPrevented: false, target: { closest: () => null, ...target }, prevented: 0, preventDefault() { this.prevented++; }, ...over };
+    Interaction._onKeyDown(ev);
+    return ev;
+  };
+  const restore = () => { Toast.show = priorToast; Timeline._ganttActive = priorActive; Selection.clear(); Interaction._multiDropHandled = null; fx.restore(); restoreClock(); };
+  return { press, toasts, restore };
+}
+function _dropOne(id, line) {
+  const pos = _multiFixture([id], line);
+  Selection.clear(); Interaction._multiDropHandled = null;
+  const a = pos.get(id);
+  Timeline._items = { get: (i) => (i === id ? { start: new Date(a.start.getTime() + 86400000), end: new Date(a.end.getTime() + 86400000), group: line } : undefined), update: () => {} };
+  Interaction._onDataSetUpdate({ items: [id] });
+  return a;
+}
+
+test('Undo chord after a drop acts with a button, select, checkbox, timeline or body focused', () => {
+  const h = _historyHarness();
+  const targets = [
+    { tagName: 'BUTTON', id: 'schedule-unsaved' }, { tagName: 'BUTTON', id: 'save' }, { tagName: 'SELECT' },
+    { tagName: 'INPUT', type: 'checkbox', getAttribute: n => (n === 'type' ? 'checkbox' : null) },
+    { tagName: 'DIV', id: 'vis-timeline' }, { tagName: 'BODY' },
+    { tagName: 'DIV', getAttribute: n => (n === 'role' ? 'combobox' : null) },
+  ];
+  try {
+    for (const [i, target] of targets.entries()) {
+      const a = _dropOne('hk-' + i, 'HIST-LINE');
+      assert.equal(Store.tasks['hk-' + i].end_date.getTime(), a.end.getTime() + 86400000, 'drop committed');
+      const ev = h.press(target);
+      assert.equal(ev.prevented, 1, 'handled ' + (target.id || target.tagName));
+      assert.equal(Store.tasks['hk-' + i].end_date.getTime(), a.end.getTime(), 'row restored with focus on ' + (target.id || target.tagName));
+    }
+  } finally { h.restore(); }
+});
+
+test('Undo/Redo chords never fire from text entry or an open AG Grid cell editor', () => {
+  const h = _historyHarness();
+  try {
+    const a = _dropOne('hk-text', 'HIST-LINE');
+    const moved = a.end.getTime() + 86400000;
+    const typing = [
+      { tagName: 'INPUT' }, { tagName: 'INPUT', getAttribute: n => (n === 'type' ? 'text' : null) },
+      { tagName: 'INPUT', getAttribute: n => (n === 'type' ? 'search' : null) },
+      { tagName: 'INPUT', getAttribute: n => (n === 'type' ? 'number' : null) },
+      { tagName: 'TEXTAREA' }, { tagName: 'DIV', isContentEditable: true },
+      { tagName: 'INPUT', getAttribute: n => (n === 'type' ? 'checkbox' : null), closest: s => (/ag-cell-edit-wrapper/.test(s) ? {} : null) },
+    ];
+    for (const t of typing) {
+      const ev = h.press(t);
+      h.press(t, { shiftKey: true, key: 'Z' }); h.press(t, { key: 'y' });
+      assert.equal(ev.prevented, 0);
+      assert.equal(Store.tasks['hk-text'].end_date.getTime(), moved, 'untouched');
+    }
+    assert.deepEqual(h.toasts, [], 'no toast while typing');
+    assert.equal(UndoStack._entries.length, 1);
+  } finally { h.restore(); }
+});
+
+test('Redo chords reach popRedo from a select or checkbox; Ctrl+Shift+Z and Ctrl+Y', () => {
+  const h = _historyHarness();
+  const priorRedo = UndoStack.popRedo; const priorStack = UndoStack._redo;
+  const calls = [];
+  UndoStack.popRedo = () => { calls.push('redo'); return null; };
+  UndoStack._redo = [{ label: 'r', undoFn() {}, at: 0 }];
+  try {
+    for (const t of [{ tagName: 'SELECT' }, { tagName: 'INPUT', getAttribute: n => (n === 'type' ? 'checkbox' : null) }]) {
+      h.press(t, { shiftKey: true, key: 'Z' }); h.press(t, { key: 'y' });
+    }
+    assert.deepEqual(calls, ['redo', 'redo', 'redo', 'redo']);
+  } finally { UndoStack.popRedo = priorRedo; UndoStack._redo = priorStack; h.restore(); }
+});
+
+test('Empty undo/redo stack on the Gantt shows a toast and consumes the key; not in a text field', () => {
+  const h = _historyHarness();
+  try {
+    _multiFixture(['hk-empty'], 'HIST-LINE');
+    const ev = h.press({ tagName: 'DIV' });
+    assert.equal(ev.prevented, 1);
+    h.press({ tagName: 'BUTTON' }, { shiftKey: true, key: 'Z' });
+    assert.deepEqual(h.toasts.map(t => t.msg), ['toast.nothing_to_undo', 'toast.nothing_to_redo']);
+    h.toasts.length = 0;
+    h.press({ tagName: 'INPUT' }); h.press({ tagName: 'TEXTAREA' }, { key: 'y' });
+    assert.deepEqual(h.toasts, []);
+    Timeline._ganttActive = () => false;
+    h.press({ tagName: 'DIV' });
+    assert.deepEqual(h.toasts, [], 'off the Gantt tab: no toast');
+  } finally { h.restore(); }
+});
+
+test('A tasks:bulk between a drop and Ctrl+Z leaves nothing to undo and says so', () => {
+  const h = _historyHarness();
+  try {
+    _dropOne('hk-bulk', 'HIST-LINE');
+    assert.equal(UndoStack._entries.length, 1);
+    Store.emit({ type: 'tasks:bulk', source: 'test' });
+    assert.equal(UndoStack._entries.length, 0);
+    h.press({ tagName: 'SELECT' });
+    assert.deepEqual(h.toasts.map(t => t.msg), ['toast.nothing_to_undo']);
+  } finally { h.restore(); }
 });
 
 // Redo keys (Stage 3): Ctrl/Cmd+Shift+Z everywhere, Ctrl+Y on Windows/Linux only; the Undo key is unchanged.
@@ -4844,7 +4956,7 @@ test('Redo keys: Ctrl/Cmd+Shift+Z and Ctrl+Y redo, Ctrl+Z undoes, Ctrl+Shift+Z i
     Timeline._ganttActive = () => true;
     UndoStack._redo = [];
     ev = press({ ctrlKey: true, shiftKey: true });
-    assert.deepEqual(calls, [], 'nothing to redo: popRedo is not called'); assert.equal(ev.prevented, 0, 'no preventDefault without a redo entry');
+    assert.deepEqual(calls, [], 'nothing to redo: popRedo is not called'); assert.equal(ev.prevented, 1, 'consumed with a toast so the browser does nothing else');
   } finally {
     Timeline._ganttActive = priorActive; UndoStack.pop = priorUndo; UndoStack.popRedo = priorRedo;
     UndoStack._entries = priorEntries; UndoStack._redo = priorRedoStack;

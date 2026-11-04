@@ -150,6 +150,8 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.backend_unreachable_cache':   '⚠ Serveur inaccessible — affichage des données en cache. Certains ordres peuvent manquer.',
   'toast.backend_unreachable_empty':   'Le serveur est inaccessible, aucune commande n\'est donc affichée. NIMBUS réessaie et rechargera automatiquement dès son retour.',
   'toast.nothing_to_save':             'Rien à enregistrer.',
+  'toast.nothing_to_undo':             'Rien à annuler.',
+  'toast.nothing_to_redo':             'Rien à rétablir.',
   'toast.save_handler_error':          'Enregistré, mais l\'écran n\'a pas pu finir de se mettre à jour. Rechargez pour voir l\'état enregistré.',
   'toast.backend_recovered':           'Serveur rétabli — rechargement des données',
   'toast.data_integrity_gap':          '⚠ {{count}} ordre(s) perdu(s) entre le serveur et l\'interface — voir Journal',

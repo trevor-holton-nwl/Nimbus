@@ -150,6 +150,8 @@ window.__NIMBUS_LOCALES.es = {
   'toast.backend_unreachable_cache':   '⚠ Servidor no disponible — mostrando datos en caché. Es posible que falten algunos pedidos.',
   'toast.backend_unreachable_empty':   'No se puede conectar con el servidor, por lo que no se muestran pedidos. NIMBUS sigue reintentando y recargará automáticamente cuando vuelva.',
   'toast.nothing_to_save':             'No hay nada que guardar.',
+  'toast.nothing_to_undo':             'No hay nada que deshacer.',
+  'toast.nothing_to_redo':             'No hay nada que rehacer.',
   'toast.save_handler_error':          'Guardado, pero la pantalla no pudo terminar de actualizarse. Recargue para ver lo guardado.',
   'toast.backend_recovered':           'Servidor recuperado — recargando datos',
   'toast.data_integrity_gap':          '⚠ {{count}} pedido(s) perdidos entre el servidor y la interfaz — ver Registro',
