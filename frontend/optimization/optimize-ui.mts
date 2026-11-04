@@ -119,9 +119,12 @@ function previewEvaluationRequest(
   };
 }
 
+/** The window presets the dialog knows: the Alert Horizon and 2 Weeks chips (the two that seed from a saved default) and Custom. */
+type OptimizerPreset = 'horizon' | '2w' | 'custom';
+
 export const OptimizeDialog = (() => {
   let _mode: OptimizerMode = 'changeover';
-  let _preset  = '2w';
+  let _preset: OptimizerPreset = '2w';
   let _start: Date | null   = null;
   let _end: Date | null     = null;
   let _fpStart: NimbusVendor.FlatpickrInstance | null = null;
@@ -137,7 +140,8 @@ export const OptimizeDialog = (() => {
   // [From 00:00, To+1 00:00). On ("Adjust times"): date+time pickers and raw instants. Reset on every open().
   let _timeMode = false;
 
-  const PRESET_DAYS: Record<string, number> = { '2w': 14 }; // UI only exposes '2w' and 'custom'
+  /** Fixed-length presets in days; 'horizon' derives its length from the plant's alert horizon and 'custom' is picked by hand. */
+  const PRESET_DAYS = { '2w': 14 } as const;
 
   function _initPickers() {
     if (_fpStart) return;
@@ -193,15 +197,24 @@ export const OptimizeDialog = (() => {
     if (_mode === 'backlog') _applyBacklogDefaults();
   }
 
-  function _linesForPlant() {
-    if (!_plant) return [];
+  /** The plant's lines (sorted) and order counts per line, memoised on the plant and `Store.rev()` so typing in the
+   *  line filter or toggling a checkbox does not rescan every task of the plant. */
+  let _lineInfoCache: { plant: string; rev: number; lines: string[]; counts: Record<string, number> } | null = null;
+  function _lineInfo(): { lines: string[]; counts: Record<string, number> } {
+    if (!_plant) return { lines: [], counts: {} };
+    const rev = Store.rev();
+    if (_lineInfoCache && _lineInfoCache.plant === _plant && _lineInfoCache.rev === rev) return _lineInfoCache;
     const set = new Set(Store.linesForSelectedPlant());
+    const counts: Record<string, number> = {};
     for (const t of Store.tasksByPlant(_plant)) {
       const l = t.MACHINE || 'Unknown';
       set.add(l);
+      counts[l] = (counts[l] || 0) + 1;
     }
-    return [...set].sort((a, b) => a.localeCompare(b));
+    _lineInfoCache = { plant: _plant, rev, lines: [...set].sort((a, b) => a.localeCompare(b)), counts };
+    return _lineInfoCache;
   }
+  function _linesForPlant() { return _lineInfo().lines; }
 
   function _renderLines() {
     const list = document.getElementById('opt-lines-list');
@@ -215,12 +228,8 @@ export const OptimizeDialog = (() => {
       return;
     }
 
-    // Count orders per line (scoped to selected plant)
-    const orderCounts: Record<string, number> = {};
-    for (const t of Store.tasksByPlant(_plant)) {
-      const l = t.MACHINE || 'Unknown';
-      orderCounts[l] = (orderCounts[l] || 0) + 1;
-    }
+    // Orders per line (scoped to the selected plant), cached by _lineInfo
+    const orderCounts = _lineInfo().counts;
 
     const q = _lineSearch.toLowerCase().trim();
     const visible = q ? allLines.filter(l => l.toLowerCase().includes(q)) : allLines;
@@ -249,9 +258,12 @@ export const OptimizeDialog = (() => {
     if (count) count.textContent = Util.t('ui.lines_selected', { sel: _selectedLines.size, total: allLines.length });
   }
 
+  /** The filter text applies at once (Select all reads it); the list re-renders once typing pauses. */
+  let _filterTimer: ReturnType<typeof setTimeout> | null = null;
   function filterLines(q: string) {
     _lineSearch = q || '';
-    _renderLines();
+    if (_filterTimer) clearTimeout(_filterTimer);
+    _filterTimer = setTimeout(() => { _filterTimer = null; _renderLines(); }, 120);
   }
 
   function selectAllLines(checked: boolean) {
@@ -271,7 +283,7 @@ export const OptimizeDialog = (() => {
     else _selectedLines.delete(line);
     const count = document.getElementById('opt-lines-count');
     const total = _linesForPlant().length;
-    if (count) count.textContent = `${_selectedLines.size} of ${total} selected`;
+    if (count) count.textContent = Util.t('ui.lines_selected', { sel: _selectedLines.size, total });
     if (_mode === 'backlog') _applyBacklogDefaults();
   }
 
@@ -392,14 +404,15 @@ export const OptimizeDialog = (() => {
 
   function applyPreset(key: string) {
     const prevPreset = _preset;
-    _preset = key;
+    const preset: OptimizerPreset = key === 'custom' || key === 'horizon' ? key : '2w';
+    _preset = preset;
     document.querySelectorAll<HTMLElement>('.opt-preset-chip').forEach((c) =>
       c.classList.toggle('active', c.dataset.preset === key)
     );
     const row = document.getElementById('opt-date-row');
     if (row) row.classList.toggle('visible', key === 'custom');
 
-    if (key === 'custom') {
+    if (preset === 'custom') {
       // Choosing Custom from a preset (or with nothing picked yet) starts as today -> today, one whole day,
       // so Run is never blocked on an empty picker. Re-clicking Custom keeps what the planner picked. In time
       // mode the existing instants are kept, as before.
@@ -412,23 +425,23 @@ export const OptimizeDialog = (() => {
       }
     } else {
       let days: number;
-      if (key === 'horizon') {
-        // Store._state.masterData direct touch — deliberate, out of scope for this
-        // task (see the file header comment above OptimizeDialog).
-        const plantRow = Store._state.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
+      if (preset === 'horizon') {
+        const plantRow = Store.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
         const horizonMinutes = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? 20160;
         days = Math.max(1, Math.ceil(horizonMinutes / 1440));
       } else {
-        days = PRESET_DAYS[key];
+        days = PRESET_DAYS[preset];
       }
       const now = Store.plantNow(_plant) ?? Store.serverNow();
       now.setSeconds(0, 0);
       _start = new Date(now);
-      _end   = new Date(now.getTime() + days * Config.MS_DAY);
+      // setDate, not + days * MS_DAY: a window crossing a DST change keeps the same wall-clock end time.
+      _end = new Date(now);
+      _end.setDate(_end.getDate() + days);
       _fpStart?.setDate(_start, false);
       _fpEnd?.setDate(_end, false);
     }
-    if (_mode === 'backlog' && key !== 'custom') {
+    if (_mode === 'backlog' && preset !== 'custom') {
       _startDirty = true;
       _endDirty = true;
     }
@@ -1009,6 +1022,11 @@ export const OptimizeDialog = (() => {
 /** Return shape of Util.scheduleKpis — same ReturnType<typeof ...> precedent as
  *  Hierarchy's HierarchyUtilMatrix / Dashboard's DashboardUtilMatrix (Task 4). */
 type OptimizerKpis = ReturnType<typeof Util.scheduleKpis>;
+
+/** The before/after KPI cards look this many days ahead (the `Util.scheduleKpis` horizon). One constant for every plan. */
+const KPI_HORIZON_DAYS = 14;
+const previewKpis = (tasks: NimbusTask[], snapshot: ScheduleSnapshot): OptimizerKpis =>
+  Util.scheduleKpis(tasks, KPI_HORIZON_DAYS, snapshot, snapshot.frozenHorizonEnd);
 
 /** Zero-filled fallback so pre/post KPI reads never need an intermediate
  *  `{}` — every OptimizerKpis field is a required number. */
@@ -1862,7 +1880,7 @@ export const OptimizerPreview = {
       PerfMonitor.record('Optimize.snapshot', performance.now() - _snapT0);
       // Pre-KPIs from the (filtered) snapshot — it IS the current state right now.
       const _preKpiT0 = performance.now();
-      preKpis = Util.scheduleKpis(snapshot.filter(inScope), 14, candidateSnapshot, candidateSnapshot.frozenHorizonEnd);
+      preKpis = previewKpis(snapshot.filter(inScope), candidateSnapshot);
       PerfMonitor.record('Optimize.preKPIs', performance.now() - _preKpiT0);
     } catch (error) {
       if (primaryEvaluation instanceof Promise) primaryEvaluation.catch(() => undefined);   // never an unhandled rejection
@@ -1880,7 +1898,7 @@ export const OptimizerPreview = {
     const postTasks = applyPatchesToSnapshot(candidateSnapshot.tasks, candidate.patches).filter(inScope);
     PerfMonitor.record('Optimize.applyPatches', performance.now() - _applyPatchesT0a);
     const _postKpiT0 = performance.now();
-    const postKpis  = Util.scheduleKpis(postTasks, 14, candidateSnapshot, candidateSnapshot.frozenHorizonEnd);
+    const postKpis  = previewKpis(postTasks, candidateSnapshot);
     PerfMonitor.record('Optimize.postKPIs', performance.now() - _postKpiT0);
 
     const previewDiagnostics = [...candidate.diagnostics.events];
@@ -1996,7 +2014,7 @@ export const OptimizerPreview = {
             const _applyPatchesT0b = performance.now();
             const altPostTasks = applyPatchesToSnapshot(candidateSnapshot.tasks, outcome.value.patches).filter(inScope);
             PerfMonitor.record('Optimize.applyPatches', performance.now() - _applyPatchesT0b);
-            const altKpis = Util.scheduleKpis(altPostTasks, 14, candidateSnapshot, candidateSnapshot.frozenHorizonEnd);
+            const altKpis = previewKpis(altPostTasks, candidateSnapshot);
             finalists.push({
               label: String.fromCharCode(65 + finalists.length), // 'B', 'C', ... by position, so a failed alt leaves no gap
               mode: altModes[idx], kpis: altKpis,
@@ -2026,7 +2044,7 @@ export const OptimizerPreview = {
         const _applyPatchesT0b = performance.now();
         const altPostTasks = applyPatchesToSnapshot(candidateSnapshot.tasks, altCandidate.patches).filter(inScope);
         PerfMonitor.record('Optimize.applyPatches', performance.now() - _applyPatchesT0b);
-        const altKpis = Util.scheduleKpis(altPostTasks, 14, candidateSnapshot, candidateSnapshot.frozenHorizonEnd);
+        const altKpis = previewKpis(altPostTasks, candidateSnapshot);
         finalists.push({
           label: String.fromCharCode(65 + finalists.length), // 'B', 'C', ... by position, so a failed alt leaves no gap
           mode: altMode, kpis: altKpis,
