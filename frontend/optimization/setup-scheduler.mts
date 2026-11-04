@@ -3511,11 +3511,14 @@ function candidateForSequence(
     // Under plantDefaultMinutes the null-state and uncovered edges still reserve the plant default before the
     // firmed order (the charge `validateCandidate` makes), so the predecessor is not dropped at validation.
     const boundaryChargeable = setupChargeableOnLine(bounds, snapshot, line);
-    const reserveBoundaryDefault = (): void => {
-      const minutes = chargedSetupMinutes(bounds.runContext, null, boundaryChargeable);
-      if (!minutes) return;
+    // One reservation for both the plant-default charge and a resolved transition. A zero-minute resolved transition
+    // needs no setup window, only that the cursor has not run past the boundary (`effectiveMin === 0` special case);
+    // the default charge returns early on zero minutes, so it never reaches that branch.
+    const reserveBoundarySetup = (minutes: number): void => {
       const setupStart = new Date(firmed.start.getTime() - minutes * 60 * 1000);
-      const fits = setupFitsBefore(snapshot, line, bounds.setup.plant, cursor, setupStart, firmed.start, bounds.runContext);
+      const fits = minutes === 0
+        ? cursor <= firmed.start
+        : setupFitsBefore(snapshot, line, bounds.setup.plant, cursor, setupStart, firmed.start, bounds.runContext);
       if (!fits) {
         missingEdges.push({
           line,
@@ -3534,6 +3537,11 @@ function candidateForSequence(
           taskId: taskId(firmed.task),
         });
       }
+    };
+    const reserveBoundaryDefault = (): void => {
+      const minutes = chargedSetupMinutes(bounds.runContext, null, boundaryChargeable);
+      if (!minutes) return;
+      reserveBoundarySetup(minutes);
     };
     if (predecessorState === null || firmed.state === null) {
       missingEdges.push(unknownInitialStateEdge(line, firmed.task));
@@ -3556,28 +3564,7 @@ function candidateForSequence(
         });
         reserveBoundaryDefault();
       } else {
-        const setupStart = new Date(firmed.start.getTime() - resolved.effectiveMin * 60 * 1000);
-        const fitsIncomingSetup = resolved.effectiveMin === 0
-          ? cursor <= firmed.start
-          : setupFitsBefore(snapshot, line, bounds.setup.plant, cursor, setupStart, firmed.start, bounds.runContext);
-        if (!fitsIncomingSetup) {
-          missingEdges.push({
-            line,
-            predecessorOrderId,
-            successorOrderId: taskId(firmed.task),
-            reason: 'incoming-firmed-setup-infeasible',
-          });
-        } else {
-          setupMinutes += resolved.effectiveMin;
-          if (!suppressExplanations) {
-            explanation.push({
-              code: 'firmed-incoming-setup',
-              message: `Reserved ${resolved.effectiveMin} minutes of setup before firmed ${taskId(firmed.task)}.`,
-              line,
-              taskId: taskId(firmed.task),
-            });
-          }
-        }
+        reserveBoundarySetup(resolved.effectiveMin);
       }
     }
   }
