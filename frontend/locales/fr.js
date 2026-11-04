@@ -2753,7 +2753,7 @@ window.__NIMBUS_LOCALES.fr = {
   'am.rank_n': 'Rang {{n}}',
   'am.group_fix_n': 'Déplacer {{n}} commandes',
   'am.group_fix_n_one': 'Déplacer 1 commande',
-  'am.group_fix_confirm': 'Sortir {{n}} commandes du conflit maintenant ? Annuler conserve les 50 derniers déplacements.',
+  'am.group_fix_confirm': 'Sortir {{n}} commandes du conflit maintenant ? Annuler conserve jusqu\'aux 50 derniers déplacements.',
   'am.group_fix_done': '{{n}} commandes déplacées',
   'am.group_fix_done_one': '1 commande déplacée',
   'am.group_ack_n': 'Acquitter {{n}}…',
