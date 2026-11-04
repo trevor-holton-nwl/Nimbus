@@ -25,6 +25,8 @@ interface SandboxSnapshot {
   plants: Record<string, PlantCalendarEntry>;
   plantBlocks: NimbusPlantBlock[];
   firmedIds: Set<string>;
+  /** The plant selected at enter(): what-if rows belong to it. null = none selected. */
+  plant: string | null;
 }
 
 /* =============================================================================
@@ -48,10 +50,18 @@ export const Sandbox = {
       plants:      Util.clone(Store.plants),
       plantBlocks: Store.plantBlocks.map(b => Util.clone(b)),
       firmedIds:   new Set([...Store.firmedIds]),
+      plant:       Store.selectedPlant ?? null,
     };
     this.active = true;
     Store.emit({ type: 'sandbox:entered', source });
     return true;
+  },
+
+  /** Store.setSelectedPlant calls this before the selection changes: a live trial (active AND snapshotted) is discarded
+   *  so the outgoing plant's pre-trial state is restored first. No-op otherwise. */
+  exitForPlantSwitch(): boolean {
+    if (!this.active || !this._snapshot) return false;
+    return this.exit(false, 'plant-switch') !== null;
   },
 
   exit(apply: boolean, source?: string): SandboxSnapshot | null {

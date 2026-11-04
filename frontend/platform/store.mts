@@ -849,6 +849,11 @@ export const Store = {
   setSelectedPlant(plant: string | null, source?: string): void {
     const next = plant || null;
     if (next === this._state.selectedPlant) return; // no-op: don't re-emit
+    // What-If rows belong to the plant that was selected at enter(). A plant switch ends the trial FIRST, while
+    // selectedPlant, the Store rows and the snapshot all still describe the outgoing plant: the discard restores
+    // that plant's pre-trial state and its events fire against it, so no old-plant row survives into the new
+    // plant's load (Persistence.loadForPlant runs from the plant:selected emit below, after this returns).
+    if (typeof Sandbox !== 'undefined') Sandbox.exitForPlantSwitch();
     this._state.selectedPlant = next;
     // Lines are plant-scoped — a stale selection from the old plant must never
     // leak into the new one. Routed through setSelectedLines so this reuses its
