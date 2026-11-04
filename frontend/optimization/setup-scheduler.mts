@@ -4588,6 +4588,22 @@ function belongsBeforeFirmedBoundary(task: NimbusTask, boundary: FirmedBoundary,
   return true;
 }
 
+/** One `unknown-setup-tail-unplaced` diagnostic for an order the tail pass did not place. */
+function tailUnplacedReason(line: string, task: NimbusTask, message: string): CandidateReason {
+  return { code: 'unknown-setup-tail-unplaced', message, line, taskId: taskId(task) };
+}
+
+/** The final diagnostic for orders still unplaced after every tail attempt. */
+function pushTailLeftReasons(
+  explanation: CandidateReason[], line: string, tasks: ReadonlyArray<NimbusTask>,
+): void {
+  for (const task of tasks) {
+    explanation.push(tailUnplacedReason(
+      line, task, `Left ${taskId(task)} at its current dates; no remaining capacity for tail placement.`,
+    ));
+  }
+}
+
 export interface UnknownTailPlacement {
   patches: SchedulePatch[];
   explanation: CandidateReason[];
@@ -4672,12 +4688,9 @@ export function placeUnknownTail(
     if (bounds.clock() >= hardStop) {
       for (const remainingTask of ordered.slice(index)) {
         deferred.push(remainingTask);
-        explanation.push({
-          code: 'unknown-setup-tail-unplaced',
-          message: `Deferred ${taskId(remainingTask)}: tail placement stopped after overrunning the search deadline.`,
-          line,
-          taskId: taskId(remainingTask),
-        });
+        explanation.push(tailUnplacedReason(
+          line, remainingTask, `Deferred ${taskId(remainingTask)}: tail placement stopped after overrunning the search deadline.`,
+        ));
       }
       break;
     }
@@ -4690,12 +4703,9 @@ export function placeUnknownTail(
     if (cursor >= capacityEnd) {
       for (const remainingTask of ordered.slice(index)) {
         deferred.push(remainingTask);
-        explanation.push({
-          code: 'unknown-setup-tail-unplaced',
-          message: `Deferred ${taskId(remainingTask)}: no tail capacity remained in the horizon.`,
-          line,
-          taskId: taskId(remainingTask),
-        });
+        explanation.push(tailUnplacedReason(
+          line, remainingTask, `Deferred ${taskId(remainingTask)}: no tail capacity remained in the horizon.`,
+        ));
       }
       break;
     }
@@ -4747,14 +4757,12 @@ export function placeUnknownTail(
       // B3a: an invalid RUN_TIME is a data defect, not a capacity shortfall —
       // say so rather than reporting it as "no capacity" alongside genuine
       // capacity exhaustion.
-      explanation.push({
-        code: 'unknown-setup-tail-unplaced',
-        message: placement.kind === 'infeasible' && placement.reason === 'invalid-runtime'
+      explanation.push(tailUnplacedReason(
+        line, task,
+        placement.kind === 'infeasible' && placement.reason === 'invalid-runtime'
           ? `Deferred ${taskId(task)}: has an invalid RUN_TIME (missing, zero, or negative) — a data defect, not a capacity shortfall.`
           : `Deferred ${taskId(task)}: no remaining tail capacity fit its runtime.`,
-        line,
-        taskId: taskId(task),
-      });
+      ));
       continue;
     }
     const first = placement.productiveSegments[0];
@@ -4904,14 +4912,7 @@ function placeWholeLineAsTail(
       snapshot, bounds, line, mode, remaining, cursor, bounds.horizonEnd, patches, explanation, missingEdges, previousOrderId,
     );
   }
-  for (const task of remaining) {
-    explanation.push({
-      code: 'unknown-setup-tail-unplaced',
-      message: `Left ${taskId(task)} at its current dates; no remaining capacity for tail placement.`,
-      line,
-      taskId: taskId(task),
-    });
-  }
+  pushTailLeftReasons(explanation, line, remaining);
   return { patches, explanation, missingEdges };
 }
 
@@ -5380,14 +5381,7 @@ function evaluateLineWithFirmedBoundaries(
   const tailUnadmitted = applyUnknownTail(
     snapshot, bounds, line, mode, tailTasks, tailStart, bounds.horizonEnd, patches, explanation, missingEdges, tailPredecessorOrderId,
   );
-  for (const task of tailUnadmitted) {
-    explanation.push({
-      code: 'unknown-setup-tail-unplaced',
-      message: `Left ${taskId(task)} at its current dates; no remaining capacity for tail placement.`,
-      line,
-      taskId: taskId(task),
-    });
-  }
+  pushTailLeftReasons(explanation, line, tailUnadmitted);
   return {
     patches, score, explanation, missingEdges, candidateCount, method, termination, unchanged: false,
     seedCount, localMoveCount,
