@@ -3133,6 +3133,8 @@ export const Inspector = {
         const local = Store.tasks[id];
         if (version && local && shouldAdoptNoteVersion(local.row_version, baseVersion, local.notes, notes)) {
           local.row_version = version;
+          // The note is not part of the saved-state key: the baseline moves with the version it was taken at.
+          Persistence.adoptBaselineVersion(id, baseVersion, version);
         }
         Inspector.invalidateHistory([id]);
         return true;

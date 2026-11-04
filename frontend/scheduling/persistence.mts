@@ -332,6 +332,13 @@ export const Persistence = {
     if (json === undefined) return null;
     try { return Persistence._baselineKey(JSON.parse(json) as Record<string, unknown>); } catch { return null; }
   },
+  /** A write that changes only what is NOT in the baseline key (a note) moved the server row from `fromVersion` to
+   *  `toVersion`: carry the baseline along, but only when it sat exactly at `fromVersion` (anything else is not the state
+   *  that write was made on, and stays as it is: the row then simply never settles). */
+  adoptBaselineVersion(id: string, fromVersion: NimbusTask['row_version'], toVersion: NimbusTask['row_version']): void {
+    const base = Persistence._savedBaseline.get(id);
+    if (base && fromVersion != null && toVersion != null && base.version === fromVersion) base.version = toVersion;
+  },
   _recordBaseline(id: string, version: NimbusTask['row_version'], key: string | null): void {
     if (key === null || version == null) { Persistence._savedBaseline.delete(id); return; }
     Persistence._savedBaseline.set(id, { version, key });
