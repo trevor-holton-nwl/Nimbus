@@ -704,3 +704,34 @@ test('P2-4: the Undo stack still holds at most 10 entries', () => {
     assert.equal(UndoStack._entries[0].label, 'e2');
   } finally { UndoStack._entries.length = 0; UndoStack._entries.push(...prior); }
 });
+
+/* P4-3: stale transition patches the banner only; no full re-render. */
+test('P4-3: _markTaskStale inserts the banner under the header without calling _render, and updates it in place', () => {
+  const body = mkEl('opt-preview-body');
+  const inserted = [];
+  let banner = null;
+  const header = { ...mkEl('h'), insertAdjacentHTML(where, html) { inserted.push([where, html]); banner = { textContent: '' }; } };
+  body.querySelector = sel => (sel === '.opt-pv-header' ? header : sel.startsWith('.opt-pv-stale') ? banner : null);
+  els.set('opt-preview-body', body);
+  const priorRender = OptimizerPreview._render;
+  let renders = 0;
+  OptimizerPreview._render = () => { renders++; };
+  const priorStale = OptimizerPreview.stale;
+  try {
+    OptimizerPreview.stale = false;
+    OptimizerPreview._markTaskStale('x');
+    assert.equal(renders, 0, 'no full render');
+    assert.equal(inserted.length, 1);
+    assert.equal(inserted[0][0], 'afterend');
+    assert.match(inserted[0][1], /data-opt-stale/);
+    OptimizerPreview._showStaleBanner();
+    assert.equal(inserted.length, 1, 'a second call updates the existing banner');
+    assert.ok(banner.textContent.length > 0);
+    // No rendered header yet (loading state): falls back to the full render.
+    body.querySelector = () => null;
+    OptimizerPreview._showStaleBanner();
+    assert.equal(renders, 1);
+  } finally {
+    OptimizerPreview._render = priorRender; OptimizerPreview.stale = priorStale; els.delete('opt-preview-body');
+  }
+});

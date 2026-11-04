@@ -466,7 +466,7 @@ export const OptimizeDialog = (() => {
     const bgLabel = document.getElementById('opt-background-label');
     if (bgLabel) bgLabel.title = mode === 'backlog' ? 'Remove Backlog is not a search, so it always runs in the foreground.' : '';
     if (mode === 'backlog') _applyBacklogDefaults();
-    else _updatePlantBadge();
+    _updatePlantBadge();
   }
 
   /** One-time listener binding for the strategy `<select>` — uses
@@ -501,12 +501,33 @@ export const OptimizeDialog = (() => {
     return Engine.hasPriorityRanks('colorWheel');
   }
 
+  /** The ONE writer of the dialog's Run button: 'ready' (enabled when a plant is known), 'running' (this run is preparing)
+   *  or 'background' (a background run holds the optimizer). `dataset.busy` names the busy state so callers never infer it
+   *  from the label text. */
+  function _runButtonState(state: 'ready' | 'running' | 'background'): void {
+    const btn = document.getElementById('opt-run-btn') as HTMLButtonElement | null;
+    if (!btn) return;
+    if (state === 'running') {
+      btn.disabled = true;
+      btn.innerHTML = `<span class="opt-run-icon" aria-hidden="true">⏳</span>${Util.t('btn.optimizing')}`;
+    } else if (state === 'background') {
+      btn.disabled = true;
+      btn.textContent = Util.t('btn.opt_run_bg_busy');
+    } else {
+      btn.disabled = !(_plant || Store.selectedPlant);
+      btn.innerHTML = `<span class="opt-run-icon" aria-hidden="true">📈</span>${Util.t('btn.run_optimization')}`;
+    }
+    if (btn.dataset) { if (state === 'ready') delete btn.dataset.busy; else btn.dataset.busy = state; }
+  }
+
   function _updatePlantBadge() {
     const plant   = _plant;
+    // Bump first: an in-flight rank fetch from an earlier call must not overwrite a badge state set by an early return below.
+    const token = ++_wheelFetchToken;
     const badgeEl = document.getElementById('opt-wheel-badge');
     const runBtn = document.getElementById('opt-run-btn') as HTMLButtonElement | null;
 
-    if (runBtn) runBtn.disabled = !plant || !!OptimizerPreview._backgroundRun;
+    if (runBtn && runBtn.dataset?.busy !== 'running') runBtn.disabled = !plant || !!OptimizerPreview._backgroundRun;
 
     if (!badgeEl) return;
     const setBadge = (state: 'none' | 'loading' | 'active' | 'warn', icon: string, tip: string) => {
@@ -528,7 +549,6 @@ export const OptimizeDialog = (() => {
       return;
     }
     setBadge('loading', '', Util.t('ui.opt_badge_checking'));
-    const token = ++_wheelFetchToken;
 
     // Prefetch this plant's priority rank maps so (a) the badge reflects what
     // the optimizer will actually rank on, and (b) run() finds
@@ -661,17 +681,12 @@ export const OptimizeDialog = (() => {
     selectMode(_seedMode);
     // Reset the Run button HTML in case a previous session left it in the
     // "Optimizing…" state (e.g., Cancel mid-fetch).
-    const runBtn = document.getElementById('opt-run-btn');
-    if (runBtn) runBtn.innerHTML = `<span class="opt-run-icon" aria-hidden="true">📈</span>${Util.t('btn.run_optimization')}`;
     // Run in background always opens unticked; the planner opts in per run.
     const bgChkOpen = document.getElementById('opt-chk-background') as HTMLInputElement | null;
     if (bgChkOpen) bgChkOpen.checked = false;
     // A background run holds the optimizer: show that instead of an enabled Run.
-    if (runBtn && OptimizerPreview._backgroundRun) {
-      (runBtn as HTMLButtonElement).disabled = true;
-      runBtn.textContent = Util.t('btn.opt_run_bg_busy');
-    }
-    _updatePlantBadge();
+    _runButtonState(OptimizerPreview._backgroundRun ? 'background' : 'ready');
+    // selectMode(_seedMode) above already refreshed the badge and Run button state (a second call here only doubled the fetch).
     // Default scope to whole-plant on each open; clear stale line selection.
     _selectedLines.clear();
     _lineSearch = '';
@@ -782,17 +797,8 @@ export const OptimizeDialog = (() => {
     } catch (err) { ErrorLog.warn('optimizer', `Could not save optimizer defaults: ${err instanceof Error ? err.message : String(err)}`); }
 
     // Immediate visual feedback so the click feels responsive.
-    const runBtn = document.getElementById('opt-run-btn') as HTMLButtonElement | null;
-    const origRunHTML = runBtn ? runBtn.innerHTML : null;
-    const restoreRunBtn = () => {
-      if (!runBtn) return;
-      runBtn.disabled = !_plant;
-      if (origRunHTML !== null) runBtn.innerHTML = origRunHTML;
-    };
-    if (runBtn) {
-      runBtn.disabled = true;
-      runBtn.innerHTML = `<span class="opt-run-icon" aria-hidden="true">⏳</span>${Util.t('btn.optimizing')}`;
-    }
+    const restoreRunBtn = () => _runButtonState('ready');
+    _runButtonState('running');
 
     // Open the preview dialog with a spinner IMMEDIATELY — before the rank-map
     // freshness fetch below and the config-modal close transition. Otherwise
@@ -946,16 +952,11 @@ export const OptimizeDialog = (() => {
   /** Entry point of the Run button. Any exception in the pre-run steps (rank-map fetch, confirms, tool inventory) must
    *  not leave the spinner up and the button stuck on "Optimizing": restore both and log. */
   async function run() {
-    const runBtn = document.getElementById('opt-run-btn') as HTMLButtonElement | null;
-    const origRunHTML = runBtn ? runBtn.innerHTML : null;
     try {
       await _runImpl();
     } catch (err) {
       OptimizerPreview.hideLoading();
-      if (runBtn) {
-        runBtn.disabled = !_plant;
-        if (origRunHTML !== null) runBtn.innerHTML = origRunHTML;
-      }
+      _runButtonState('ready');
       _reshow();
       ErrorLog.error('optimize', 'Optimize run failed before the preview started', err);
     }
@@ -1002,7 +1003,7 @@ export const OptimizeDialog = (() => {
     Modal.close('modal-opt-to');
   }
 
-  return { open, close, run, applyPreset, selectMode, _buildPlantSelect, _updatePlantBadge, setScope, filterLines, selectAllLines, _onLineToggle, openFromPicker, cancelFromPicker, commitFrom, openToPicker, cancelToPicker, commitTo, setTimeMode };
+  return { open, close, run, applyPreset, selectMode, _buildPlantSelect, _updatePlantBadge, _runButtonState, setScope, filterLines, selectAllLines, _onLineToggle, openFromPicker, cancelFromPicker, commitFrom, openToPicker, cancelToPicker, commitTo, setTimeMode };
 })();
 
 /** Return shape of Util.scheduleKpis — same ReturnType<typeof ...> precedent as
@@ -1596,7 +1597,20 @@ export const OptimizerPreview = {
     OptimizerPreview._staleReason = reason;
     OptimizerPreview._staleMessageKey = messageKey;
     OptimizerPreview._syncApplyButton();
-    if (typeof document !== 'undefined') OptimizerPreview._render();
+    OptimizerPreview._showStaleBanner();
+  },
+
+  /** Show the stale banner without rebuilding the preview: a full `_render` collapsed any open <details> and reset the
+   *  scroll. The banner is the only thing `_render` derives from `stale`; an unrendered body falls back to it. */
+  _showStaleBanner(): void {
+    if (typeof document === 'undefined') return;
+    const body = document.getElementById('opt-preview-body');
+    const header = body?.querySelector?.('.opt-pv-header') ?? null;
+    if (!body || !header || typeof header.insertAdjacentHTML !== 'function') { OptimizerPreview._render(); return; }
+    const message = Util.escapeHtml(OptimizerPreview._staleMessage());
+    const existing = body.querySelector('.opt-pv-stale[data-opt-stale]');
+    if (existing) existing.textContent = OptimizerPreview._staleMessage();
+    else header.insertAdjacentHTML('afterend', `<div class="opt-pv-stale" data-opt-stale role="status">${message}</div>`);
   },
 
   /** Single place that decides whether Apply is clickable — always derived
@@ -1630,7 +1644,7 @@ export const OptimizerPreview = {
     OptimizerPreview._staleReason = `${kind} setup data changed`;
     OptimizerPreview._staleMessageKey = 'ui.opt_stale_banner';
     OptimizerPreview._syncApplyButton();
-    if (typeof document !== 'undefined') OptimizerPreview._render();
+    OptimizerPreview._showStaleBanner();
   },
 
   /** One-time safety net: the modal's backdrop is wired (like every other modal's)
@@ -1978,13 +1992,13 @@ export const OptimizerPreview = {
           finalists.length = 1;
         } else {
           outcomes.forEach((outcome, idx) => {
-            if (!outcome.value) return;   // this alt failed — omit it; other alts (and Plan A) still show
+            if (!outcome.value) { OptimizerPreview._logAltFailure(altModes[idx], outcome.error); return; }   // omit it; other alts (and Plan A) still show
             const _applyPatchesT0b = performance.now();
             const altPostTasks = applyPatchesToSnapshot(candidateSnapshot.tasks, outcome.value.patches).filter(inScope);
             PerfMonitor.record('Optimize.applyPatches', performance.now() - _applyPatchesT0b);
             const altKpis = Util.scheduleKpis(altPostTasks, 14, candidateSnapshot, candidateSnapshot.frozenHorizonEnd);
             finalists.push({
-              label: String.fromCharCode(66 + idx), // 'B', 'C', ...
+              label: String.fromCharCode(65 + finalists.length), // 'B', 'C', ... by position, so a failed alt leaves no gap
               mode: altModes[idx], kpis: altKpis,
               whyNot: describeFinalistWhyNot(postKpis, altKpis),
             });
@@ -2014,20 +2028,25 @@ export const OptimizerPreview = {
         PerfMonitor.record('Optimize.applyPatches', performance.now() - _applyPatchesT0b);
         const altKpis = Util.scheduleKpis(altPostTasks, 14, candidateSnapshot, candidateSnapshot.frozenHorizonEnd);
         finalists.push({
-          label: String.fromCharCode(66 + idx), // 'B', 'C', ...
+          label: String.fromCharCode(65 + finalists.length), // 'B', 'C', ... by position, so a failed alt leaves no gap
           mode: altMode, kpis: altKpis,
           whyNot: describeFinalistWhyNot(postKpis, altKpis),
         });
       } catch (altErr: unknown) {
         // A cancelled run (newer preview / discard) must not fall through to a render.
         if (altErr instanceof Error && altErr.name === 'AbortError') throw altErr;
-        /* this alt failed — omit it; other alts (and Plan A) still show */
+        OptimizerPreview._logAltFailure(altMode, altErr);   // omit it; other alts (and Plan A) still show
       }
       // The await above may have outlived this preview.
       if (shouldStop()) { finalists.length = 1; break; }
     }
 
     return { ...base, finalists: finalists.length > 1 ? finalists : null, runtimeMs: performance.now() - startedAt };
+  },
+
+  /** An alternate plan that failed is left out of the comparison; say why in the Error Log. */
+  _logAltFailure(altMode: OptimizerMode, error: unknown): void {
+    ErrorLog.warn('optimizer', `Alternate plan (${altMode}) failed and was omitted: ${error instanceof Error ? error.message : String(error)}`);
   },
 
   /** Publish a computed preview into OptimizerPreview state. With
@@ -2341,7 +2360,7 @@ export const OptimizerPreview = {
     })();
 
     const staleHtml = OptimizerPreview.stale
-      ? `<div class="opt-pv-stale" role="status">${Util.escapeHtml(OptimizerPreview._staleMessage())}</div>`
+      ? `<div class="opt-pv-stale" data-opt-stale role="status">${Util.escapeHtml(OptimizerPreview._staleMessage())}</div>`
       : '';
 
     // Never-freeze fallback banner — orders this candidate actually placed
@@ -2397,7 +2416,7 @@ export const OptimizerPreview = {
       const sign = d > 0 ? '+' : (d < 0 ? '−' : '');
       const dNum = isInt ? `${Math.abs(d)}` : absD.toFixed(1);
       const pct = (preV !== 0) ? Math.round((d / preV) * 100) : null;
-      const pctStr = (pct !== null && !zero)
+      const pctStr = (pct !== null && pct !== 0 && !zero)
         ? ` <span class="opt-pv-pct">(${pct > 0 ? '+' : '−'}${Math.abs(pct)}%)</span>`
         : '';
       const deltaText = zero
@@ -2959,13 +2978,8 @@ export const OptimizerPreview = {
     // The dialog's Run button follows the same state, so a run finishing while the dialog is open restores it.
     const runBtn = document.getElementById('opt-run-btn') as HTMLButtonElement | null;
     if (runBtn) {
-      if (running) {
-        runBtn.disabled = true;
-        runBtn.textContent = Util.t('btn.opt_run_bg_busy');
-      } else if (runBtn.textContent === Util.t('btn.opt_run_bg_busy')) {
-        runBtn.disabled = !OptimizerPreview._backgroundRun && !Store.selectedPlant;
-        runBtn.innerHTML = `<span class="opt-run-icon" aria-hidden="true">📈</span>${Util.t('btn.run_optimization')}`;
-      }
+      if (running) OptimizeDialog._runButtonState('background');
+      else if (runBtn.dataset?.busy === 'background') OptimizeDialog._runButtonState('ready');
     }
     btn.classList.toggle('is-running', running);
     btn.title = running ? Util.t('btn.opt_run_bg_busy') : Util.t('tip.smart_optimize');
