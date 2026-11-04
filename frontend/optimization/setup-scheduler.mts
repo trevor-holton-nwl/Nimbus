@@ -2633,6 +2633,13 @@ function intersectWindows(
   };
 }
 
+/** A line's weekly hours: its own calendar row, else all-day when the plant
+ * exists, else the default pattern (B6, see `walkFreeIntervals`). */
+function lineWeeklyHours(snapshot: Readonly<ScheduleSnapshot>, line: string, plant: string): WorkHours {
+  return snapshot.calendars[line]?.workHours
+    ?? (snapshot.plants[plant] ? candidateAllDayWorkHours() : candidateDefaultWorkHours());
+}
+
 /** Phase 1d: the raw (line ∩ plant) work window for one calendar day is a
  * run-constant fact — independent of any particular call's `[from, through]`
  * clip — so it is memoized per-(line, dayStartMs) rather than recomputed via
@@ -2650,8 +2657,7 @@ function jointWindowForDay(
   // the single plant `ctx` was built for, so this is defense-in-depth.
   const key = `${plant}${CTX_KEY_SEP}${line}|${dayStart.getTime()}`;
   if (ctx._dayWindow.has(key)) return ctx._dayWindow.get(key)!;
-  const lineHours = snapshot.calendars[line]?.workHours
-    ?? (snapshot.plants[plant] ? candidateAllDayWorkHours() : candidateDefaultWorkHours());
+  const lineHours = lineWeeklyHours(snapshot, line, plant);
   const plantHours = plantHoursOn(snapshot.plants[plant], dayStart) ?? candidateDefaultWorkHours();
   const result = intersectWindows(localWindow(lineHours, dayStart), localWindow(plantHours, dayStart));
   ctx._dayWindow.set(key, result);
@@ -2671,8 +2677,7 @@ function walkFreeIntervals(
   // when a line or plant calendar is missing. Without this, one plant with
   // no `Store.plants` entry silently placed nothing for every line in it,
   // while alerts kept computing as though hours existed.
-  const lineHours = snapshot.calendars[line]?.workHours
-    ?? (snapshot.plants[plant] ? candidateAllDayWorkHours() : candidateDefaultWorkHours());
+  const lineHours = lineWeeklyHours(snapshot, line, plant);
   const plantEntry = snapshot.plants[plant];
   const result: PlacementInterval[] = [];
   const day = new Date(from);
@@ -2719,8 +2724,7 @@ function freeIndexFor(
   const withinDay = (hours: WorkHours): boolean => Object.values(hours).every(range => (
     !range || range.length !== 2 || (range[0] >= 0 && range[1] <= 24)
   ));
-  const lineHours = snapshot.calendars[line]?.workHours
-    ?? (snapshot.plants[plant] ? candidateAllDayWorkHours() : candidateDefaultWorkHours());
+  const lineHours = lineWeeklyHours(snapshot, line, plant);
   const plantHours = snapshot.plants[plant]?.workHours ?? candidateDefaultWorkHours();
   // Every dated period's pattern can replace the default on some day, so each must stay within the day too.
   const periods = snapshot.plants[plant]?.periods ?? [];
@@ -3002,8 +3006,7 @@ function hasNominalWindow(
   // `walkFreeIntervals`/`jointWindowForDay` (all-day line when the plant exists, default plant hours), so
   // the overlong decision agrees with where the order can actually be placed.
   const plantEntry = snapshot.plants[plant];
-  const lineHours = snapshot.calendars[line]?.workHours
-    ?? (plantEntry ? candidateAllDayWorkHours() : candidateDefaultWorkHours());
+  const lineHours = lineWeeklyHours(snapshot, line, plant);
   if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return false;
   const requiredMs = Math.round(runtimeMinutes) * 60 * 1000;
   const day = new Date(from);
