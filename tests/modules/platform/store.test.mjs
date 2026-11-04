@@ -765,7 +765,7 @@ test('silent re-push on Redo emits no undo:pushed; a normal push does', () => {
   } finally { off(); }
 });
 
-test('the row budget is shared by the undo and redo stacks: oldest first across both, newest redo entry stays', () => {
+test('the row budget is shared by the undo and redo stacks: older redo entries first, then oldest undo; the protected entry stays', () => {
   const { edit } = redoFx(1);
   const B = UndoStack.MAX_ROWS;
   UndoStack._entries = []; UndoStack._redo = [];
@@ -775,11 +775,43 @@ test('the row budget is shared by the undo and redo stacks: oldest first across 
   assert.equal(UndoStack._redo.length, 1);
   assert.ok(UndoStack.rowCount(UndoStack._entries, UndoStack._redo) <= B);
   // A big redo entry arrives: the older undo entry goes, the redo entry stays.
-  UndoStack._redo.push({ label: 'huge', at: Date.now(), cost: B - 5, ids: ['rd1'], redoSnap: [], undoFn: () => {} });
-  UndoStack._trimShared();
-  assert.ok(UndoStack._redo.some(e => e.label === 'huge'), 'the newest redo entry always stays');
-  assert.equal(UndoStack._entries.length, 0, 'oldest-first across both stacks: the undo entry went');
+  const huge = { label: 'huge', at: Date.now(), cost: B - 5, ids: ['rd1'], redoSnap: [], undoFn: () => {} };
+  UndoStack._redo.push(huge);
+  UndoStack._trimShared(huge);
+  assert.ok(UndoStack._redo.some(e => e.label === 'huge'), 'the protected redo entry always stays');
+  assert.ok(!UndoStack._redo.some(e => e.label === 'redoable'), 'the older redo entry went first');
+  assert.equal(UndoStack._entries.length, 0, 'then the oldest undo entry');
   assert.ok(UndoStack.rowCount(UndoStack._entries, UndoStack._redo) <= B);
+});
+
+test('a plant-wide Apply undo costs its captured rows once in the redo stack: it does not evict other undo history', () => {
+  const { edit } = redoFx(8000);
+  UndoStack._entries = []; UndoStack._redo = [];
+  UndoStack.push('filler A', () => {}, ['x'], { cost: 5000 });
+  UndoStack.push('filler B', () => {}, ['y'], { cost: 5000 });
+  edit('big apply', { RUN_TIME: '9' });
+  UndoStack.pop();
+  assert.equal(UndoStack._redo.length, 1);
+  assert.equal(UndoStack._redo[0].cost, 8000, 'the redo entry costs its captured rows (the original is counted when re-pushed)');
+  assert.deepEqual(UndoStack._entries.map(e => e.label), ['filler A', 'filler B'], 'the other undo history survives');
+});
+
+test('popRedo never evicts the entry it just re-pushed: Ctrl+Z right after Redo still undoes it', () => {
+  const { edit } = redoFx(3);
+  const prior = UndoStack.MAX_ROWS;
+  try {
+    edit('E1', { RUN_TIME: '4' }, { redo: true }, ['rd1']);
+    edit('E2', { RUN_TIME: '5' }, { redo: true }, ['rd2']);
+    edit('E3', { RUN_TIME: '6' }, { redo: true }, ['rd3']);
+    UndoStack.pop(); UndoStack.pop(); UndoStack.pop();
+    assert.deepEqual(UndoStack._redo.map(e => e.label), ['E3', 'E2', 'E1']);
+    UndoStack.MAX_ROWS = 2;   // over budget once the re-pushed original is counted next to the two redo entries left
+    assert.equal(UndoStack.popRedo()?.label, 'E1');
+    assert.deepEqual(UndoStack._entries.map(e => e.label), ['E1'], 'the re-pushed entry is protected');
+    assert.deepEqual(UndoStack._redo.map(e => e.label), ['E2'], 'the OLDEST redo entry went first');
+    UndoStack.pop();
+    assert.equal(Store.tasks.rd1.RUN_TIME, '2', 'Ctrl+Z right after Redo undoes it');
+  } finally { UndoStack.MAX_ROWS = prior; }
 });
 
 test('a non-undo write to a redo entry id prunes it; undo / reconcile / unrelated writes do not', () => {

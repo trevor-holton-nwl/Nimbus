@@ -1284,14 +1284,15 @@ export const UndoStack = {
     this._entries = this._entries.filter(e => !e.ids || !e.ids.some(id => hit.has(id)));
     this._redo = this._redo.filter(e => !e.ids || !e.ids.some(id => hit.has(id)));
   },
-  /** Keep the TOTAL rows over both stacks within the budget: evict the oldest entry of either stack, but never the
-   *  newest redo entry (the one just recorded). */
-  _trimShared(): void {
+  /** Keep the TOTAL rows over both stacks within the budget. Redo history goes first (oldest redo entry first: it is
+   *  the cheapest thing to lose), then the oldest undo entries. `protect` is the entry the caller just recorded
+   *  (pop: the new redo entry; popRedo: the re-pushed original) and is never evicted. */
+  _trimShared(protect?: UndoEntry): void {
     while (this.rowCount(this._entries, this._redo) > this.MAX_ROWS) {
-      const oldestUndo = this._entries[0];
-      const oldestRedo = this._redo.length > 1 ? this._redo[0] : undefined;
-      if (oldestUndo && (!oldestRedo || oldestUndo.at <= oldestRedo.at)) this._entries.shift();
-      else if (oldestRedo) this._redo.shift();
+      const redoIdx = this._redo.findIndex(e => e !== protect);
+      if (redoIdx >= 0) { this._redo.splice(redoIdx, 1); continue; }
+      const undoIdx = this._entries.findIndex(e => e !== protect);
+      if (undoIdx >= 0) this._entries.splice(undoIdx, 1);
       else break;
     }
   },
@@ -1309,9 +1310,11 @@ export const UndoStack = {
       if (!capture) this._redo = [];   // a non-redoable undo changed the board in a way Redo cannot replay
       else if (capture.length) {
         // The rows the undo actually overwrote; the entry's own snapshot stays inside e.undoFn for the next undo.
-        this._redo.push({ label: e.label, undoFn: e.undoFn, at: Date.now(), ids: capture.map(t => String(t.id)),
-          cost: capture.length + (e.cost ?? e.ids?.length ?? 1), redoSnap: capture, original: e });
-        this._trimShared();
+        // Cost = the captured rows only: the original entry is counted again when popRedo re-pushes it.
+        const redoEntry: UndoEntry = { label: e.label, undoFn: e.undoFn, at: Date.now(), ids: capture.map(t => String(t.id)),
+          cost: capture.length, redoSnap: capture, original: e };
+        this._redo.push(redoEntry);
+        this._trimShared(redoEntry);
       }
       Toast.show(Util.t('toast.undone', { label: e.label }), 'success');
     };
@@ -1348,7 +1351,7 @@ export const UndoStack = {
     this.restoreTasks(movable, { exact: true });
     this._entries.push(r.original);
     if (this._entries.length > this.MAX) this._entries.shift();
-    this._trimShared();
+    this._trimShared(r.original);
     Toast.show(Util.t('toast.redone', { label: r.label }), 'success');
     return r;
   },
