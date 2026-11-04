@@ -840,3 +840,55 @@ test('P4-3 (V-U2-09): KPI scope is a strict overlap with the window; an order th
     assert.equal(result.explanation.impact.production.before, 2, 'only the two overlapping orders are in the KPI window');
   } finally { f.restore(); }
 });
+
+/* Undo family guard: a sibling the optimizer did not patch is restored only while it still equals the post-Apply row. */
+const famRow = (plant, id, line, extra = {}) => ({ ...previewTask(id, plant, 1), MACHINE: line, PARENT_ORDER: 'PAR1', MATERIAL_NUMBER: 'MAT1',
+  start_date: new Date(2026, 7, 11, 8), end_date: new Date(2026, 7, 11, 9), ...extra });
+const famMutate = () => { Store.updateTask('ud-a', { PARENT_ORDER: 'PAR1', MATERIAL_NUMBER: 'MAT1' }, 'unit-test'); };
+
+test('Undo guard: a sibling dragged after the Apply keeps the planner edit; the 3 patched rows are restored', async () => {
+  const plant = 'TQ-UNDO';
+  const edited = new Date(2026, 7, 25, 6);
+  await undoScopeRun({
+    extraFor3: [famRow(plant, 'ud-sib', `${plant}-FAMLINE`)],
+    mutate: famMutate,
+    commit: async kept => {
+      const ok = await OptimizerPreview._commitPatches(kept, { ids: [], reason: 'running' });
+      Store.updateTask('ud-sib', { start_date: edited, end_date: new Date(2026, 7, 25, 7) }, 'unit-test');
+      return ok;
+    },
+    check: r => {
+      assert.ok(!r.written.includes('ud-sib'), 'the edited sibling is not written by Undo');
+      assert.equal(Store.tasks['ud-sib'].start_date.getTime(), edited.getTime(), 'planner edit survives');
+      for (const id of ['ud-a', 'ud-b', 'ud-c']) { assert.ok(r.written.includes(id), `${id} restored`); assert.deepEqual(datesOf(Store.tasks[id]).slice(0, 2), [null, null]); }
+    },
+  });
+});
+
+test('Undo guard: a sibling untouched since the Apply is still restored with the family', async () => {
+  const plant = 'TQ-UNDO';
+  await undoScopeRun({
+    extraFor3: [famRow(plant, 'ud-sib', `${plant}-FAMLINE`)],
+    mutate: famMutate,
+    commit: kept => OptimizerPreview._commitPatches(kept, { ids: [], reason: 'running' }),
+    check: r => {
+      assert.ok(r.written.includes('ud-sib'), 'untouched sibling is part of the restore');
+      assert.equal(Store.tasks['ud-sib'].start_date.getTime(), new Date(2026, 7, 11, 8).getTime());
+      for (const id of ['ud-a', 'ud-b', 'ud-c']) assert.ok(r.written.includes(id));
+    },
+  });
+});
+
+test('Undo family key includes the plant: same parent + material in another plant is not captured or restored', async () => {
+  const plant = 'TQ-UNDO';
+  await undoScopeRun({
+    extraFor3: [famRow(plant, 'ud-sib', `${plant}-FAMLINE`), famRow('TQ-UNDO-2', 'ud-other', 'TQ-UNDO-2-LINE', { PLANT: 'TQ-UNDO-2', plant: 'TQ-UNDO-2' })],
+    mutate: famMutate,
+    commit: kept => OptimizerPreview._commitPatches(kept, { ids: [], reason: 'running' }),
+    check: r => {
+      assert.ok(!r.entry.ids.includes('ud-other'), 'other-plant row not in the pre-image');
+      assert.ok(r.entry.ids.includes('ud-sib'), 'same-plant sibling still is');
+      assert.ok(!r.written.includes('ud-other'), 'no updateMany for the other plant row');
+    },
+  });
+});

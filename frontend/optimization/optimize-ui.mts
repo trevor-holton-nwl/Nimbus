@@ -2742,13 +2742,36 @@ export const OptimizerPreview = {
    *  (PARENT_ORDER + MATERIAL_NUMBER, the grouping `_pruneAgainstLive` drops together), cloned from the live Store
    *  right before the commit. Unrelated rows are not captured, so Undo leaves edits made to them alone. */
   _undoPreImage(kept: ReadonlyArray<SchedulePatch>): NimbusTask[] {
+    // The plant is part of the key: Store.tasksArr holds every plant's rows and parent + material can repeat across plants.
+    const taskCtx = { lineSettings: Store.lineSettings, masterData: Store.masterData };
     const parentKey = (task: NimbusTask | undefined): string | null =>
-      task?.PARENT_ORDER ? `${task.PARENT_ORDER}\u0000${task.MATERIAL_NUMBER ?? ''}` : null;
+      task?.PARENT_ORDER ? `${resolveTaskPlant(task, taskCtx) ?? ''}\u0000${task.PARENT_ORDER}\u0000${task.MATERIAL_NUMBER ?? ''}` : null;
     const ids = new Set<string>(kept.map(patch => String(patch.id)));
     const keys = new Set<string>();
     for (const id of ids) { const key = parentKey(Store.tasks[id]); if (key) keys.add(key); }
     if (keys.size) for (const task of Store.tasksArr) { const key = parentKey(task); if (key && keys.has(key)) ids.add(String(task.id)); }
     return UndoStack.snapshotTasks([...ids]);
+  },
+
+  /** Cheap fingerprint of a row for the Undo sibling guard: everything but the version counter (Dates by time). */
+  _rowFingerprint(task: NimbusTask | undefined): string | null {
+    if (!task) return null;
+    return JSON.stringify(task, (key, value) => key === 'row_version' ? undefined : value);
+  },
+
+  /** The Undo function for an Apply. Kept (patched) rows are always restored; a family sibling the optimizer did not patch
+   *  is restored only while its row still equals what the Apply left, so a planner edit made after the Apply survives. */
+  _undoFor(snap: NimbusTask[], kept: ReadonlyArray<SchedulePatch>): () => void {
+    const keptIds = new Set(kept.map(patch => String(patch.id)));
+    const post = new Map<string, string | null>();
+    for (const task of snap) {
+      const id = String(task.id);
+      if (!keptIds.has(id)) post.set(id, OptimizerPreview._rowFingerprint(Store.tasks[id]));
+    }
+    return () => UndoStack.restoreTasks(snap.filter(task => {
+      const id = String(task.id);
+      return keptIds.has(id) || OptimizerPreview._rowFingerprint(Store.tasks[id]) === post.get(id);
+    }));
   },
 
   /** Commit a (possibly filtered) set of preview patches: audit, apply, undo
@@ -2804,6 +2827,8 @@ export const OptimizerPreview = {
     // Undo scope, taken AFTER the confirm and right before the apply: only the kept ids plus their distribution family.
     const snap = OptimizerPreview._undoPreImage(kept);
     Engine.applySchedulePatches(kept);
+    // Same synchronous tick: record each unpatched family sibling's post-apply state for the Undo guard.
+    const undoFn = OptimizerPreview._undoFor(snap, kept);
     // Audit after the commit, so a failed apply never logs a run that did not happen.
     if (auditDetails && plant) {
       Util.fetchTraced(`${Config.API_BASE}/audit/log`, {
@@ -2863,7 +2888,7 @@ export const OptimizerPreview = {
     const hadDismissed = Alerts.clearDismissed();
     // Push an undo entry so Ctrl+Z restores the pre-optimization state later.
     UndoStack.push(`Optimization (${mode})${plant ? ' · ' + plant : ''}`,
-      () => UndoStack.restoreTasks(snap), snap.map(t => t.id));
+      undoFn, snap.map(t => t.id));
     Toast.show(Util.t('toast.opt_applied'), 'success');
     // Fire warning toasts, the same set the deleted live apply tail fired (missing setup, needs planning, left in place,
     // distribution separation, guarded lines).
