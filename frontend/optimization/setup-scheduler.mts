@@ -2533,25 +2533,12 @@ function localWindow(hours: WorkHours, date: Date): PlacementInterval | null {
   return end > start ? { start, end } : null;
 }
 
-/** Phase 1d: the plant+line-eligible blackout block set is constant for the
- * whole run (blocks/plantBlocks never change mid-evaluation), so this merges
- * it once per line — globally, unbound by any particular query window — and
- * caches it on `ctx`. `indexedOverlapBlocks` then binary-searches this
- * per-line array per query instead of re-filtering/re-sorting/re-merging
- * every call. Clipping an already-merged, already-disjoint interval set to a
- * query window can only shrink each interval, never introduce a new merge,
- * so this produces byte-identical output to the unindexed path below. */
-function lineBlocksFor(
-  ctx: SetupRunContext, snapshot: Readonly<ScheduleSnapshot>, line: string, plant: string,
-): ReadonlyArray<{ start: number; end: number }> {
-  // Machine codes are documented as reusable across plants — fold `plant`
-  // into the key (not just `line`) so a ctx that ever saw two plants for the
-  // same line code can't return one plant's cached blocks for the other.
-  // Today every call site passes the single plant `ctx` was built for, so
-  // this is defense-in-depth, not a live bug fix.
-  const cacheKey = plant + CTX_KEY_SEP + line;
-  const cached = ctx._lineBlocks.get(cacheKey);
-  if (cached) return cached;
+/** The plant+line-eligible blackout blocks as one sorted, disjoint, merged ms
+ * interval list (touching or overlapping blocks merge). Unbound by any query
+ * window; shared by the run-cached and the ctx-less lookup. */
+function mergedLineBlocks(
+  snapshot: Readonly<ScheduleSnapshot>, line: string, plant: string,
+): { start: number; end: number }[] {
   const candidates = [
     ...snapshot.blocks.filter(block => (
       (!block.plant || block.plant === plant) && (!block.line || block.line === line)
@@ -2574,6 +2561,29 @@ function lineBlocksFor(
       merged.push({ start: interval.start, end: interval.end });
     }
   }
+  return merged;
+}
+
+/** Phase 1d: the plant+line-eligible blackout block set is constant for the
+ * whole run (blocks/plantBlocks never change mid-evaluation), so this merges
+ * it once per line — globally, unbound by any particular query window — and
+ * caches it on `ctx`. `indexedOverlapBlocks` then binary-searches this
+ * per-line array per query instead of re-filtering/re-sorting/re-merging
+ * every call. Clipping an already-merged, already-disjoint interval set to a
+ * query window can only shrink each interval, never introduce a new merge,
+ * so this produces byte-identical output to the unindexed path below. */
+function lineBlocksFor(
+  ctx: SetupRunContext, snapshot: Readonly<ScheduleSnapshot>, line: string, plant: string,
+): ReadonlyArray<{ start: number; end: number }> {
+  // Machine codes are documented as reusable across plants — fold `plant`
+  // into the key (not just `line`) so a ctx that ever saw two plants for the
+  // same line code can't return one plant's cached blocks for the other.
+  // Today every call site passes the single plant `ctx` was built for, so
+  // this is defense-in-depth, not a live bug fix.
+  const cacheKey = plant + CTX_KEY_SEP + line;
+  const cached = ctx._lineBlocks.get(cacheKey);
+  if (cached) return cached;
+  const merged = mergedLineBlocks(snapshot, line, plant);
   ctx._lineBlocks.set(cacheKey, merged);
   return merged;
 }
@@ -2606,33 +2616,8 @@ function overlapBlocks(
   snapshot: Readonly<ScheduleSnapshot>, line: string, plant: string, start: Date, end: Date,
   ctx?: SetupRunContext,
 ): PlacementInterval[] {
-  if (ctx) return indexedOverlapBlocks(lineBlocksFor(ctx, snapshot, line, plant), start.getTime(), end.getTime());
-  const candidates = [
-    ...snapshot.blocks.filter(block => (
-      (!block.plant || block.plant === plant) && (!block.line || block.line === line)
-    )),
-    ...snapshot.plantBlocks.filter(block => !block.plant || block.plant === plant),
-  ];
-  const intervals = candidates.flatMap(block => {
-    const blockStart = timestamp(block.start);
-    const blockEnd = timestamp(block.end);
-    if (!blockStart || !blockEnd || blockEnd <= start || blockStart >= end) return [];
-    return [{
-      start: new Date(Math.max(start.getTime(), blockStart.getTime())),
-      end: new Date(Math.min(end.getTime(), blockEnd.getTime())),
-    }];
-  }).sort((left, right) => left.start.getTime() - right.start.getTime());
-
-  const merged: PlacementInterval[] = [];
-  for (const interval of intervals) {
-    const prior = merged.at(-1);
-    if (prior && interval.start <= prior.end) {
-      if (interval.end > prior.end) prior.end = new Date(interval.end);
-    } else {
-      merged.push({ start: new Date(interval.start), end: new Date(interval.end) });
-    }
-  }
-  return merged;
+  const merged = ctx ? lineBlocksFor(ctx, snapshot, line, plant) : mergedLineBlocks(snapshot, line, plant);
+  return indexedOverlapBlocks(merged, start.getTime(), end.getTime());
 }
 
 /** Intersects two already-resolved line/plant work windows, mirroring the
