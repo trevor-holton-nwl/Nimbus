@@ -1311,7 +1311,10 @@ export const UndoStack = {
       else if (capture.length) {
         // The rows the undo actually overwrote; the entry's own snapshot stays inside e.undoFn for the next undo.
         // Cost = the captured rows only: the original entry is counted again when popRedo re-pushes it.
-        const redoEntry: UndoEntry = { label: e.label, undoFn: e.undoFn, at: Date.now(), ids: capture.map(t => String(t.id)),
+        const redoEntry: UndoEntry = { label: e.label, undoFn: e.undoFn, at: Date.now(), 
+          // ids: the union of the original entry's ids and the captured ones, so a prune / invalidate by an id the
+          // undo skipped (the optimizer's family-sibling filter) still finds it. redoSnap stays what was captured.
+          ids: [...new Set([...(e.ids ?? []), ...capture.map(t => String(t.id))])],
           cost: capture.length, redoSnap: capture, original: e };
         this._redo.push(redoEntry);
         this._trimShared(redoEntry);

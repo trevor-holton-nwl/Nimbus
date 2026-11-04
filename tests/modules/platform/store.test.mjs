@@ -784,6 +784,26 @@ test('the row budget is shared by the undo and redo stacks: older redo entries f
   assert.ok(UndoStack.rowCount(UndoStack._entries, UndoStack._redo) <= B);
 });
 
+test('a redo entry is pruned / invalidated by ids of the ORIGINAL entry too, not only the rows its undo captured', () => {
+  const { edit } = redoFx(2);
+  const snap = UndoStack.snapshotTasks(['rd1', 'rd2']);
+  Store.updateMany([{ id: 'rd1', changes: { RUN_TIME: '9' } }, { id: 'rd2', changes: { RUN_TIME: '9' } }], 'interaction');
+  // like the optimizer's family-sibling filter: the entry is tagged with both ids but its undo restores only rd1
+  UndoStack.push('opt', () => UndoStack.restoreTasks(snap.filter(s => s.id === 'rd1')), ['rd1', 'rd2'], { redo: true });
+  UndoStack.pop();
+  assert.deepEqual(UndoStack._redo[0].redoSnap.map(t => t.id), ['rd1'], 'redoSnap stays what the undo captured');
+  assert.deepEqual([...UndoStack._redo[0].ids].sort(), ['rd1', 'rd2'], 'ids cover the original entry');
+  UndoStack.invalidate(['rd2']);
+  assert.equal(UndoStack._redo.length, 0, 'invalidate by the skipped sibling prunes the redo entry');
+  edit('E', { RUN_TIME: '5' }, { redo: true });   // fresh state for the prune path
+  UndoStack._entries = []; UndoStack._redo = [];
+  const snap2 = UndoStack.snapshotTasks(['rd1', 'rd2']);
+  UndoStack.push('opt2', () => UndoStack.restoreTasks(snap2.filter(s => s.id === 'rd1')), ['rd1', 'rd2'], { redo: true });
+  UndoStack.pop();
+  Store.updateTask('rd2', { PRT_01: 'p' }, 'table');
+  assert.equal(UndoStack._redo.length, 0, 'a foreign write to the skipped sibling prunes it');
+});
+
 test('a plant-wide Apply undo costs its captured rows once in the redo stack: it does not evict other undo history', () => {
   const { edit } = redoFx(8000);
   UndoStack._entries = []; UndoStack._redo = [];
