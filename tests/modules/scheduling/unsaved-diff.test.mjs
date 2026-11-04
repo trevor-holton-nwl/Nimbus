@@ -202,6 +202,16 @@ test('Order sort compares ids numerically-aware', () => {
   assert.deepEqual(sortUnsaved(rows, 'order').map(r => r.id), ['3', '20', '100']);
 });
 
+test('order is the live PRODUCTION_ORDER, empty when it has none; sort and filter use it, the id stays the key', () => {
+  const rows = run({ dirty: ['t1', 't2', 't3'], base: { t1: key(), t2: key(), t3: key() }, rows: {
+    t1: live('t1', {}, { PRODUCTION_ORDER: '1000200', MATERIAL_NUMBER: 'MX', MATERIAL_DESCRIPTION: 'Dx' }), t2: live('t2', {}, { PRODUCTION_ORDER: '  ', MATERIAL_NUMBER: 'MY', MATERIAL_DESCRIPTION: 'Dy' }), t3: live('t3', {}, { PRODUCTION_ORDER: '900', MATERIAL_NUMBER: 'MZ', MATERIAL_DESCRIPTION: 'Dz' }),
+  } }).rows;
+  assert.deepEqual(rows.map(r => [r.id, r.order]), [['t1', '1000200'], ['t2', ''], ['t3', '900']]);
+  assert.deepEqual(sortUnsaved(rows, 'order').map(r => r.id), ['t2', 't3', 't1'], 'numeric-aware on the order number');
+  assert.deepEqual(filterUnsaved(rows, '1000200').map(r => r.id), ['t1']);
+  assert.deepEqual(filterUnsaved(rows, 't1').map(r => r.id), [], 'the internal id is not matched when an order number exists');
+});
+
 test('formatDeltaMs takes localised unit letters', () => {
   const u = { d: 'T', h: 'Std.', m: 'Min.' };
   assert.equal(formatDeltaMs(0, u), '0Std.');

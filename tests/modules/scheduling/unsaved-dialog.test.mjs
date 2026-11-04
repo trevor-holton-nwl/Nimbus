@@ -118,6 +118,36 @@ test('filter by order, material and machine', () => {
   q.value = ''; q.dispatch('input'); assert.equal(trs().length, 2);
 });
 
+test('the Order column shows PRODUCTION_ORDER, shows a dash when empty, never shows the internal id; Show on Gantt keeps the id', t => {
+  seed(['k1', 'k2'], { edit: id => { Store.updateTask(id, { MACHINE: 'M2' }, 'table'); if (id === 'k1') Store.updateTask('k1', { PRODUCTION_ORDER: '1000555' }, 'table'); else Store.updateTask('k2', { PRODUCTION_ORDER: '' }, 'table'); } });
+  const go = t.mock.method(Selection, 'set', () => {}); t.mock.method(Timeline, 'gotoLineDay', () => {});
+  UnsavedDialog.open();
+  const idCell = id => trs().find(tr => tr.dataset.id === id).querySelector('.unsaved-id');
+  assert.equal(idCell('k1').textContent, '1000555');
+  assert.equal(idCell('k2').textContent, '—');
+  assert.equal(btnOf('k2').getAttribute('aria-label'), 'Details for order —');
+  assert.equal(btnOf('k1').getAttribute('aria-label'), 'Details for order 1000555');
+  const q = mount.querySelector('#unsaved-q');
+  q.value = '1000555'; q.dispatch('input'); assert.deepEqual(idsShown(), ['k1']);
+  q.value = ''; q.dispatch('input');
+  trs().find(tr => tr.dataset.id === 'k1').dispatch('click');
+  detailOf('k1').querySelector('button.btn').dispatch('click');
+  assert.deepEqual(go.mock.calls[0].arguments[0], ['k1']);
+});
+
+test('Changed by shows the session user in the detail, and is omitted without one', t => {
+  seed(['A'], { edit: () => Store.updateTask('A', { MACHINE: 'M2' }, 'table') });
+  const m = t.mock.method(UnsavedDialog, 'userLabel', () => 'Pat Jones');
+  UnsavedDialog.open();
+  trs()[0].dispatch('click');
+  assert.match(text(detailOf('A')), /Changed by Pat Jones/);
+  UnsavedDialog.close();
+  m.mock.mockImplementation(() => '');
+  UnsavedDialog.open();
+  trs()[0].dispatch('click');
+  assert.doesNotMatch(text(detailOf('A')), /Changed by/);
+});
+
 test('sort select re-orders the rows', () => {
   seed(['B', 'A'], { edit: id => Store.updateTask(id, { MACHINE: id === 'A' ? 'M9' : 'M2' }, 'table') });
   UnsavedDialog.open();

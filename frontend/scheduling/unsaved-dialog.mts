@@ -10,6 +10,7 @@
 import { Util, Modal } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
+import { Session } from '../security/session.mjs';
 import { Persistence } from './persistence.mjs';
 import { Selection } from './selection.mjs';
 import { Timeline } from './gantt.mjs';
@@ -84,7 +85,17 @@ function sourceText(row: UnsavedChange): string {
   return s === key ? String(row.source) : s;
 }
 
+/** The signed-in user's display name (first + last), else the username; '' when nobody is signed in. */
+function userLabel(): string {
+  const u = Session.currentUser();
+  if (!u) return '';
+  const name = [u.first_name, u.last_name].map(x => (x || '').trim()).filter(Boolean).join(' ');
+  return name || String(u.username || '').trim();
+}
+
 export const UnsavedDialog = {
+  /** Seam for tests; unsaved edits are always this session's, so the author is the current user. */
+  userLabel,
   _rows: [] as UnsavedChange[],
   _skipped: 0,
   _query: '',
@@ -237,7 +248,7 @@ export const UnsavedDialog = {
     const tr = el('tr', `unsaved-row${row.status === 'nochange' ? ' muted' : ''}`);
     tr.dataset.id = row.id;
     const ord = el('div', 'unsaved-ord');
-    ord.appendChild(el('span', 'unsaved-id', row.id));
+    ord.appendChild(el('span', 'unsaved-id', row.order || '—'));
     const mat = el('span', 'unsaved-mat');
     mat.title = [row.material, row.materialDescription].filter(Boolean).join(' · ');
     mat.append(el('b', undefined, row.material), el('span', undefined, row.materialDescription));
@@ -256,7 +267,7 @@ export const UnsavedDialog = {
     const tdBtn = el('td', 'unsaved-exp-cell');
     const btn = el('button', 'unsaved-exp'); btn.setAttribute('type', 'button');
     btn.setAttribute('aria-expanded', 'false'); btn.setAttribute('aria-controls', `unsaved-d-${row.id}`);
-    btn.setAttribute('aria-label', t('unsaved.details_for', { id: row.id }));
+    btn.setAttribute('aria-label', t('unsaved.details_for', { id: row.order || '—' }));
     tdBtn.appendChild(btn);
     tr.append(tdOrd, tdMachine, tdChip, tdBefore, tdAfter, tdDelta, tdBtn);
     // Focus stays inside the dialog: a click on the (non-focusable) cell would otherwise leave it on <body>.
@@ -316,6 +327,12 @@ export const UnsavedDialog = {
     const src = el('span', 'unsaved-src');
     src.append(el('i', undefined, t('unsaved.lab_source')), el('span', undefined, sourceText(row)));
     meta.append(mat, src);
+    const who = UnsavedDialog.userLabel();
+    if (who) {
+      const by = el('span', 'unsaved-src'); by.title = `${t('unsaved.changed_by')}: ${who}`;
+      by.append(el('i', undefined, t('unsaved.changed_by')), el('span', undefined, who));
+      meta.appendChild(by);
+    }
     const note = moveNoteText(row);
     if (note) meta.appendChild(el('span', 'unsaved-enote', note));
     if (row.status === 'nochange') meta.appendChild(el('span', 'unsaved-stale', t('unsaved.nochange_note')));

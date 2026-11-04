@@ -30,7 +30,10 @@ export interface UnsavedMoveNote {
 }
 
 export interface UnsavedChange {
+  /** The internal task key (dataset ids, aria-controls, Show on Gantt). Never shown to the user. */
   id: string;
+  /** What the user sees: the live PRODUCTION_ORDER (the orders grid's Order column), empty when the order has no number (the dialog shows a dash). */
+  order: string;
   material: string;
   materialDescription: string;
   /** The order's live machine (what the table shows and the filter matches). */
@@ -152,6 +155,7 @@ export function unsavedChanges(
     const src = ctx.dirtySource.get(id);
     const common = {
       id,
+      order: String(live.PRODUCTION_ORDER ?? '').trim(),
       material: String(live.MATERIAL_NUMBER ?? ''),
       materialDescription: String(live.MATERIAL_DESCRIPTION ?? ''),
       machine: String(live.MACHINE ?? ''),
@@ -218,9 +222,9 @@ export function unsavedChanges(
   return { rows: out, skipped };
 }
 
-/** "Biggest move first": largest |delta| hours, then the more significant change kind, then the order id. */
+/** "Biggest move first": largest |delta| hours, then the more significant change kind, then the order number. */
 export function sortUnsaved(rows: readonly UnsavedChange[], by: 'move' | 'order' | 'machine'): UnsavedChange[] {
-  const cmpId = (a: UnsavedChange, b: UnsavedChange): number => a.id.localeCompare(b.id, undefined, { numeric: true });
+  const cmpId = (a: UnsavedChange, b: UnsavedChange): number => a.order.localeCompare(b.order, undefined, { numeric: true }) || a.id.localeCompare(b.id, undefined, { numeric: true });
   const biggest = (a: UnsavedChange, b: UnsavedChange): number => (b.magnitude - a.magnitude) || (b.rank - a.rank) || cmpId(a, b);
   const copy = [...rows];
   if (by === 'order') return copy.sort(cmpId);
@@ -228,11 +232,11 @@ export function sortUnsaved(rows: readonly UnsavedChange[], by: 'move' | 'order'
   return copy.sort(biggest);
 }
 
-/** Case-insensitive match on order id, material number/description or machine. */
+/** Case-insensitive match on order number, material number/description or machine. */
 export function filterUnsaved(rows: readonly UnsavedChange[], query: string): UnsavedChange[] {
   const q = query.trim().toLowerCase();
   if (!q) return [...rows];
-  return rows.filter(r => `${r.id} ${r.material} ${r.materialDescription} ${r.machine}`.toLowerCase().includes(q));
+  return rows.filter(r => `${r.order} ${r.material} ${r.materialDescription} ${r.machine}`.toLowerCase().includes(q));
 }
 
 /** "+2d 19h", "-2h", "+45m": a signed duration for the delta column (days only from 24 h). The unit letters are

@@ -1479,6 +1479,7 @@ window.__NIMBUS_LOCALES.de = {
   'unsaved.head_current': "Aktuell (kein gespeicherter Bezug)",
   'unsaved.lab_material': "Material",
   'unsaved.lab_source': "Quelle",
+  'unsaved.changed_by': "Geändert von",
   'unsaved.src_drag': "Ziehen",
   'unsaved.src_keyboard': "Tastatur",
   'unsaved.src_grid': "Tabellenänderung",

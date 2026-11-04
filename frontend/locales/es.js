@@ -1484,6 +1484,7 @@ window.__NIMBUS_LOCALES.es = {
   'unsaved.head_current': "Actual (sin referencia guardada)",
   'unsaved.lab_material': "Material",
   'unsaved.lab_source': "Origen",
+  'unsaved.changed_by': "Cambiado por",
   'unsaved.src_drag': "Arrastre",
   'unsaved.src_keyboard': "Teclado",
   'unsaved.src_grid': "Edición en tabla",

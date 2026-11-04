@@ -1480,6 +1480,7 @@ window.__NIMBUS_LOCALES.fr = {
   'unsaved.head_current': "Actuel (aucune référence enregistrée)",
   'unsaved.lab_material': "Matériel",
   'unsaved.lab_source': "Source",
+  'unsaved.changed_by': "Modifié par",
   'unsaved.src_drag': "Glisser",
   'unsaved.src_keyboard': "Clavier",
   'unsaved.src_grid': "Modification dans la grille",

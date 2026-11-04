@@ -992,6 +992,7 @@ window.__NIMBUS_LOCALES.en = {
   'unsaved.head_current': "Current (no saved reference)",
   'unsaved.lab_material': "Material",
   'unsaved.lab_source': "Source",
+  'unsaved.changed_by': "Changed by",
   'unsaved.src_drag': "Drag",
   'unsaved.src_keyboard': "Keyboard",
   'unsaved.src_grid': "Grid edit",
