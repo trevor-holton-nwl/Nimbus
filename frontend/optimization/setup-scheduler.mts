@@ -594,6 +594,11 @@ export interface SetupRunContext {
   resolutionIndex: SetupResolutionIndex | null;
   plant: string;
   respectCalendar: boolean;
+  /** Reuse guard inputs (see `withRunContext`): the setup truth object and the
+   *  planning window (ms) this context was built from. */
+  setup: DueDateFirstBounds['setup'];
+  planningStartMs: number;
+  horizonEndMs: number;
   /** Hoisted once: identical for every candidate this run evaluates. */
   activePriorityKeys: ReadonlyArray<string>;
   splitOrderPolicy: SplitOrderPolicy;
@@ -702,6 +707,9 @@ export function buildRunContext(
     resolutionIndex,
     plant,
     respectCalendar: bounds.respectCalendar ?? true,
+    setup: bounds.setup,
+    planningStartMs: +(bounds.planningStart ?? bounds.now),
+    horizonEndMs: +bounds.horizonEnd,
     activePriorityKeys: activePriorityKeys(snapshot, plant),
     splitOrderPolicy: bounds.respectCalendar === false ? 'never' : splitOrderPolicyForSnapshot(snapshot, plant),
     minProductiveSegmentMinutes: minProductiveSegmentMinutesForSnapshot(snapshot, plant),
@@ -774,22 +782,21 @@ function normalizeRunDates(bounds: Readonly<DueDateFirstBounds>): Readonly<DueDa
  * every nested helper can read `bounds.runContext` without a second identity
  * check — safe because that returned bounds object is never mutated again.
  *
- * Invariant this guard does NOT check: a reused `runContext` is only valid
- * for the same `bounds.setup` (definition/matrix rows/overrides) it was
- * built from — `resolutionIndex` and the hoisted plant constants are derived
- * from `bounds.setup`, not `snapshot`, so a caller that reused a `snapshot`
- * object but swapped in different `bounds.setup` would silently get stale
- * setup truth. Every caller today satisfies this for free: a `runContext` is
- * created and consumed entirely within one `runAndApply`/evaluator
- * invocation, which never changes `bounds.setup` mid-call. A future caller
- * must preserve that pairing (or extend this guard with a `bounds.setup`
- * identity check) rather than reuse a `runContext` across a `bounds.setup`
- * change. */
+ * Reuse also requires the same `bounds.setup` object, the same
+ * `respectCalendar` and the same planning window (planningStart / horizonEnd
+ * in ms): `resolutionIndex`, the hoisted plant constants and the free-index
+ * span are derived from those, not from `snapshot`, so a context built for a
+ * different setup, calendar mode or window would otherwise be reused stale. */
 function withRunContext(
   snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>,
 ): Readonly<DueDateFirstBounds> {
   const normalized = normalizeRunDates(bounds);
-  if (normalized.runContext && normalized.runContext.snapshot === snapshot) return normalized;
+  const reused = normalized.runContext;
+  if (reused && reused.snapshot === snapshot
+    && reused.setup === normalized.setup
+    && reused.respectCalendar === (normalized.respectCalendar ?? true)
+    && reused.planningStartMs === +(normalized.planningStart ?? normalized.now)
+    && reused.horizonEndMs === +normalized.horizonEnd) return normalized;
   return { ...normalized, runContext: buildRunContext(snapshot, normalized) };
 }
 
