@@ -1,11 +1,12 @@
-import type { CandidateResult, DueDateFirstBounds, EvaluationRequest, ScheduleSnapshot } from './setup-scheduler.mjs';
+import type { CandidateResult, DueDateFirstBounds, ScheduleSnapshot } from './setup-scheduler.mjs';
 import type { OptimizerMode } from '../platform/types.mjs';
+import type { EngineEvaluationRequest } from './scheduler-contract.mjs';
 
 export interface OptimizerWorkerRequest {
   runId: string;
   mode: OptimizerMode;
   snapshot: ScheduleSnapshot;
-  request: EvaluationRequest;
+  request: EngineEvaluationRequest;
   /** Remaining primary budget measured in the sender's monotonic clock. The
    * worker converts it to its own performance.now() origin on receipt. */
   deadlineDurationMs?: number;
@@ -15,7 +16,7 @@ export interface OptimizerWorkerRequest {
 
 /** The evaluator request for a worker request: the carried `mode` is the single source of truth, so the worker, the
  *  main-thread fallback and every sync caller evaluate exactly the same shape. */
-export function evalRequestOf(request: OptimizerWorkerRequest): EvaluationRequest {
+export function evalRequestOf(request: OptimizerWorkerRequest): EngineEvaluationRequest {
   return { ...request.request, mode: request.mode };
 }
 

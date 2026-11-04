@@ -18,7 +18,9 @@ import { Store, UndoStack } from '../platform/store.mjs';
 import { Sandbox } from './sandbox.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
 import { Alerts, scheduleAlertsForPatches } from '../insights/services.mjs';
-import { Engine, snapshotSchedule, SETUP_AWARE_NORMAL_BUDGET_MS, SETUP_AWARE_EXHAUSTIVE_BUDGET_MS, effectiveFirmedIdSet, evaluateSchedule } from './engine.mjs';
+import { Engine, snapshotSchedule, SETUP_AWARE_NORMAL_BUDGET_MS, effectiveFirmedIdSet, evaluateSchedule } from './engine.mjs';
+import { backlogWindow, budgetFor } from './run-params.mjs';
+import type { EngineEvaluationRequest } from './scheduler-contract.mjs';
 import { createOptimizerWorkerSession } from './optimizer-worker-client.mjs';
 import type { OptimizerWorkerFactory, OptimizerWorkerSession } from './optimizer-worker-client.mjs';
 import type { RemoveBacklogResult } from './scheduler-contract.mjs';
@@ -97,9 +99,9 @@ interface OptimizerRunOptions {
   [key: string]: unknown;
 }
 
-function previewEvaluationRequest(
+export function previewEvaluationRequest(
   mode: OptimizerMode, opts: OptimizerRunOptions, plant: string, deadlineAt: number,
-): EvaluationRequest {
+): EngineEvaluationRequest {
   return {
     mode,
     plant: opts.plant ?? plant,
@@ -115,6 +117,8 @@ function previewEvaluationRequest(
     placementStart: opts.placementStart as EvaluationRequest['placementStart'],
     deadlineAt,
     searchBudgetMs: opts.searchBudgetMs,
+    iterationCap: opts.iterationCap as EngineEvaluationRequest['iterationCap'],
+    holdRunning: opts.holdRunning as EngineEvaluationRequest['holdRunning'],
     exhaustive: opts.exhaustive,
   };
 }
@@ -299,28 +303,12 @@ export const OptimizeDialog = (() => {
     const local = Store.serverNow(); local.setSeconds(0, 0); return local;
   }
 
-  function _addCalendarMonths(date: Date, months: number): Date {
-    const result = new Date(date);
-    const day = result.getDate();
-    result.setDate(1);
-    result.setMonth(result.getMonth() + months);
-    const last = new Date(result.getFullYear(), result.getMonth() + 1, 0).getDate();
-    result.setDate(Math.min(day, last));
-    return result;
-  }
-
   function _applyBacklogDefaults() {
     if (!_plant) return;
     const now = _backlogNow();
     const scopedLines = _scope === 'lines' && _selectedLines.size ? _selectedLines : null;
     const tasks = Store.tasksByPlant(_plant).filter(t => !scopedLines || scopedLines.has(t.MACHINE));
-    const pastStarts = tasks.map(t => t.start_date).filter((d): d is Date => !!d && d < now);
-    const latestEnds = tasks.map(t => t.end_date).filter((d): d is Date => !!d);
-    const computedStart = pastStarts.length ? new Date(Math.min(...pastStarts.map(d => d.getTime()))) : now;
-    let computedEnd = latestEnds.length
-      ? new Date(Math.min(Math.max(...latestEnds.map(d => d.getTime())), _addCalendarMonths(now, 4).getTime()))
-      : _addCalendarMonths(now, 4);
-    if (computedEnd < computedStart) computedEnd = _addCalendarMonths(computedStart, 4);
+    const { start: computedStart, end: computedEnd } = backlogWindow(tasks, now);
     if (!_startDirty) _start = computedStart;
     if (!_endDirty) _end = computedEnd;
     _fpStart?.setDate(_start!, false);
@@ -931,7 +919,7 @@ export const OptimizeDialog = (() => {
       respectFirmed,
       respectCalendar: mode === 'backlog' ? true : respectCalendarChecked,
       runAt:           Store.serverNow(),
-      searchBudgetMs:  exhaustive ? SETUP_AWARE_EXHAUSTIVE_BUDGET_MS : SETUP_AWARE_NORMAL_BUDGET_MS,
+      searchBudgetMs:  budgetFor(exhaustive),
       exhaustive,
       auditDetails: mode === 'backlog' ? undefined : {
         mode,
@@ -942,7 +930,7 @@ export const OptimizeDialog = (() => {
         activePriorityFields: Engine.activeConstraintKeys(plant),
         unrankedPriorityFields: unrankedFields,
         splitOrderPolicy: Engine.splitOrderPolicyFor(plant),
-        searchBudgetMs: exhaustive ? SETUP_AWARE_EXHAUSTIVE_BUDGET_MS : SETUP_AWARE_NORMAL_BUDGET_MS,
+        searchBudgetMs: budgetFor(exhaustive),
         exhaustive,
       },
     };
@@ -1205,6 +1193,12 @@ export function toolFingerprint(masterData: NimbusMasterData | null | undefined,
     .map(row => [String(row.tool_id), row.total_qty, row.out_of_service_qty] as const)
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   return JSON.stringify({ r: rule, i: rows });
+}
+
+/** The tooling rule a `toolFingerprint` string was built under; an absent fingerprint (Remove Backlog, no run) reads as 'off'. */
+export function toolRuleOfFingerprint(fingerprint: string | null | undefined): 'off' | 'hard' {
+  if (!fingerprint) return 'off';
+  return (JSON.parse(fingerprint) as { r: 'off' | 'hard' }).r;
 }
 
 function liveToolingRule(plant: string): 'off' | 'hard' {
@@ -2546,7 +2540,7 @@ export const OptimizerPreview = {
       ${toolMovedCount ? `<div>${Util.escapeHtml(Util.t('ui.opt_tool_moved_summary', { n: toolMovedCount }))}</div>` : ''}
       ${toolIncomplete ? `<div>${Util.escapeHtml(Util.t('ui.opt_tool_incomplete'))}</div>` : ''}
     </div>` : '';
-    const toolingChipHtml = OptimizerPreview._mode !== 'backlog' && OptimizerPreview._toolFingerprint !== null && (JSON.parse(OptimizerPreview._toolFingerprint) as { r: string }).r === 'hard'
+    const toolingChipHtml = OptimizerPreview._mode !== 'backlog' && OptimizerPreview._toolFingerprint !== null && toolRuleOfFingerprint(OptimizerPreview._toolFingerprint) === 'hard'
       ? `<div class="opt-pv-chip opt-pv-chip-tooling" title="${Util.escapeHtml(Util.t('ui.opt_pv_chip_tooling_title'))}">${Util.escapeHtml(Util.t('ui.opt_pv_chip_tooling'))}</div>` : '';
     body.innerHTML = `
       <div class="opt-pv-shell">
@@ -2825,7 +2819,7 @@ export const OptimizerPreview = {
             active_priority_fields: auditDetails.activePriorityFields,
             unranked_priority_fields: auditDetails.unrankedPriorityFields,
             split_order_policy: auditDetails.splitOrderPolicy,
-            tooling_rule: OptimizerPreview._toolFingerprint ? (JSON.parse(OptimizerPreview._toolFingerprint) as { r: string }).r : 'off',
+            tooling_rule: toolRuleOfFingerprint(OptimizerPreview._toolFingerprint),
             tool_blocked: toolSummary.queued.length,
             tool_moved: toolSummary.moved,
             applied_count: kept.length,

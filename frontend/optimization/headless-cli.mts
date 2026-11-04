@@ -20,6 +20,7 @@ import type { HeadlessWire } from './headless-snapshot.mjs';
 import type { CandidateResult, ScheduleSnapshot, ValidationFinding } from './setup-scheduler.mjs';
 import type { TaskDateUpdateItem, DroppedPatch } from './headless-writer.mjs';
 import type { OptimizerMode } from '../platform/types.mjs';
+import { backlogWindow, budgetFor, isRunMode } from './run-params.mjs';
 import type { SerializedOptimizerValidation } from './optimizer-worker-contract.mjs';
 
 /** What the Node runtime provides; `@types/node` is not part of the frontend build. */
@@ -125,17 +126,6 @@ interface RunState {
   runningIds?: string[];
 }
 
-/** `date` plus whole calendar months, the day clamped to the month's end (the dialog's `_addCalendarMonths`). */
-function addCalendarMonths(date: Date, months: number): Date {
-  const result = new Date(date);
-  const day = result.getDate();
-  result.setDate(1);
-  result.setMonth(result.getMonth() + months);
-  const last = new Date(result.getFullYear(), result.getMonth() + 1, 0).getDate();
-  result.setDate(Math.min(day, last));
-  return result;
-}
-
 const isoOr = (value: Date | null | undefined): string | null => (value && Number.isFinite(value.getTime()) ? value.toISOString() : null);
 
 /** Install the compute core, the zone, the optional fake clock and the DOM stubs the engine's guards read. */
@@ -209,7 +199,7 @@ async function runOptimizerImpl(input: RunInput, sink: LogSink, log: LogEntry[])
   const { plant, wire, params } = input;
   const serverNow = new Date(params.serverNow);
   if (!Number.isFinite(serverNow.getTime())) return failure('invalid_server_now', `serverNow is not a valid instant: ${params.serverNow}`, log);
-  if (!['duedate', 'changeover', 'spt', 'backlog'].includes(params.mode)) return failure('invalid_mode', `unsupported mode: ${String(params.mode)}`, log);
+  if (!isRunMode(params.mode)) return failure('invalid_mode', `unsupported mode: ${String(params.mode)}`, log);
   const tz = params.plantTimezone || plantTimezoneOf(wire, plant);
   if (!tz) return failure('plant_no_timezone', `plant ${plant} has no timezone`, log);
 
@@ -218,7 +208,7 @@ async function runOptimizerImpl(input: RunInput, sink: LogSink, log: LogEntry[])
   const { buildScheduleSnapshot } = await import('./headless-snapshot.mjs');
   const { deriveDisplayStarts, quiesceStore } = await import('./headless-runtime.mjs');
   const { patchesToUpdateItems } = await import('./headless-writer.mjs');
-  const { SETUP_AWARE_NORMAL_BUDGET_MS, SETUP_AWARE_EXHAUSTIVE_BUDGET_MS, evaluateSchedule, Engine } = await import('./engine.mjs');
+  const { evaluateSchedule, Engine } = await import('./engine.mjs');
   const { serializeOptimizerValidation } = await import('./optimizer-worker-contract.mjs');
   const { validateCandidateForApply } = await import('./setup-scheduler.mjs');
   quiesceStore();
@@ -243,21 +233,11 @@ async function runOptimizerImpl(input: RunInput, sink: LogSink, log: LogEntry[])
   const backlogMode = params.mode === 'backlog';
   const includeRunning = params.include_running !== false;
   const exhaustive = !backlogMode && params.search === 'exhaustive';
-  const budget = exhaustive ? SETUP_AWARE_EXHAUSTIVE_BUDGET_MS : SETUP_AWARE_NORMAL_BUDGET_MS;
+  const budget = budgetFor(exhaustive);
   // Remove Backlog's window is the dialog's default (optimize-ui `_applyBacklogDefaults`): from the earliest start in the
   // past to the latest end, capped four calendar months out; a run with nothing in the past starts at now.
   const lineSet = params.lines && params.lines.length ? new Set(params.lines) : null;
-  const backlogWindow = (): { start: Date; end: Date } => {
-    const scoped = snapshot.tasks.filter(task => !lineSet || lineSet.has(String(task.MACHINE ?? 'Unknown')));
-    const past = scoped.map(task => task.start_date).filter((d): d is Date => !!d && d < plantNow);
-    const ends = scoped.map(task => task.end_date).filter((d): d is Date => !!d);
-    const capEnd = addCalendarMonths(plantNow, 4);
-    const start = past.length ? new Date(Math.min(...past.map(d => d.getTime()))) : new Date(plantNow);
-    let end = ends.length ? new Date(Math.min(Math.max(...ends.map(d => d.getTime())), capEnd.getTime())) : capEnd;
-    if (end < start) end = addCalendarMonths(start, 4);
-    return { start, end };
-  };
-  const bw = backlogMode ? backlogWindow() : null;
+  const bw = backlogMode ? backlogWindow(snapshot.tasks, plantNow, lineSet) : null;
   const request = {
     mode: params.mode, plant,
     lines: params.lines && params.lines.length ? params.lines : null,

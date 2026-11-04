@@ -1,7 +1,8 @@
 // Detached optimizer preview worker client. The worker is an optional UI
 // acceleration path: callers without Worker support (tests, server-side
 // tooling, and non-UI integrations) keep the synchronous Engine evaluator.
-import type { CandidateResult, EvaluationRequest, ScheduleSnapshot } from './setup-scheduler.mjs';
+import type { CandidateResult, ScheduleSnapshot } from './setup-scheduler.mjs';
+import type { EngineEvaluationRequest } from './scheduler-contract.mjs';
 import { evaluateSchedule, rehydrateOptimizerCandidate, SETUP_AWARE_NORMAL_BUDGET_MS } from './engine.mjs';
 import { Config, ErrorLog, PerfMonitor, Util } from '../platform/foundation.mjs';
 import { evalRequestOf } from './optimizer-worker-contract.mjs';
@@ -67,7 +68,7 @@ export interface OptimizerWorkerSessionOptions {
   /** Inject a fake worker in tests or an application-specific worker pool. */
   workerFactory?: OptimizerWorkerFactory | null;
   /** Explicitly retain the synchronous path when a caller needs it. */
-  syncEvaluator?: (snapshot: ScheduleSnapshot, request: EvaluationRequest) => CandidateResult;
+  syncEvaluator?: (snapshot: ScheduleSnapshot, request: EngineEvaluationRequest) => CandidateResult;
   workerUrl?: string;
   /** Most workers alive at once (default 1). Requests beyond that wait in a queue, one request per worker. */
   maxWorkers?: number;
@@ -402,7 +403,7 @@ export interface OptimizerWorkerRunOptions {
   /** Inject a fake worker in tests or an application-specific worker pool. */
   workerFactory?: OptimizerWorkerFactory | null;
   /** Explicitly retain the synchronous path when a caller needs it. */
-  syncEvaluator?: (snapshot: ScheduleSnapshot, request: EvaluationRequest) => CandidateResult;
+  syncEvaluator?: (snapshot: ScheduleSnapshot, request: EngineEvaluationRequest) => CandidateResult;
   signal?: AbortSignal;
   workerUrl?: string;
 }

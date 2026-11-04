@@ -99,7 +99,8 @@ import type {
 } from './setup-scheduler.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy, SetupSnapshot, SetupDefinition, SetupStateKey, SetupValueDefault, PlantCalendarEntry, PlantPeriod } from '../platform/types.mjs';
 import { MIN_PRODUCTIVE_SEGMENT_MINUTES, PRIORITY_FIELD_DEFAULTS } from './scheduler-contract.mjs';
-import type { RemoveBacklogResult, RemoveBacklogDiagnostics } from './scheduler-contract.mjs';
+import { SETUP_AWARE_NORMAL_BUDGET_MS, SETUP_AWARE_EXHAUSTIVE_BUDGET_MS } from './run-params.mjs';
+import type { RemoveBacklogResult, RemoveBacklogDiagnostics, EngineEvaluationRequest } from './scheduler-contract.mjs';
 import type { SerializedOptimizerValidation } from './optimizer-worker-contract.mjs';
 import { firmActionForReasons, firmReasonLabels, planFirmActions } from './firm-actions.mjs';
 import type { FirmAction, FirmPlan, FirmReason } from './firm-actions.mjs';
@@ -775,8 +776,8 @@ const SETUP_AWARE_ITERATION_CAP = 20000;
 // deferred Plan B comparison run (a fraction of this budget) instead of
 // duplicating the number.
 export const SETUP_AWARE_DEADLINE_MS = 5000;
-export const SETUP_AWARE_NORMAL_BUDGET_MS = 8000;
-export const SETUP_AWARE_EXHAUSTIVE_BUDGET_MS = 180000;
+// The two budgets live in the pure run-params leaf (shared with the dialog and the headless CLI); re-exported here.
+export { SETUP_AWARE_NORMAL_BUDGET_MS, SETUP_AWARE_EXHAUSTIVE_BUDGET_MS };
 const SETUP_AWARE_EXHAUSTIVE_EXACT_SEARCH_THRESHOLD = 10;
 const SETUP_AWARE_EXHAUSTIVE_EXACT_LEAF_CAP = 5000;
 const SETUP_AWARE_EXHAUSTIVE_CONVERGENCE_WINDOW = 10000;
@@ -1361,8 +1362,8 @@ export const Engine = {
    *  Detached optimizer runs must use the snapshot fold in the fixed/free split + setup-aware
    *  fold below, never this. reasons: 'frozen' (horizon band), 'manual' (planner),
    *  'running' (in progress). SAP firm is never a reason. */
-  firmingStatus(task: NimbusTask, now?: Date): { firmed: boolean; reasons: Array<'frozen'|'manual'|'running'> } {
-    const reasons: Array<'frozen'|'manual'|'running'> = [];
+  firmingStatus(task: NimbusTask, now?: Date): { firmed: boolean; reasons: FirmReason[] } {
+    const reasons: FirmReason[] = [];
     if (Engine.isFrozenHorizon(task, now)) reasons.push('frozen');
     if (Store.isFirmed(task.id)) reasons.push('manual');
     if (Engine.isInProgress(task, now)) reasons.push('running');
@@ -3188,7 +3189,7 @@ UndoStack.dirtyProbe = (id: string): boolean => Persistence.isDirty(id);
  * optimization/optimize-ui.mts, which now imports it from here instead of
  * from setup-scheduler.mjs.
  */
-export function evaluateSchedule(snapshot: Readonly<ScheduleSnapshot>, request: EvaluationRequest = {}): CandidateResult {
+export function evaluateSchedule(snapshot: Readonly<ScheduleSnapshot>, request: EngineEvaluationRequest = {}): CandidateResult {
   const { mode = 'changeover', ...opts } = request;
   return Engine.evaluateSchedule(mode, opts, snapshot);
 }

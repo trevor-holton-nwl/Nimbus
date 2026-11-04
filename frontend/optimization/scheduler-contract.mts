@@ -30,6 +30,7 @@
 // in engine.mjs, setup-scheduler.mjs, calendar-engine.mjs, or
 // insights/services.mjs.
 import type { NimbusTask } from '../platform/types.mjs';
+import type { EvaluationRequest } from './setup-scheduler.mjs';
 
 export interface RemoveBacklogDiagnostics {
   backlogFound: number;
@@ -298,3 +299,22 @@ export interface PlanningReason {
   code: PlanningReasonCode;
   message: string;
 }
+
+// ---- P3-5b: the typed engine request (keep this block separate from the other additions to this file) ----
+
+/** The request `Engine.evaluateSchedule` accepts: `EvaluationRequest` plus the engine-only options it reads from the same bag. */
+export interface EngineEvaluationRequest extends EvaluationRequest {
+  /** Remove Backlog only (the headless job's include_running=false): orders in progress stay where they are and the
+   *  rest is placed around them (`Engine.removeBacklog`). Absent = running orders are re-placed. */
+  holdRunning?: boolean;
+}
+
+/** Every key of `EngineEvaluationRequest`, as a runtime list. The compile-time check below fails when a key is added to
+ *  the type without being listed here; the request round-trip test in `optimize-ui-request.test.mjs` then forces a forward-or-drop decision. */
+export const ENGINE_EVALUATION_REQUEST_KEYS = [
+  'mode', 'plant', 'lines', 'startDate', 'endDate', 'respectFirmed', 'respectCalendar', 'now', 'runNow', 'runAt',
+  'planningStart', 'placementStart', 'deadlineAt', 'searchBudgetMs', 'iterationCap', 'exhaustive', 'holdRunning',
+] as const;
+type _RequestKeysListed = Exclude<keyof EngineEvaluationRequest, typeof ENGINE_EVALUATION_REQUEST_KEYS[number]> extends never ? true : never;
+const _requestKeysListed: _RequestKeysListed = true;
+void _requestKeysListed;
