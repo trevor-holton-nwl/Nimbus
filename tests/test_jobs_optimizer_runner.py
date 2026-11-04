@@ -34,13 +34,17 @@ if plant == "longline":
     sys.stderr.flush()
 items = [{"id": "1", "start_date": "2035-08-07T08:00:00", "end_date": "2035-08-07T10:00:00", "source": "optimizer", "base_version": 7, "force": False},
          {"id": "2", "start_date": "2035-08-07T10:00:00", "end_date": "2035-08-07T12:00:00", "source": "optimizer", "base_version": 8, "force": False}]
-if phase == "run":
+if phase == "run" and plant == "internal_run":
+    print(json.dumps({"ok": False, "status": "internal_error", "error": "boom", "patches": [], "findings": [], "blockers": []}))
+elif phase == "run":
     ok = plant != "blocked"
     print(json.dumps({"ok": ok, "status": "completed", "patches": items, "findings": [], "blockers": [] if ok else ["tool_blocked:2"],
                       "summary": {"late_count": 3, "patched": 2, "setup_minutes": 90, "search_complete": True, "termination": "converged", "tool_blocked": 0},
                       "state": "STATE"}))
 else:
-    if plant == "refuse":
+    if plant == "internal_apply":
+        print(json.dumps({"ok": False, "refusal": "internal_error", "apply": [], "dropped": []}))
+    elif plant == "refuse":
         print(json.dumps({"ok": False, "refusal": "calendar_changed", "apply": [], "dropped": []}))
     elif plant == "drop":
         print(json.dumps({"ok": True, "apply": items[:1], "dropped": [{"id": "2", "reason": "row_version_changed"}]}))
@@ -123,6 +127,16 @@ def test_refusal_and_blockers_fail_with_nothing_written(fake):
         ctx, _ = make_ctx()
         out = orun.run_optimizer(ctx, plant, Params())
         assert out["status"] == "failed" and text in out["error"] and out["steps"]
+    assert fake["writes"] == []
+
+
+def test_a_node_side_internal_error_is_a_platform_failure_not_config(fake):
+    for plant, step in (("internal_apply", "guard"), ("internal_run", "optimize")):
+        out = orun.run_optimizer(make_ctx()[0], plant, Params())
+        assert out["status"] == "failed" and out["failed_step"] == step
+        assert out["error_kind"] == "system", (plant, out["error_kind"])
+    # an unknown refusal stays a config problem; a changed-input refusal stays transient
+    assert orun.run_optimizer(make_ctx()[0], "refuse", Params())["error_kind"] == "transient"
     assert fake["writes"] == []
 
 
