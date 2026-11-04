@@ -1895,7 +1895,8 @@ export const OptimizerPreview = {
     PerfMonitor.record('Optimize.evaluate.primary', performance.now() - _evalPrimaryT0);
     // A reversed or unparseable window yields no proposal at all: say why instead of rendering an empty plan.
     if (candidate.status === 'invalid_horizon') {
-      throw new Error(candidate.explanation[0]?.message || Util.t('toast.opt_window_invalid'));
+      // The engine's English message stays in the diagnostics/logs; the planner reads the translated reason.
+      throw new Error(Util.t('toast.opt_horizon_invalid'));
     }
 
     // Post-KPIs are calculated from detached patched task values.

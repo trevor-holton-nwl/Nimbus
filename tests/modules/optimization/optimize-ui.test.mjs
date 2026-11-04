@@ -2835,7 +2835,7 @@ test('P0-15: a reversed window shows the invalid-horizon reason in the failure c
       startDate: new Date('2026-08-03T08:00:00'), endDate: new Date('2026-08-01T08:00:00') });
     for (let i = 0; i < 200 && fx.root.classList.contains('opt-pv-loading'); i++) await wait(10);
     assert.ok(!fx.root.classList.contains('opt-pv-loading'));
-    assert.match(fx.body.innerHTML, /horizon must end after/);
+    assert.match(fx.body.innerHTML, /opt_horizon_invalid|both dates must be valid/);
     assert.equal(OptimizerPreview._previewDiagnostics?.[0]?.code, 'candidate-evaluation-failed');
   } finally {
     fx.restore();

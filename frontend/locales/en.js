@@ -60,6 +60,7 @@ window.__NIMBUS_LOCALES.en = {
   'toast.optimize_plant_no_timezone': 'Plant {{plant}} has no valid time zone, so NIMBUS will not optimize it. Ask an administrator to set the time zone for this plant in Master Data.',
   'toast.select_lines_to_opt':         'Select at least one machine to optimize, or switch to Whole plant.',
   'toast.opt_window_invalid':          'The To date and time must be after the From date and time.',
+  'toast.opt_horizon_invalid':         'The optimizer could not use this window: both dates must be valid and the end must be after the start.',
   'toast.opt_apply_running_skipped':  '{{count}} order(s) started running while the preview was open and were left as they are.',
   'toast.opt_apply_invalid_dropped': '{{count}} order(s) in the preview no longer fit the live schedule and were left as they are.',
   'toast.plant_no_timezone':  'Plant {{plant}} has no valid time zone, so NIMBUS cannot tell which of its orders are running or frozen. Ask an administrator to set the time zone for this plant in Master Data.',
