@@ -427,16 +427,23 @@ export const Timeline = {
 
     Timeline._tl = new vis.Timeline(container, Timeline._visItems, Timeline._groups, options);
 
-    // Corner label above the machine column (CSS ::before reads data-label). Language change reloads the
-    // page, so the text is set once; --corner-h follows the real axis height on 'changed' (only on change).
+    // Corner label in the empty top-left corner (CSS ::before on `.vis-timeline[data-label]` reads data-label).
+    // The label lives on the vis ROOT (`div.vis-timeline` inside the container): vis 7.7.3 places the left panel
+    // BELOW the axis (left.style.top = axis height) and the axis to its right (top.style.left = left width), so a
+    // pseudo-element on the left panel would cover the first rows. The root never scrolls, so the label stays pinned.
+    // Sizes come from vis's own inline styles (no layout read); written only on change. Language change reloads the
+    // page, so the text is set once.
     const _cornerSync = (): void => {
-      const left = container.querySelector('.vis-panel.vis-left') as HTMLElement | null;
-      if (!left) return;
+      const root = container.querySelector('.vis-timeline') as HTMLElement | null;
+      if (!root) return;
       const label = Util.t('ui.sidebar_lines');
-      if (left.getAttribute('data-label') !== label) left.setAttribute('data-label', label);
-      const top = container.querySelector('.vis-panel.vis-top') as HTMLElement | null;
-      const h = top ? Math.round(top.getBoundingClientRect().height) : 0;
-      if (h > 8 && h < 120 && left.style.getPropertyValue('--corner-h') !== h + 'px') left.style.setProperty('--corner-h', h + 'px');
+      if (root.getAttribute('data-label') !== label) root.setAttribute('data-label', label);
+      const topPanel = (root.querySelector(':scope > .vis-panel.vis-top') ?? root.querySelector('.vis-panel.vis-top')) as HTMLElement | null;
+      const leftPanel = (root.querySelector(':scope > .vis-panel.vis-left') ?? root.querySelector('.vis-panel.vis-left')) as HTMLElement | null;
+      const w = topPanel ? Math.round(parseFloat(topPanel.style.left)) : NaN;
+      const h = leftPanel ? Math.round(parseFloat(leftPanel.style.top)) : NaN;
+      if (h > 8 && h < 120 && root.style.getPropertyValue('--corner-h') !== h + 'px') root.style.setProperty('--corner-h', h + 'px');
+      if (w > 40 && w < 600 && root.style.getPropertyValue('--corner-w') !== w + 'px') root.style.setProperty('--corner-w', w + 'px');
     };
     _cornerSync();
     Timeline._tl.on('changed', _cornerSync);
