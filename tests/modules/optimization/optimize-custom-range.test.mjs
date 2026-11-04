@@ -248,3 +248,21 @@ test('the 2 Weeks preset still shows date and time with the toggle off', () => {
     assert.match(fx.el('opt-date-summary').innerHTML, /14 days/);
   } finally { fx.restore(); }
 });
+
+test('P4-3: the line filter applies its text at once and re-renders once typing pauses', async () => {
+  const fx = fixture();
+  try {
+    OptimizeDialog.open();
+    OptimizeDialog.setScope('lines');
+    const list = fx.el('opt-lines-list');
+    const writes = [];
+    let html = '';
+    Object.defineProperty(list, 'innerHTML', { get: () => html, set: v => { html = v; writes.push(v); }, configurable: true });
+    OptimizeDialog.filterLines('L');
+    OptimizeDialog.filterLines('L1');
+    assert.equal(writes.length, 0, 'no render while typing');
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.equal(writes.length, 1, 'one render after the pause');
+    assert.match(html, /L1/);
+  } finally { fx.restore(); }
+});

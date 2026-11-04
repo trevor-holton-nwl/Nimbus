@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { OptimizerPreview, toolFingerprint, ensureToolInventoryForRun } from '../../../frontend/optimization/optimize-ui.mjs';
 import { toolQueueSummary, confirmToolQueue } from '../../../frontend/optimization/tool-queue-confirm.mjs';
-import { Store } from '../../../frontend/platform/store.mjs';
+import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Toast, Modal } from '../../../frontend/platform/foundation.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
@@ -391,12 +391,11 @@ test('_commitPatches: Cancel at the confirm resolves false and commits nothing; 
     const cand = OptimizerPreview._candidate;
     cand.toolBlocked = [blocked('bo-a')];
     const kept = cand.patches;
-    const snap = structuredClone(Store.tasksArr);
-    assert.equal(await OptimizerPreview._commitPatches(kept, { ids: [], reason: 'running' }, snap), false);
+    assert.equal(await OptimizerPreview._commitPatches(kept, { ids: [], reason: 'running' }), false);
     assert.equal(OptimizerPreview._applying, false);
     assert.equal(Store.tasks['bo-a'].start_date, null);
     answer = true;
-    assert.equal(await OptimizerPreview._commitPatches(kept, { ids: [], reason: 'running' }, snap), true);
+    assert.equal(await OptimizerPreview._commitPatches(kept, { ids: [], reason: 'running' }), true);
     assert.ok(Store.tasks['bo-a'].start_date instanceof Date);
   } finally { Modal.confirm = prior; f.restore(); }
 });
@@ -592,4 +591,167 @@ test('prune: pass cap min(8, kept) with a chain of live collisions (chains of 2,
   try {
     assert.equal(fx8.prune([]), null, 'a chain longer than the cap (8 sequential drops, 9 kept) is refused, never half-applied');
   } finally { fx8.restore(); }
+});
+
+/* P2-4: the Undo entry of an optimizer Apply captures only the kept ids plus their distribution family. */
+const OTHERS = 197;
+function addUnrelated(plant, count = OTHERS) {
+  const rows = [];
+  for (let i = 0; i < count; i++) {
+    rows.push({ id: `un-${i}`, PLANT: plant, plant, MACHINE: `${plant}-OTHER`, RUN_TIME: 1, row_version: 1,
+      start_date: new Date(2026, 7, 10, 8 + (i % 8)), end_date: new Date(2026, 7, 10, 9 + (i % 8)) });
+  }
+  return rows;
+}
+const datesOf = task => [task.start_date?.getTime() ?? null, task.end_date?.getTime() ?? null, task.planning_status ?? null];
+
+async function undoScopeRun({ extraFor3 = [], mutate, commit, check }) {
+  const plant = 'TQ-UNDO';
+  setMd(plant, 'off', undefined);
+  const f = openPreview(plant, [previewTask('ud-a', plant, 2), previewTask('ud-b', plant, 1), previewTask('ud-c', plant, 1), ...extraFor3]);
+  const priorEntries = UndoStack._entries.slice();
+  UndoStack._entries.length = 0;
+  const priorUpdate = Store.updateMany;
+  const written = [];
+  try {
+    const cand = OptimizerPreview._candidate;
+    const kept = cand.patches.filter(p => ['ud-a', 'ud-b', 'ud-c'].includes(String(p.id)));
+    assert.equal(kept.length, 3, 'a 3-patch candidate');
+    // Grow the board to 200 orders behind the open preview (_commitPatches does not re-check staleness).
+    if (!extraFor3.length) Store.setTasks([...Store.tasksArr, ...addUnrelated(plant)], 'unit-test');
+    const pre = new Map(Store.tasksArr.map(t => [String(t.id), datesOf(t)]));
+    if (mutate) mutate();
+    assert.equal(await commit(kept), true);
+    assert.equal(UndoStack._entries.length, 1, 'one Undo entry');
+    const entry = UndoStack._entries[0];
+    Store.updateMany = (patches, source) => { for (const p of patches) written.push(String(p.id)); return priorUpdate.call(Store, patches, source); };
+    UndoStack.pop();
+    await check({ entry, written, pre, plant });
+  } finally {
+    Store.updateMany = priorUpdate;
+    UndoStack._entries.length = 0; UndoStack._entries.push(...priorEntries);
+    f.restore();
+  }
+}
+
+test('P2-4: Undo after an optimizer Apply rewrites only the kept rows; the other 197 orders are untouched', async () => {
+  await undoScopeRun({ commit: kept => OptimizerPreview._commitPatches(kept, { ids: [], reason: 'running' }), check: r => {
+  assert.deepEqual([...r.entry.ids].sort(), ['ud-a', 'ud-b', 'ud-c'], 'the entry names only the kept ids');
+  const restored = new Set(r.written);
+  for (const id of ['ud-a', 'ud-b', 'ud-c']) assert.ok(restored.has(id), `${id} restored`);
+  assert.equal(restored.size, 3, 'no other row is written by Undo (dirty ids limited)');
+  for (const id of ['ud-a', 'ud-b', 'ud-c']) assert.deepEqual(datesOf(Store.tasks[id]).slice(0, 2), [null, null], `${id} back to its pre-value`);
+  for (let i = 0; i < OTHERS; i++) assert.deepEqual(datesOf(Store.tasks[`un-${i}`]), r.pre.get(`un-${i}`), 'unrelated order equals its pre-value');
+  } });
+});
+
+test('P2-4: an unrelated edit made between Apply and Undo is NOT rolled back (accepted behaviour change)', async () => {
+  let edited = null;
+  await undoScopeRun({
+    check: r => {
+      assert.ok(!r.written.includes('un-5'), 'Undo did not touch the later edit');
+      assert.equal(Store.tasks['un-5'].start_date.getTime(), edited.getTime());
+    },
+    commit: async kept => {
+      const ok = await OptimizerPreview._commitPatches(kept, { ids: [], reason: 'running' });
+      edited = new Date(2026, 7, 20, 7);
+      Store.updateTask('un-5', { start_date: edited, end_date: new Date(2026, 7, 20, 8) }, 'unit-test');
+      return ok;
+    },
+  });
+});
+
+test('P2-4: the distribution family of a kept order is in the Undo pre-image', async () => {
+  const plant = 'TQ-UNDO';
+  const fam = (id, line) => ({ ...previewTask(id, plant, 1), MACHINE: line, PARENT_ORDER: 'PAR1', MATERIAL_NUMBER: 'MAT1',
+    start_date: new Date(2026, 7, 11, 8), end_date: new Date(2026, 7, 11, 9) });
+  await undoScopeRun({
+    check: r => assert.deepEqual([...r.entry.ids].sort(), ['ud-a', 'ud-b', 'ud-c', 'ud-sib'], 'kept ids plus the unpatched sibling'),
+    extraFor3: [fam('ud-sib', `${plant}-FAMLINE`)],
+    mutate: () => { Store.updateTask('ud-a', { PARENT_ORDER: 'PAR1', MATERIAL_NUMBER: 'MAT1' }, 'unit-test'); },
+    commit: kept => OptimizerPreview._commitPatches(kept, { ids: [], reason: 'running' }),
+  });
+});
+
+test('P2-4: applyPartial (Apply what still fits) scopes Undo to the surviving kept ids', async () => {
+  const plant = 'TQ-UNDO';
+  setMd(plant, 'off', undefined);
+  const f = openPreview(plant, [previewTask('up-a', plant, 2), previewTask('up-b', plant, 1), previewTask('up-c', plant, 1)]);
+  const priorEntries = UndoStack._entries.slice();
+  UndoStack._entries.length = 0;
+  try {
+    const cand = OptimizerPreview._candidate;
+    const result = { plant, candidate: cand, snapshot: OptimizerPreview._snapshot, taskBaseline: OptimizerPreview._taskBaseline };
+    Store.setTasks([...Store.tasksArr, ...addUnrelated(plant)], 'unit-test');
+    Store.updateTask('up-b', { RUN_TIME: 9 }, 'unit-test');   // edited behind the preview: dropped by the partial apply
+    await OptimizerPreview.applyPartial(result);
+    assert.equal(UndoStack._entries.length, 1);
+    const ids = [...UndoStack._entries[0].ids].sort();
+    assert.ok(ids.includes('up-a') && ids.includes('up-c') && !ids.includes('up-b'), 'dropped order is not in the pre-image: ' + ids);
+    assert.ok(ids.length <= 3 && !ids.some(id => id.startsWith('un-')), 'no unrelated row captured');
+  } finally {
+    UndoStack._entries.length = 0; UndoStack._entries.push(...priorEntries);
+    f.restore();
+  }
+});
+
+test('P2-4: the Undo stack still holds at most 10 entries', () => {
+  const prior = UndoStack._entries.slice();
+  UndoStack._entries.length = 0;
+  try {
+    for (let i = 0; i < 12; i++) UndoStack.push(`e${i}`, () => {}, ['x']);
+    assert.equal(UndoStack._entries.length, UndoStack.MAX);
+    assert.equal(UndoStack._entries[0].label, 'e2');
+  } finally { UndoStack._entries.length = 0; UndoStack._entries.push(...prior); }
+});
+
+/* P4-3: stale transition patches the banner only; no full re-render. */
+test('P4-3: _markTaskStale inserts the banner under the header without calling _render, and updates it in place', () => {
+  const body = mkEl('opt-preview-body');
+  const inserted = [];
+  let banner = null;
+  const header = { ...mkEl('h'), insertAdjacentHTML(where, html) { inserted.push([where, html]); banner = { textContent: '' }; } };
+  body.querySelector = sel => (sel === '.opt-pv-header' ? header : sel.startsWith('.opt-pv-stale') ? banner : null);
+  els.set('opt-preview-body', body);
+  const priorRender = OptimizerPreview._render;
+  let renders = 0;
+  OptimizerPreview._render = () => { renders++; };
+  const priorStale = OptimizerPreview.stale;
+  try {
+    OptimizerPreview.stale = false;
+    OptimizerPreview._markTaskStale('x');
+    assert.equal(renders, 0, 'no full render');
+    assert.equal(inserted.length, 1);
+    assert.equal(inserted[0][0], 'afterend');
+    assert.match(inserted[0][1], /data-opt-stale/);
+    OptimizerPreview._showStaleBanner();
+    assert.equal(inserted.length, 1, 'a second call updates the existing banner');
+    assert.ok(banner.textContent.length > 0);
+    // No rendered header yet (loading state): falls back to the full render.
+    body.querySelector = () => null;
+    OptimizerPreview._showStaleBanner();
+    assert.equal(renders, 1);
+  } finally {
+    OptimizerPreview._render = priorRender; OptimizerPreview.stale = priorStale; els.delete('opt-preview-body');
+  }
+});
+
+test('P4-3 (V-U2-09): KPI scope is a strict overlap with the window; an order that only touches an edge is out', async () => {
+  const plant = 'TQ-KPI';
+  setMd(plant, 'off', undefined);
+  const at = (h) => new Date(2026, 7, 10, h);
+  const row = (id, s, e) => ({ ...previewTask(id, plant, 1), start_date: s, end_date: e });
+  const f = openPreview(plant, [previewTask('kp-seed', plant, 1)]);
+  try {
+    Store.setTasks([
+      row('kp-before', at(6), at(8)),    // ends exactly at the window start: out
+      row('kp-after', at(16), at(18)),   // starts exactly at the window end: out
+      row('kp-in', at(7), at(9)),        // overlaps the start edge: in
+      row('kp-inside', at(10), at(12)),  // inside: in
+    ], 'unit-test');
+    const result = await OptimizerPreview.computePreview('spt', {
+      plant, respectCalendar: false, startDate: at(8), endDate: at(16), now: at(8),
+    }, { tick: async () => {}, runSeq: 99 });
+    assert.equal(result.explanation.impact.production.before, 2, 'only the two overlapping orders are in the KPI window');
+  } finally { f.restore(); }
 });

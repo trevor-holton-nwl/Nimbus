@@ -85,6 +85,7 @@ function makeSandboxElement(id, value = '') {
     innerHTML: '',
     textContent: '',
     style: {},
+    dataset: {},
     classList: {
       add(...names) { names.forEach(name => classes.add(name)); },
       remove(...names) { names.forEach(name => classes.delete(name)); },
@@ -2241,7 +2242,7 @@ test('P2-1: a worker answer that fails for one alternate drops only that alterna
     };
     const result = await OptimizerPreview.computePreview('spt', previewOpts,
       { tick: async () => {}, runSeq: 10, workerFactory: pool.factory, maxWorkers: 2 });
-    assert.deepEqual((result.finalists ?? []).map(f => f.label), ['A', 'C'], 'Plan B is omitted, Plan C (index 1) keeps its label');
+    assert.deepEqual((result.finalists ?? []).map(f => f.label), ['A', 'B'], 'Plan B is omitted; labels follow position, so the surviving alternate is B (P4-3, V-U2-08)');
   } finally {
     fx.restore();
   }
@@ -2726,6 +2727,7 @@ test('P0-14: an exception in the pre-run steps restores the Run button, drops th
     const runBtn = globalThis.document.getElementById('opt-run-btn');
     runBtn.innerHTML = 'RUN';
     runBtn.disabled = false;
+    runBtn.dataset.busy = 'running';
     Modal.confirm = async () => { throw new Error('confirm exploded'); };
     const priorHide = OptimizerPreview.hideLoading;
     const priorErr = ErrorLog.error;
@@ -2736,7 +2738,8 @@ test('P0-14: an exception in the pre-run steps restores the Run button, drops th
     try {
       chk.checked = false;
       await OptimizeDialog.run();   // must resolve, not reject
-      assert.equal(runBtn.innerHTML, 'RUN', 'the Run button is restored');
+      assert.match(runBtn.innerHTML, new RegExp(Util.t('btn.run_optimization')), 'the Run button is restored to its ready label');
+      assert.equal(runBtn.dataset.busy, undefined, 'and no longer flagged busy');
       assert.equal(runBtn.disabled, false);
       assert.ok(hides >= 1, 'the spinner is taken down');
       assert.equal(logged.length, 1);
