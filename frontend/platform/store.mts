@@ -1358,7 +1358,7 @@ export const UndoStack = {
   _wasDirty: new WeakSet<NimbusTask>(),
   /** Registered by the engine (platform cannot import it): re-derive the start of just-restored rows from their
    *  restored finish and the CURRENT run time (OQ21). Receives the restored ids. */
-  afterRestore: null as null | ((ids: string[], wasDirty: ReadonlySet<string>) => void),
+  afterRestore: null as null | ((ids: string[], wasDirty: ReadonlySet<string>, savedSince?: ReadonlySet<string>) => void),
   /** Registered by the engine: true when the post-restore reconcile will process this (restored) row. Only such a
    *  row is flagged stale by restoreTasks, because only the reconcile ever clears the flag (U23). Null = every row. */
   willRederive: null as null | ((task: NimbusTask) => boolean),
@@ -1395,10 +1395,13 @@ export const UndoStack = {
       return { id: s.id, changes: { ...rest, planning_reason: s.planning_reason ?? null, runtime_schedule_mismatch: mismatch,
         row_version: Store.tasks[s.id]?.row_version ?? s.row_version } };
     });
+    // A row saved since the snapshot (its live version moved on) now has the server holding what the snapshot predates:
+    // the reconcile must never drop its dirty mark, or nothing would send the restored state.
+    const savedSince = new Set(snapshot.filter(s => (Store.tasks[s.id]?.row_version ?? null) !== (s.row_version ?? null)).map(s => String(s.id)));
     Store.updateMany(patches, 'undo');
     if (patches.length) {
       const wasDirty = new Set(snapshot.filter(s => UndoStack._wasDirty.has(s)).map(s => String(s.id)));
-      if (!exact) UndoStack.afterRestore?.(patches.map(p => String(p.id)), wasDirty);
+      if (!exact) UndoStack.afterRestore?.(patches.map(p => String(p.id)), wasDirty, savedSince);
       UndoStack.afterSettle?.(patches.map(p => String(p.id)));
     }
   },
