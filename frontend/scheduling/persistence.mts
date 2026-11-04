@@ -726,6 +726,9 @@ export const Persistence = {
         // setTasks normalizes), and _normalizeDates writes Store.firmedIds for any row that carries an id.
         for (const t of tasks) {
           const { id, ...rest } = t;
+          // A server row flagged stale: the reconcile will write a dirty patch to persist its re-derivation, so an undo
+          // landing on the same key must never un-dirty it. No baseline (unknown = stays dirty).
+          if (t.runtime_schedule_mismatch === true) continue;
           const probe = rest as NimbusTask;
           Store._normalizeDates(probe);
           probe.id = String(id);
@@ -2029,7 +2032,9 @@ export const Persistence = {
           if (ingest.notes !== undefined && !Persistence.noteUnsaved(String(row.id))) tk.notes = ingest.notes;
           Store._normalizeDates(tk);
           tk.row_version = row.row_version as number | null;
-          Persistence._recordBaseline(String(row.id), tk.row_version, Persistence._baselineKey(Persistence._taskEditSnapshot(tk)));
+          // A row the server still flags stale gets no baseline: the reconcile will dirty it to persist the re-derivation.
+          if (row.runtime_schedule_mismatch) Persistence._savedBaseline.delete(String(row.id));
+          else Persistence._recordBaseline(String(row.id), tk.row_version, Persistence._baselineKey(Persistence._taskEditSnapshot(tk)));
           Persistence._dirtyIds.delete(String(row.id));
           Persistence._forceIds.delete(String(row.id));
           Persistence._conflictedIds.delete(String(row.id));

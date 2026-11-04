@@ -119,3 +119,17 @@ test('load keeps its original order: a row from an older server (no planning_sta
   assert.equal(Store.tasks.A.start_date.getMinutes() % 15, 0, 'setTasks snapped the overlaid dates, as before the baseline change');
   assert.equal(Store.tasks.A.planning_status, 'scheduled');
 });
+
+test('a server row flagged runtime_schedule_mismatch gets no baseline from a load or a refresh', async t => {
+  fixture(t);
+  t.mock.method(Util, 'fetchTraced', async url => ({ ok: true, json: async () =>
+    url.includes('/tasks?') ? { data: [rowFor('A', { runtime_schedule_mismatch: true }), rowFor('B')], meta: {}, links: [] }
+      : url.endsWith('/system-settings') ? {} : { rows: [] } }));
+  await Persistence.load({ plant: 'P' }); await tick();
+  assert.equal(Persistence._savedBaseline.has('A'), false, 'the stale-flagged row is unknown: an undo can never un-dirty it');
+  assert.equal(Persistence._savedBaseline.has('B'), true);
+  t.mock.method(Util, 'fetchTraced', async () => ({ ok: true, json: async () =>
+    ({ data: [rowFor('A', { row_version: 4, runtime_schedule_mismatch: true })], missing: [] }) }));
+  Persistence._refreshTasks(['A']); await tick();
+  assert.equal(Persistence._savedBaseline.has('A'), false, 'a refreshed stale-flagged row gets none either');
+});
