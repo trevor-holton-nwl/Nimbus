@@ -7,7 +7,7 @@
  */
 
 import type { RemoveBacklogResult } from './scheduler-contract.mjs';
-import { MIN_PRODUCTIVE_SEGMENT_MINUTES, capAwareSequence } from './scheduler-contract.mjs';
+import { MIN_PRODUCTIVE_SEGMENT_MINUTES, PRIORITY_FIELD_DEFAULTS, capAwareSequence } from './scheduler-contract.mjs';
 import { candidateAllDayWorkHours, candidateDefaultWorkHours, fitsMergedSpan } from '../calendar/calendar-engine.mjs';
 import { buildSetupResolutionIndex, normalizedValue, resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
 import type { SetupResolutionIndex } from '../setup/setup-domain.mjs';
@@ -1528,15 +1528,8 @@ function notAfterFor(bounds: Readonly<DueDateFirstBounds>, task: Readonly<Nimbus
   return value;
 }
 
-const PRIORITY_TASK_FIELDS: Readonly<Record<string, string>> = {
-  colorWheel: 'COLOR',
-  prt01: 'PRT_01',
-  prt02: 'PRT_02',
-  productionVersion: 'PRODUCTION_VERSION',
-};
-
 // Rank-lookup values here are always order attribute values for
-// PRIORITY_TASK_FIELDS (color / prt01 / prt02 / productionVersion) — never
+// PRIORITY_FIELD_DEFAULTS (color / prt01 / prt02 / productionVersion) — never
 // boolean-shaped — so this delegates to setup-domain's `normalizedValue`
 // fold for a single source of truth rather than keeping an independent
 // `toUpperCase()`. The boolean exemption in `normalizedValue` is inert here
@@ -1580,7 +1573,7 @@ function rankForTask(
   line: string,
   task: NimbusTask,
 ): number {
-  const taskField = PRIORITY_TASK_FIELDS[fieldKey];
+  const taskField = PRIORITY_FIELD_DEFAULTS[fieldKey];
   if (!taskField) return 999999;
   const value = normalizedPriorityValue((task as unknown as Record<string, unknown>)[taskField]);
   const byLine = snapshot.priorityRankMaps ?? {};
