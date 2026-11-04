@@ -3268,7 +3268,8 @@ function candidateForSequence(
       if (explanation[index].taskId === id && (code === 'admitted-without-setup' || code === 'admitted-state-unrecorded' || code === 'due-date-first-placement')) explanation.splice(index, 1);
     }
     for (let index = missingEdges.length - 1; index >= 0; index -= 1) {
-      if (missingEdges[index].successorOrderId === id && missingEdges[index].reason === 'scheduled-without-setup') missingEdges.splice(index, 1);
+      const reason = missingEdges[index].reason;
+      if (missingEdges[index].successorOrderId === id && (reason === 'scheduled-without-setup' || reason === 'initial-state-unknown')) missingEdges.splice(index, 1);
     }
   };
 
@@ -3427,10 +3428,10 @@ function candidateForSequence(
       unadmitted.push(task);
       cursor = priorCursor;
       // Roll back the uncovered-admission accounting written before placement: this order was not admitted.
-      if (uncoveredAdmission) {
-        uncoveredEdgeCount -= 1;
-        dropAdmissionRecords(taskId(task));
-      }
+      // An unknown-predecessor admission wrote an `initial-state-unknown` edge and an `admitted-state-unrecorded`
+      // explanation the same way, so it is rolled back too (only this order's entries).
+      if (uncoveredAdmission) uncoveredEdgeCount -= 1;
+      if (uncoveredAdmission || unknownPredecessor) dropAdmissionRecords(taskId(task));
       explanation.push({ code: 'due-work-unadmitted', message: `No legal placement found for ${taskId(task)}.`, line, taskId: taskId(task) });
       continue;
     }
