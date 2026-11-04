@@ -1690,12 +1690,10 @@ function orderedByDueThenPolicy(
   return decorated.map(entry => entry.task);
 }
 
-/** Phase 1a memo: the status/machine/signature-version predicate every
- * override-lookup helper in this module repeats over `bounds.setup.overrides`
- * for one line. `inactiveOverrideForTransition` is the only caller that reads
- * this cached slice (it is the only one invoked per-transition, i.e. per
- * candidate); the once-per-line-eval callers keep filtering directly since
- * they gain nothing from a run-scoped cache. */
+/** The one active-override predicate: status 'active', this machine, this
+ * signature version, in the source order of `bounds.setup.overrides`. Every
+ * override-lookup helper in this module reads this slice (memoised per line on
+ * the run context when one exists) instead of re-testing the three clauses. */
 function overridesForLine(
   bounds: Readonly<DueDateFirstBounds>, line: string, definition: SetupDefinition,
 ): ReadonlyArray<SetupOccurrenceOverride> {
@@ -1774,12 +1772,7 @@ function missingSuccessorOverrideEdges(
 ): MissingSetupEdge[] {
   const definition = bounds.setup.definition!;
   const presentIds = new Set(tasks.map(taskId));
-  return bounds.setup.overrides.flatMap(override => {
-    if (override.status !== 'active'
-      || override.machine !== line
-      || override.signature_version !== definition.signature_version) {
-      return [];
-    }
+  return overridesForLine(bounds, line, definition).flatMap(override => {
     const successorOrderId = String(override.successor_order_id);
     if (presentIds.has(successorOrderId)) return [];
     return [inactiveOverrideEdge(line, override.predecessor_order_id, successorOrderId)];
@@ -1808,13 +1801,8 @@ function missingPredecessorOverrideEdges(
 ): MissingSetupEdge[] {
   const definition = bounds.setup.definition!;
   const presentIds = new Set(tasks.map(taskId));
-  return bounds.setup.overrides.flatMap(override => {
-    if (override.status !== 'active'
-      || override.machine !== line
-      || override.signature_version !== definition.signature_version
-      || override.predecessor_order_id === null) {
-      return [];
-    }
+  return overridesForLine(bounds, line, definition).flatMap(override => {
+    if (override.predecessor_order_id === null) return [];
     const predecessorOrderId = String(override.predecessor_order_id);
     const successorOrderId = String(override.successor_order_id);
     if (!presentIds.has(successorOrderId) || presentIds.has(predecessorOrderId)) return [];
@@ -1847,11 +1835,8 @@ function preservedAnchorOverrideEdges(
   if (!anchor) return [];
   const definition = bounds.setup.definition!;
   const anchorId = taskId(anchor.task);
-  return bounds.setup.overrides.flatMap(override => {
-    if (override.status !== 'active'
-      || override.machine !== line
-      || override.signature_version !== definition.signature_version
-      || String(override.successor_order_id) !== anchorId
+  return overridesForLine(bounds, line, definition).flatMap(override => {
+    if (String(override.successor_order_id) !== anchorId
       || override.predecessor_order_id === null) {
       return [];
     }
@@ -1888,13 +1873,8 @@ function initialFreeOverrideLock(
   let requiredFirstOrderId: string | undefined;
   let issue: MissingSetupEdge | undefined;
 
-  for (const override of bounds.setup.overrides) {
-    if (override.status !== 'active'
-      || override.machine !== line
-      || override.signature_version !== definition.signature_version
-      || override.predecessor_order_id !== initialPredecessorOrderId) {
-      continue;
-    }
+  for (const override of overridesForLine(bounds, line, definition)) {
+    if (override.predecessor_order_id !== initialPredecessorOrderId) continue;
     const successorOrderId = String(override.successor_order_id);
     const successor = freeById.get(successorOrderId);
     // Firmed successors are validated by boundaryOverrideLocks. A missing
@@ -1934,12 +1914,7 @@ function fragmentAdjacency(
     if (!issue) issue = inactiveOverrideEdge(line, predecessorOrderId, successorOrderId);
   };
 
-  for (const override of bounds.setup.overrides) {
-    if (override.status !== 'active'
-      || override.machine !== line
-      || override.signature_version !== definition.signature_version) {
-      continue;
-    }
+  for (const override of overridesForLine(bounds, line, definition)) {
     const successorId = String(override.successor_order_id);
     const successor = byId.get(successorId);
     if (!successor) continue;
@@ -2041,13 +2016,10 @@ function freeOverrideComponents(
     rightLinks.add(left);
     links.set(right, rightLinks);
   };
-  for (const override of bounds.setup.overrides) {
+  for (const override of overridesForLine(bounds, line, definition)) {
     const predecessorId = override.predecessor_order_id == null ? null : String(override.predecessor_order_id);
     const successorId = String(override.successor_order_id);
-    if (override.status === 'active'
-      && override.machine === line
-      && override.signature_version === definition.signature_version
-      && predecessorId
+    if (predecessorId
       && freeIds.has(predecessorId)
       && freeIds.has(successorId)) {
       link(predecessorId, successorId);
@@ -4482,10 +4454,7 @@ function boundaryOverrideLocks(
     lock.issue = { line, successorOrderId, reason: 'override-inactive' };
   };
 
-  for (const override of bounds.setup.overrides) {
-    if (override.status !== 'active' || override.machine !== line || override.signature_version !== definition.signature_version) {
-      continue;
-    }
+  for (const override of overridesForLine(bounds, line, definition)) {
     const successorFirmed = firmedById.get(override.successor_order_id);
     const predecessorFirmed = override.predecessor_order_id ? firmedById.get(override.predecessor_order_id) : undefined;
 
@@ -4599,12 +4568,7 @@ function auditOutOfHorizonFirmedOverrides(
   };
   const protectedEdges: MissingSetupEdge[] = [];
   const inactiveEdges: MissingSetupEdge[] = [];
-  for (const override of bounds.setup.overrides) {
-    if (override.status !== 'active'
-      || override.machine !== line
-      || override.signature_version !== definition.signature_version) {
-      continue;
-    }
+  for (const override of overridesForLine(bounds, line, definition)) {
     const predecessorOrderId = override.predecessor_order_id === null
       ? null
       : String(override.predecessor_order_id);
