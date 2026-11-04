@@ -257,7 +257,7 @@ import { JobsClient } from '../../../frontend/admin-ops/jobs-client.mjs';
 import { Session } from '../../../frontend/security/session.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 
-const HEALTH = (ping = 12) => ({ db: { connected: true, ping_ms: ping, total_orders: 100 }, pool: { pool_max: 10, pool_size: 2, pool_available: 2 }, memory: { loaded: true, loaded_at: null }, color_wheel: { misses: 0 } });
+const HEALTH = (ping = 12) => ({ db: { connected: true, ping_ms: ping, total_orders: 100 }, pool: { pool_max: 10, pool_size: 2, pool_available: 2 }, memory: { loaded: true, loaded_at: null } });
 const COUNT = { total: 0, entries: [] };
 const DEEP = { tables: [], connections: { total: 1, long_running: [] }, locks: [], slow_queries: { available: false, queries: [] } };
 const SUMMARY = { failed24h: 0, missed24h: 0, warning24h: 0, longerThanUsual: [], nextFire: null, scheduler: { ok: true } };

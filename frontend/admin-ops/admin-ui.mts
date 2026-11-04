@@ -24,6 +24,8 @@ import { UnifiedLogPane } from './unified-log-pane.mjs';
 import type { JobRun } from './jobs-client.mjs';
 import { buildSignals, buildAttention, FORBIDDEN, NOT_FOUND, THRESHOLDS } from './signals.mjs';
 import { buildDiagSections, defaultOpen, ANCHOR_IDS } from './diag-sections.mjs';
+import { buildPipelineSteps } from './pipeline-model.mjs';
+import type { PipelineModel, PipelineStepKey } from './pipeline-model.mjs';
 import type { ClientStats, DbDeep, DeepData, DiagInputs, DiagSection, DiagSectionId, PerfSample } from './diag-sections.mjs';
 import type {
   AdminSub, AttentionItem, BackendCountLike, DbDeepLike, DetailTable, Fix, HealthLike, SapBatchHeader,
@@ -111,32 +113,16 @@ interface AdminHealthResponse {
     loaded_at: string | null;
     load_ms?: number | null;
   };
-  color_wheel: {
-    path: string;
-    reachable: boolean;
-    misses: number;
-    missed_colors: string[];
-  };
 }
 
 /** brain.py's module-level DIAGNOSTICS dict, as returned by the `pipeline`
- *  key of GET /diagnostics/deep. */
+ *  key of GET /diagnostics/deep: ingest bookkeeping only (all plants, since restart). */
 interface AdminPipelineSnapshot {
   loaded_at: string | null;
-  load_ms: number | null;
   source_file: string | null;
-  raw_row_count: number;
   unreadable_start_date: number;
   dropped_no_finish_date: number;
-  duplicate_ids_suffixed: number;
-  color_merge_misses: number;
-  color_merge_ms: number | null;
-  missed_colors: string[];
-  emitted_task_count: number;
-  unique_id_count: number;
-  lines: Record<string, number>;
   warnings: AdminPipelineWarning[];
-  color_merge_is_per_request?: boolean;
 }
 
 /** db.get_db_deep_stats() — the `db_stats` key of GET /diagnostics/deep
@@ -154,22 +140,12 @@ interface AdminDbStatsDeep {
   error?: string;
 }
 
-interface AdminColorWheelStats {
-  error: string | null;
-  total_in_orders: number;
-  matched: number;
-  missed: number;
-  missed_colors: string[];
-  wheel_total?: number;
-  missed_order_count?: number;
-  missed_behavior?: string;
-}
-
 /** GET /diagnostics/deep. */
 interface AdminDiagnosticsDeepResponse {
   pipeline: AdminPipelineSnapshot;
   db_stats: AdminDbStatsDeep;
-  color_wheel: AdminColorWheelStats;
+  /** Only with ?plant=: every order of that plant, no horizon filter. */
+  plant_stats?: { plant: string; total: number };
 }
 
 interface AdminServerInfo {
@@ -498,6 +474,8 @@ export const AdminCockpit = {
   _ovAttention: [] as AttentionItem[],
   _ovSigKey: '',
   _pipelineOpen: null as string | null,
+  /** The plant the cached /diagnostics/deep read was scoped to (null = none picked). */
+  _deepPlant: null as string | null,
   _activeSub: 'overview',
   /** Deep-link target waiting for its element (a DOM id, or `jobs:<tab>` / `sap:<tab>`); cleared by every _setSub and once revealed. */
   _pendingAnchor: null as string | null,
@@ -738,20 +716,34 @@ export const AdminCockpit = {
   /** The pipeline strip's counts, from the cached /diagnostics/deep read and this browser's last load. */
   _diagDeep(): DeepData | null {
     const A = AdminCockpit;
-    if (A._deepForbidden) return { forbidden: true, loaded: 0, plant: 0, received: 0, rendered: 0, misses: 0, warnings: 0 };
+    if (A._deepForbidden) return { forbidden: true, inDb: 0, plant: 0, hasPlant: false, horizon: 0, sent: 0, loaded: 0, gap: 0, dropped: 0, warnings: 0 };
     const d = A._deepData;
     if (!d) return null;
-    const p = (d.pipeline || {}) as AdminPipelineSnapshot;
-    const dbSt = (d.db_stats || {}) as AdminDbStatsDeep;
-    const st: AdminPersistenceStats = Persistence.stats ? Persistence.stats() : ({} as AdminPersistenceStats);
-    const received = st.raw_received ?? 0;
-    const misses = st.color_merge_misses ?? 0;
+    const m = A._pipelineModel(d);
+    const step = (k: PipelineStepKey): number => m.steps.find((x) => x.key === k)?.count ?? 0;
     return {
-      loaded: p.raw_row_count ?? dbSt.total ?? 0,
-      plant: st.pre_color_merge_count ?? (received + misses),
-      received, rendered: st.rendered ?? 0, misses,
-      warnings: (p.warnings || []).length,
+      inDb: m.inDb, plant: step('plant'), hasPlant: m.plant !== null, horizon: step('horizon'),
+      sent: step('sent'), loaded: step('loaded'), gap: m.gap, dropped: m.dropped,
+      warnings: ((d.pipeline || {}).warnings || []).length,
     };
+  },
+
+  /** The pipeline model from a /diagnostics/deep read plus this browser's last /tasks load (one source for the strip and the Diagnostics head). */
+  _pipelineModel(d: AdminDiagnosticsDeepResponse): PipelineModel {
+    const st: AdminPersistenceStats = Persistence.stats ? Persistence.stats() : ({} as AdminPersistenceStats);
+    const meta = (st.backend_meta ?? {}) as Record<string, unknown>;
+    const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+    const he = meta.visibility_horizon_end;
+    return buildPipelineSteps({
+      inDb: d.db_stats?.total ?? 0,
+      plant: AdminCockpit._deepPlant,
+      plantTotal: d.plant_stats ? d.plant_stats.total : null,
+      queried: num(meta.queried_row_count),
+      droppedNoDates: num(meta.dropped_no_dates) ?? 0,
+      horizonEnd: typeof he === 'string' && he ? he : null,
+      sent: st.raw_received ?? 0,
+      loaded: st.rendered ?? 0,
+    });
   },
 
   /** Everything buildDiagSections reads. The Database deep dive comes from the freshest of this page's own read and the Overview's slow tier. */
@@ -1598,11 +1590,6 @@ export const AdminCockpit = {
         return;
       }
       case 'data.reload': void Persistence.reload(); return;
-      case 'data.color_wheel': {
-        const nb = (globalThis as unknown as { NIMBUS?: { ColorWheelViewer?: { open?: () => void } } }).NIMBUS;
-        if (nb?.ColorWheelViewer?.open) nb.ColorWheelViewer.open(); else A.gotoSub('interface');
-        return;
-      }
       case 'client.reset': void A._resetClientState(); return;
       default: console.warn(`AdminCockpit: unknown fix id '${fix.id}'`); return;
     }
@@ -1617,10 +1604,13 @@ export const AdminCockpit = {
     const sig = AbortSignal.any
       ? AbortSignal.any([AdminCockpit._pipelineAbort.signal, AbortSignal.timeout(8000)])
       : AdminCockpit._pipelineAbort.signal;
-    Util.fetchTraced(`${Config.API_BASE}/diagnostics/deep`, { signal: sig })
+    const plant = Store.selectedPlant ?? null;
+    const q = plant ? `?plant=${encodeURIComponent(plant)}` : '';
+    Util.fetchTraced(`${Config.API_BASE}/diagnostics/deep${q}`, { signal: sig })
       .then((r) => { AdminCockpit._deepForbidden = r.status === 403; return r.json() as Promise<AdminDiagnosticsDeepResponse>; })
       .then((data) => {
         AdminCockpit._deepData = data;
+        AdminCockpit._deepPlant = plant;
         AdminCockpit._deepAt = Date.now();
         if (AdminCockpit._deepForbidden) {
           // A viewer without the admin read: say so, never paint zeros that look healthy.
@@ -1633,71 +1623,56 @@ export const AdminCockpit = {
           return;
         }
         const p = (data.pipeline || {}) as AdminPipelineSnapshot;
-        const dbSt = (data.db_stats || {}) as AdminDbStatsDeep;
-        const cw = (data.color_wheel || {}) as AdminColorWheelStats;
         const st: AdminPersistenceStats = Persistence.stats ? Persistence.stats() : ({} as AdminPersistenceStats);
+        const model = AdminCockpit._pipelineModel(data);
 
-        const rendered   = st.rendered ?? 0;
-        const rawDb      = p.raw_row_count ?? dbSt.total ?? 0;
-        const activePlant = st.plant ?? null;
-        // Color-merge stats come from the last /tasks response (per-request,
-        // plant-scoped) — not /diagnostics/deep, which holds load-time defaults.
-        const colorMiss  = st.color_merge_misses ?? 0;
-        // received = rows after both plant filter + color merge (what UI got)
-        const received   = st.raw_received ?? 0;
-        // Rows entering color merge = post-plant-filter count (= received + misses)
-        const preMerge   = st.pre_color_merge_count ?? (received + colorMiss);
-        // Rows removed by plant filter = raw - what entered color merge
-        const plantFiltered = activePlant ? Math.max(0, rawDb - preMerge) : 0;
-        const gap = received - rendered;
+        const steps: AdminPipelineStep[] = model.steps.map((s) => {
+          const dateIso = typeof s.delta?.args.date === 'string' ? s.delta.args.date : '';
+          return {
+            key: s.key,
+            label: s.key === 'plant' ? Util.t('pipe.plant_scope', { plant: model.plant ?? '' }) : Util.t(`pipe.${s.key}`),
+            count: s.count,
+            delta: s.delta ? Util.t(s.delta.key, { ...s.delta.args, ...(dateIso ? { date: Util.fmtIsoDatePref(dateIso.slice(0, 10)) || dateIso } : {}) }) : null,
+            status: s.status,
+            detail: () => AdminCockpit._pipelineDetail(s.key, model, data, st),
+          };
+        });
 
-        // Pipeline order: DB → [Plant filter if active] → Color Merge → Emitted → Rendered.
-        // Reordered (May 2026) so color-miss counts are plant-scoped — the merge
-        // now runs *after* the plant filter, against only the rows the user will see.
-        const steps: AdminPipelineStep[] = [
-          {
-            key: 'db',
-            label: Util.t('pipe.db_load'),
-            count: rawDb,
-            delta: null,
-            status: (p.unreadable_start_date > 0 || p.dropped_no_finish_date > 0) ? 'warn' : 'ok',
-            detail: () => AdminCockpit._pipelineDetailDB(p, dbSt),
-          },
-          ...(activePlant ? [{
-            key: 'plant-filter',
-            label: Util.t('pipe.plant_filter', { plant: activePlant }),
-            count: preMerge,
-            delta: plantFiltered > 0 ? Util.t('pipe.delta_other_plants', { n: plantFiltered }) : null,
-            status: 'ok' as const,
-            detail: () => AdminCockpit._pipelineDetailPlantFilter(st, plantFiltered, rawDb),
-          }] : []),
-          {
-            key: 'color',
-            label: Util.t('pipe.color_merge'),
-            count: received,
-            delta: colorMiss > 0 ? Util.t('pipe.delta_misses', { n: colorMiss }) : null,
-            status: colorMiss > 0 ? 'warn' : 'ok',
-            detail: () => AdminCockpit._pipelineDetailColor(p, cw, st),
-          },
-          {
-            key: 'emitted',
-            label: Util.t('pipe.emitted'),
-            count: received,
-            delta: null,
-            status: (p.warnings?.length ?? 0) > 0 ? 'warn' : 'ok',
-            detail: () => AdminCockpit._pipelineDetailEmitted(p, st),
-          },
-          {
-            key: 'rendered',
-            label: Util.t('pipe.rendered'),
-            count: rendered,
-            delta: gap > 0 ? Util.t('pipe.delta_gap', { n: gap }) : null,
-            status: gap > 0 ? 'err' : 'ok',
-            detail: () => AdminCockpit._pipelineDetailRendered(st, p),
-          },
-        ];
-
+        const toggleDetail = (key: string, mk: () => DocumentFragment): void => {
+          const detail = document.getElementById('admin-pipeline-detail');
+          if (!detail) return;
+          if (AdminCockpit._pipelineOpen === key) {
+            AdminCockpit._pipelineOpen = null;
+            detail.classList.remove('open');
+            detail.textContent = '';
+          } else {
+            AdminCockpit._pipelineOpen = key;
+            detail.classList.add('open');
+            detail.textContent = '';
+            detail.appendChild(mk());
+          }
+        };
         wrap.textContent = '';
+        // Info chip: every order in the database, all plants. Not a step: nothing flows from it.
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'admin-pipeline-info';
+        chip.addEventListener('click', () => toggleDetail('in-db', () => AdminCockpit._pipelineDetail('in-db', model, data, st)));
+        chip.dataset.key = 'in-db';
+        const chipN = document.createElement('span');
+        chipN.className = 'admin-pipeline-info-count';
+        chipN.textContent = model.inDb.toLocaleString();
+        const chipL = document.createElement('span');
+        chipL.className = 'admin-pipeline-info-label';
+        chipL.textContent = Util.t('pipe.in_db');
+        chip.append(chipN, chipL);
+        wrap.appendChild(chip);
+        if (!steps.length) {
+          const hint = document.createElement('div');
+          hint.className = 'admin-log-empty';
+          hint.textContent = Util.t('pipe.pick_plant');
+          wrap.appendChild(hint);
+        }
         steps.forEach((s, i) => {
           if (i > 0) {
             const arrow = document.createElement('span');
@@ -1726,20 +1701,7 @@ export const AdminCockpit = {
             box.appendChild(delta);
           }
 
-          box.addEventListener('click', () => {
-            const detail = document.getElementById('admin-pipeline-detail');
-            if (!detail) return;
-            if (AdminCockpit._pipelineOpen === s.key) {
-              AdminCockpit._pipelineOpen = null;
-              detail.classList.remove('open');
-              detail.textContent = '';
-            } else {
-              AdminCockpit._pipelineOpen = s.key;
-              detail.classList.add('open');
-              detail.textContent = '';
-              detail.appendChild(s.detail());
-            }
-          });
+          box.addEventListener('click', () => toggleDetail(s.key, s.detail));
 
           wrap.appendChild(box);
         });
@@ -1758,174 +1720,127 @@ export const AdminCockpit = {
       });
   },
 
-  _pipelineDetailDB(p: AdminPipelineSnapshot, dbSt: AdminDbStatsDeep): DocumentFragment {
+  /** The click-through detail of one strip box (or of the info chip, key 'in-db'). */
+  _pipelineDetail(key: PipelineStepKey | 'in-db', m: PipelineModel, data: AdminDiagnosticsDeepResponse, st: AdminPersistenceStats): DocumentFragment {
     const frag = document.createDocumentFragment();
-    const head = document.createElement('div');
-    head.className = 'admin-pdtl-head';
-    head.textContent = Util.t('ui.db_load_details');
-    frag.appendChild(head);
+    const head = (text: string): void => {
+      const h = document.createElement('div');
+      h.className = 'admin-pdtl-head';
+      h.textContent = text;
+      frag.appendChild(h);
+    };
+    const sub = (text: string): void => {
+      const e = document.createElement('div');
+      e.className = 'admin-pdtl-sub';
+      e.textContent = text;
+      frag.appendChild(e);
+    };
+    const p = (data.pipeline || {}) as AdminPipelineSnapshot;
+    const dbSt = (data.db_stats || {}) as AdminDbStatsDeep;
+    const meta = (st?.backend_meta ?? {}) as Record<string, unknown>;
+    const metaNum = (k: string): number | string => (typeof meta[k] === 'number' ? (meta[k] as number) : '—');
+    const step = (k: PipelineStepKey): number => m.steps.find((x) => x.key === k)?.count ?? 0;
+    const horizonIso = typeof meta.visibility_horizon_end === 'string' ? meta.visibility_horizon_end : '';
 
-    const rows: AdminKvRow[] = [
-      [Util.t('ui.diag_total_in_db'), (dbSt.total ?? '—').toLocaleString()],
-      [Util.t('ui.diag_null_start_date'), dbSt.null_start ?? '—'],
-      [Util.t('ui.diag_null_end_date'), dbSt.null_end ?? '—'],
-      [Util.t('ui.diag_null_color'), dbSt.null_color ?? '—'],
-      [Util.t('ui.diag_null_line'), dbSt.null_line ?? '—'],
-      [Util.t('ui.diag_null_desc'), dbSt.null_desc ?? '—'],
-      [Util.t('ui.diag_null_runtime'), dbSt.null_runtime ?? '—'],
-      [Util.t('ui.diag_date_range_min'), Util.fmtIsoDatePref(dbSt.date_range?.min?.slice(0, 10)) || '—'],
-      [Util.t('ui.diag_date_range_max'), Util.fmtIsoDatePref(dbSt.date_range?.max?.slice(0, 10)) || '—'],
-      [Util.t('ui.diag_unreadable_start'), p.unreadable_start_date ?? 0],
-      [Util.t('ui.diag_dropped_no_finish'), p.dropped_no_finish_date ?? 0],
-      [Util.t('ui.diag_load_time'), p.load_ms != null ? p.load_ms + ' ms' : '—'],
-    ];
-
-    if (dbSt.by_line && Object.keys(dbSt.by_line).length) {
-      const lbl = document.createElement('div');
-      lbl.className = 'admin-pdtl-sub';
-      lbl.textContent = Util.t('ui.orders_by_line');
+    if (key === 'in-db') {
+      head(Util.t('pipe.in_db'));
+      const rows: AdminKvRow[] = [
+        [Util.t('ui.diag_total_in_db'), (dbSt.total ?? '—').toLocaleString()],
+        [Util.t('ui.diag_null_start_date'), dbSt.null_start ?? '—'],
+        [Util.t('ui.diag_null_end_date'), dbSt.null_end ?? '—'],
+        [Util.t('ui.diag_null_color'), dbSt.null_color ?? '—'],
+        [Util.t('ui.diag_null_line'), dbSt.null_line ?? '—'],
+        [Util.t('ui.diag_null_desc'), dbSt.null_desc ?? '—'],
+        [Util.t('ui.diag_null_runtime'), dbSt.null_runtime ?? '—'],
+        [Util.t('ui.diag_date_range_min'), Util.fmtIsoDatePref(dbSt.date_range?.min?.slice(0, 10)) || '—'],
+        [Util.t('ui.diag_date_range_max'), Util.fmtIsoDatePref(dbSt.date_range?.max?.slice(0, 10)) || '—'],
+      ];
       frag.appendChild(AdminCockpit._kvTable(rows));
-      frag.appendChild(lbl);
-      frag.appendChild(AdminCockpit._lineBar(dbSt.by_line));
+      if (dbSt.by_line && Object.keys(dbSt.by_line).length) {
+        sub(Util.t('ui.orders_by_line'));
+        frag.appendChild(AdminCockpit._lineBar(dbSt.by_line));
+      }
+      // Ingest counters: per process, all plants, reset on restart. Informational; they never colour a box.
+      sub(Util.t('ui.diag_since_restart'));
+      frag.appendChild(AdminCockpit._kvTable([
+        [Util.t('ui.diag_unreadable_start'), p.unreadable_start_date ?? 0],
+        [Util.t('ui.diag_dropped_no_finish'), p.dropped_no_finish_date ?? 0],
+      ]));
       return frag;
     }
 
-    frag.appendChild(AdminCockpit._kvTable(rows));
-    return frag;
-  },
+    if (key === 'plant') {
+      head(Util.t('pipe.plant_scope', { plant: m.plant ?? '' }));
+      const total = step('plant');
+      frag.appendChild(AdminCockpit._kvTable([
+        [Util.t('ui.diag_active_plant'), m.plant ?? '—'],
+        [Util.t('ui.diag_orders_this_plant'), total],
+        [Util.t('ui.diag_orders_other_plants'), Math.max(0, m.inDb - total)],
+        [Util.t('ui.diag_total_in_db'), m.inDb],
+      ]));
+      return frag;
+    }
 
-  _pipelineDetailColor(p: AdminPipelineSnapshot, cw: AdminColorWheelStats, st: AdminPersistenceStats): DocumentFragment {
-    const frag = document.createDocumentFragment();
-    const head = document.createElement('div');
-    head.className = 'admin-pdtl-head';
-    const scope = st?.plant ? ` (${Util.t('ui.plant_prefix')} ${st.plant})` : '';
-    head.textContent = Util.t('ui.color_wheel_details') + scope;
-    frag.appendChild(head);
+    if (key === 'horizon') {
+      head(Util.t('pipe.horizon'));
+      const inside = step('horizon');
+      frag.appendChild(AdminCockpit._kvTable([
+        [Util.t('ui.diag_orders_this_plant'), step('plant')],
+        [Util.t('ui.diag_inside_horizon'), inside],
+        [Util.t('ui.diag_beyond_horizon'), Math.max(0, step('plant') - inside)],
+        [Util.t('ui.diag_horizon_until'), horizonIso ? (Util.fmtIsoDatePref(horizonIso.slice(0, 10)) || horizonIso) : '—'],
+      ]));
+      return frag;
+    }
 
-    // Misses are now plant-scoped — pulled from the last /tasks meta via Persistence stats.
-    const requestMiss = st?.color_merge_misses ?? 0;
-    const requestMissed = st?.missed_colors ?? [];
-    const requestMs = st?.backend_meta?.color_merge_ms as number | undefined;
-
-    const rows: AdminKvRow[] = [
-      [Util.t('ui.diag_scope'), st?.plant ? `${Util.t('ui.plant_prefix')} ${st.plant} only` : Util.t('ui.all_plants')],
-      [Util.t('ui.diag_rows_entering_merge'), st?.pre_color_merge_count ?? '—'],
-      [Util.t('ui.diag_global_wheel_colors'), cw.wheel_total ?? '—'],
-      [Util.t('ui.diag_matched_rows'), (st?.pre_color_merge_count ?? 0) - requestMiss],
-      [Util.t('ui.diag_missed_rows'), requestMiss],
-      [Util.t('ui.diag_merge_time'), requestMs != null ? requestMs + ' ms' : '—'],
-    ];
-    frag.appendChild(AdminCockpit._kvTable(rows));
-
-    if (requestMissed.length) {
-      const sub = document.createElement('div');
-      sub.className = 'admin-pdtl-sub';
-      sub.textContent = Util.t('ui.unmatched_colors', { count: requestMissed.length });
-      frag.appendChild(sub);
-      const chips = document.createElement('div');
-      chips.className = 'admin-pdtl-chips';
-      for (const c of requestMissed) {
-        const chip = document.createElement('span');
-        chip.className = 'admin-pdtl-chip warn';
-        chip.textContent = c;
-        chips.appendChild(chip);
+    if (key === 'sent') {
+      head(Util.t('pipe.sent'));
+      frag.appendChild(AdminCockpit._kvTable([
+        [Util.t('ui.diag_inside_horizon'), step('horizon')],
+        [Util.t('ui.diag_no_dates'), m.dropped],
+        [Util.t('ui.diag_payload_rows'), step('sent')],
+        [Util.t('ui.diag_loaded_at'), p.loaded_at ? Util.fmtIsoStampPref(p.loaded_at, true) + ' UTC' : '—'],
+      ]));
+      const misses = metaNum('color_merge_misses');
+      if (typeof misses === 'number' && misses > 0) {
+        // Neutral note: an unlisted order is sequenced last, never dropped.
+        const note = document.createElement('div');
+        note.className = 'admin-pdtl-sub';
+        note.textContent = Util.t('ui.diag_misses_note', { n: misses });
+        frag.appendChild(note);
       }
-      frag.appendChild(chips);
-    } else {
-      const ok = document.createElement('div');
-      ok.className = 'admin-pdtl-ok';
-      ok.textContent = Util.t('empty.no_colors_matched');
-      frag.appendChild(ok);
+      const warnings = p.warnings || [];
+      if (warnings.length) {
+        sub(Util.t('ui.diag_backend_load_warnings', { count: warnings.length }));
+        // The full list lives in the Backend warnings section; this step links there (delegated [data-anchor] click -> _revealAnchor).
+        const see = document.createElement('button');
+        see.type = 'button';
+        see.className = 'btn btn-ghost sm';
+        see.dataset.anchor = 'diag-bwarn';
+        see.textContent = Util.t('diag.see_bwarn', { n: warnings.length });
+        frag.appendChild(see);
+      }
+      return frag;
     }
-    return frag;
-  },
 
-  _pipelineDetailEmitted(p: AdminPipelineSnapshot, st: AdminPersistenceStats): DocumentFragment {
-    const frag = document.createDocumentFragment();
-    const head = document.createElement('div');
-    head.className = 'admin-pdtl-head';
-    head.textContent = Util.t('ui.emitted_details');
-    frag.appendChild(head);
-
-    const scopeLbl = st?.plant ? `${Util.t('ui.plant_prefix')} ${st.plant}` : Util.t('ui.all_plants');
-    const rows: AdminKvRow[] = [
-      [Util.t('ui.diag_raw_from_db'), p.raw_row_count ?? '—'],
-      [Util.t('ui.diag_unreadable_start'), p.unreadable_start_date ?? 0],
-      [Util.t('ui.diag_dropped_no_finish'), p.dropped_no_finish_date ?? 0],
-      [Util.t('ui.diag_active_scope'), scopeLbl],
-      [Util.t('ui.diag_rows_entering_cmerge'), st?.pre_color_merge_count ?? '—'],
-      [Util.t('ui.diag_color_merge_misses'), st?.color_merge_misses ?? 0],
-      [Util.t('ui.diag_emitted'), st?.raw_received ?? '—'],
-      [Util.t('ui.diag_unique_ids'), p.unique_id_count ?? '—'],
-      [Util.t('ui.diag_loaded_at'), p.loaded_at ? Util.fmtIsoStampPref(p.loaded_at, true) + ' UTC' : '—'],
-    ];
-    frag.appendChild(AdminCockpit._kvTable(rows));
-
-    const warnings = p.warnings || [];
-    if (warnings.length) {
-      const sub = document.createElement('div');
-      sub.className = 'admin-pdtl-sub';
-      sub.textContent = Util.t('ui.diag_backend_load_warnings', { count: warnings.length });
-      frag.appendChild(sub);
-      // The full list lives in the Backend warnings section; this step links there (delegated [data-anchor] click -> _revealAnchor).
-      const see = document.createElement('button');
-      see.type = 'button';
-      see.className = 'btn btn-ghost sm';
-      see.dataset.anchor = 'diag-bwarn';
-      see.textContent = Util.t('diag.see_bwarn', { n: warnings.length });
-      frag.appendChild(see);
-    }
-    return frag;
-  },
-
-  _pipelineDetailPlantFilter(st: AdminPersistenceStats, plantFiltered: number, rawDb: number): DocumentFragment {
-    const frag = document.createDocumentFragment();
-    const head = document.createElement('div');
-    head.className = 'admin-pdtl-head';
-    head.textContent = Util.t('ui.plant_filter_details');
-    frag.appendChild(head);
-
-    // Pipeline order is now: DB → Plant filter → Color merge → Emitted.
-    // The pre-merge count here is what reaches the color merge stage.
-    const preMerge = st?.pre_color_merge_count ?? 0;
-    const rows: AdminKvRow[] = [
-      [Util.t('ui.diag_active_plant'), st.plant ?? '—'],
-      [Util.t('ui.diag_raw_rows_from_db'), rawDb ?? '—'],
-      [Util.t('ui.diag_rows_this_plant'), preMerge],
-      [Util.t('ui.diag_other_plant_excluded'), plantFiltered],
-      [Util.t('ui.diag_final_emitted'), st.raw_received ?? '—'],
-    ];
-    frag.appendChild(AdminCockpit._kvTable(rows));
-    return frag;
-  },
-
-  _pipelineDetailRendered(st: AdminPersistenceStats, p: AdminPipelineSnapshot): DocumentFragment {
-    const frag = document.createDocumentFragment();
-    const head = document.createElement('div');
-    head.className = 'admin-pdtl-head';
-    head.textContent = Util.t('ui.rendering_details');
-    frag.appendChild(head);
-
-    // Gap is measured from received (post-plant-filter) so plant filtering does not
-    // look like data loss here.
-    const received = st.raw_received ?? 0;
-    const rendered = st.rendered ?? 0;
-    const gap = received - rendered;
-    const rows: AdminKvRow[] = [
-      [Util.t('ui.diag_received_by_ui'), received],
+    // loaded
+    head(Util.t('pipe.loaded'));
+    const sent = step('sent');
+    const loaded = step('loaded');
+    frag.appendChild(AdminCockpit._kvTable([
+      [Util.t('ui.diag_received_by_ui'), sent],
       [Util.t('ui.diag_pl_filtered'), st.filtered_pl ?? 0],
       [Util.t('ui.diag_null_id_dropped'), st.filtered_null_id ?? 0],
       [Util.t('ui.diag_store_collisions'), st.dedup_collisions ?? 0],
-      [Util.t('ui.diag_rendered'), rendered],
-      [Util.t('ui.diag_gap'), gap],
+      [Util.t('ui.diag_load_errors'), st.errors ?? 0],
+      [Util.t('pipe.loaded'), loaded],
+      [Util.t('ui.diag_gap'), m.gap],
       [Util.t('ui.diag_source'), st.source ?? '—'],
-    ];
-    frag.appendChild(AdminCockpit._kvTable(rows));
-
-    if (gap > 0) {
+    ]));
+    if (m.gap > 0) {
       const warn = document.createElement('div');
       warn.className = 'admin-pdtl-warn';
-      warn.textContent = Util.t('ui.data_gap_warn', { count: gap });
+      warn.textContent = Util.t('ui.data_gap_warn', { count: m.gap });
       frag.appendChild(warn);
     }
     return frag;

@@ -1,6 +1,12 @@
 """
 NIMBUS 2.0 — DIAGNOSTICS load-metadata bag.
 
+Holds only process-level state: `loaded_at`, `source_file`, the ingest counters
+(`unreadable_start_date`, `dropped_no_finish_date`; per process, all plants, reset on
+restart), `warnings`, plus the schedule-event sweep bookkeeping other modules add.
+Per-request pipeline counts (rows queried, dropped, colour-merge misses) are NOT kept here:
+they ride in each GET /tasks `meta`.
+
 Not one of the plan's two named accessor modules (docs/architecture/
 domain-refactor-plan.md §4 calls out only the PLANT_LISTS cache and the
 _BACKEND_LOG ring buffer) — this is a P5 addition, called out explicitly in
@@ -24,18 +30,9 @@ from backend.admin_ops.logbuffer import _log_event
 # Global diagnostics bucket populated on every load.
 DIAGNOSTICS: dict = {
     "loaded_at": None,
-    "load_ms": None,
     "source_file": None,
-    "raw_row_count": 0,
     "unreadable_start_date": 0,
     "dropped_no_finish_date": 0,
-    "duplicate_ids_suffixed": 0,
-    "color_merge_misses": 0,
-    "color_merge_ms": None,
-    "missed_colors": [],
-    "emitted_task_count": 0,
-    "unique_id_count": 0,
-    "lines": {},
     "warnings": []
 }
 

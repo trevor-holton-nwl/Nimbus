@@ -896,16 +896,13 @@ def count_orders(plant: str | None = None, line: str | None = None,
     return int(row[0]) if row else 0
 
 
-def distinct_order_colors() -> list[str]:
-    """
-    Distinct non-NULL color values across the orders table. Used by the
-    diagnostics color-coverage panel instead of a full-table load — only the
-    color column is read, so the DB does the de-dup and no DataFrame is built.
-    """
+def count_orders_in_plant(plant: str) -> int:
+    """Total `orders` rows for one plant with NO visibility-horizon filter (admin diagnostics:
+    the first step of the Data pipeline strip, before the horizon trims what /tasks serves)."""
     with _pool.connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT DISTINCT color FROM orders WHERE color IS NOT NULL")
-        rows = cur.fetchall()
-    return [r[0] for r in rows]
+        cur.execute("SELECT COUNT(*) FROM orders WHERE plant = %s", (plant,))
+        row = cur.fetchone()
+    return int(row[0]) if row else 0
 
 
 def reattribute_null_plant_orders() -> int:

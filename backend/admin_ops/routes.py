@@ -60,14 +60,6 @@ def get_health():
             "task_count":  db_stats.get("total_orders", 0),
             "loaded_at":   DIAGNOSTICS.get("loaded_at"),
         },
-        # No more "path"/"reachable" file check (GLOBAL_CW/COLOR_FILE retired —
-        # priority lists are DB-backed, covered by db.connected above). Key
-        # name kept as color_wheel for frontend compat — only .misses is read
-        # (frontend/plant-and-administration.mts _renderHealth).
-        "color_wheel": {
-            "misses":    DIAGNOSTICS.get("color_merge_misses", 0),
-            "missed_colors": DIAGNOSTICS.get("missed_colors", []),
-        },
     }
 
 
@@ -109,63 +101,24 @@ def get_version(response: Response):
 
 
 @router.get("/diagnostics/deep", dependencies=[Depends(require_api_key), Depends(require_admin)])
-def get_diagnostics_deep():
-    """Full pipeline breakdown: DB stats + color-wheel analysis + current DIAGNOSTICS."""
+def get_diagnostics_deep(plant: str | None = None):
+    """Pipeline breakdown: DB stats + current DIAGNOSTICS. With ?plant= also `plant_stats`, the plant's
+    total order count with NO visibility-horizon filter (admin-only route, so no role_plants scoping applies)."""
+    if plant is not None and not plant.strip():
+        raise HTTPException(status_code=400, detail="plant must be a non-empty string")
     db_deep = db.get_db_deep_stats()
     db_deep["schedule_event"] = {
         **db.get_schedule_event_stats(),
         "last_sweep": DIAGNOSTICS.get("schedule_event_last_sweep"),
         "write_failures": DIAGNOSTICS.get("schedule_event_write_failures", 0),
     }
-
-    # Color wheel analysis against the colors currently in the orders table.
-    # Source distinct colors from the DB (color column only — no full-table load)
-    # and the wheel from the already-cached PLANT_LISTS dict (no DB re-read) —
-    # union of every plant's plant-wide 'colorWheel' entries, repointed at
-    # priority_list now that GLOBAL_CW is retired (docs/scheduling_priority.md
-    # N18: this is a DB-wide summary, not per-plant coverage — the generalized
-    # per-field, per-plant coverage panel is Stage 2/3, backed by
-    # db.priority_list_coverage()).
-    color_stats: dict = {"error": None, "total_in_orders": 0, "matched": 0,
-                         "missed": 0, "missed_colors": DIAGNOSTICS.get("missed_colors", [])}
-    try:
-        # Normalize order colors the same way priority_list entries are (upper/strip).
-        order_colors = {
-            c.upper().strip()
-            for c in db.distinct_order_colors()
-            if c is not None and str(c).strip()
-        }
-        wheel_colors = {
-            color
-            for by_machine in plcache.PLANT_LISTS.values()
-            for color in (by_machine.get("") or {}).get("colorWheel", {})
-        }
-        if order_colors:
-            missed = order_colors - wheel_colors
-            color_stats.update({
-                "total_in_orders": len(order_colors),
-                "wheel_total":     len(wheel_colors),
-                "matched":         len(order_colors & wheel_colors),
-                "missed":          len(missed),
-                "missed_colors":   sorted(missed),
-                "missed_order_count": int(DIAGNOSTICS.get("color_merge_misses", 0)),
-                # Unlisted colors are sequenced last (ORDER_Y 999999), never dropped.
-                "missed_behavior": "sequenced_last",
-            })
-    except Exception as e:
-        color_stats["error"] = str(e)
-
-    pipeline = dict(DIAGNOSTICS)
-    # Signal to the frontend that color-merge stats in this payload are *not*
-    # authoritative — they reflect load-time defaults (zero). The pipeline panel
-    # should read color_merge_misses / missed_colors / emitted_task_count from the
-    # last /tasks response (Persistence.stats().backend_meta) instead.
-    pipeline["color_merge_is_per_request"] = True
-    return {
-        "pipeline":   pipeline,
-        "db_stats":   db_deep,
-        "color_wheel": color_stats,
+    out = {
+        "pipeline": dict(DIAGNOSTICS),
+        "db_stats": db_deep,
     }
+    if plant is not None:
+        out["plant_stats"] = {"plant": plant, "total": db.count_orders_in_plant(plant)}
+    return out
 
 
 @router.post("/reload", dependencies=[Depends(require_api_key), Depends(require_admin)])

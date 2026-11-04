@@ -17,7 +17,7 @@ const table = (o = {}) => ({ table: 't', live_rows: 10, dead_pct: 1, last_vacuum
 function base(o = {}) {
   return {
     now: NOW,
-    health: { db: { connected: true, ping_ms: 20, total_orders: 100 }, pool: { pool_max: 10, pool_size: 2, pool_available: 1, requests_waiting: 0 }, memory: { loaded_at: '2026-10-30T11:00:00Z' }, color_wheel: { misses: 0 } },
+    health: { db: { connected: true, ping_ms: 20, total_orders: 100 }, pool: { pool_max: 10, pool_size: 2, pool_available: 1, requests_waiting: 0 }, memory: { loaded_at: '2026-10-30T11:00:00Z' } },
     dbDeep: { tables: [table({ table: 'a' })], connections: { total: 3, long_running: [] }, locks: [], slow_queries: { available: true, queries: [{ mean_ms: 5 }] } },
     dbDeepAt: NOW - 1000,
     backendErrors: { total: 0, entries: [] }, backendWarns: { total: 0, entries: [] },
@@ -108,8 +108,11 @@ test('data load ladder', () => {
   const b = base();
   assert.equal(dl({ client: { ...b.client, stats: { source: 'backend', raw_received: 100, rendered: 90 } } }).reasonKey, 'sig.data_gap');
   assert.equal(dl({ client: { ...b.client, tasks: 0 } }).reasonKey, 'sig.data_none');
-  const m = dl({ health: { ...b.health, color_wheel: { misses: 3 } } });
-  assert.equal(m.severity, 'warn'); assert.equal(m.reasonKey, 'sig.data_misses'); assert.equal(m.fixes[0].id, 'data.color_wheel');
+  // no colour-miss signal any more: a health read with a color_wheel block changes nothing
+  assert.equal(dl({ health: { ...b.health, color_wheel: { misses: 3 } } }).reasonKey, 'sig.data_ok');
+  // the detail rows are labelled: all plants vs the loaded plant's sent/loaded counts
+  assert.deepEqual(dl({}).detail.rows.map(r => r[0]), ['pipe.in_db', 'pipe.sent', 'pipe.loaded']);
+  assert.equal(dl({}).detail.rows[0][1], 100);
   assert.equal(dl({ client: { ...b.client, stats: { source: 'cache', raw_received: 1, rendered: 1 } } }).reasonKey, 'sig.data_cached');
   assert.equal(dl({}).reasonKey, 'sig.data_ok');
   assert.equal(dl({}).reasonArgs.ago, Date.parse('2026-10-30T11:00:00Z'));
@@ -158,9 +161,8 @@ test('browser ladder', () => {
 
 test('ordering: worst first, stable on ties; threshold override', () => {
   const b = base();
-  b.client = { ...b.client, inv: { autosaveDisabled: true } };                 // browser err
+  b.client = { ...b.client, inv: { autosaveDisabled: true }, stats: { source: 'cache', raw_received: 1, rendered: 1 } };   // browser err + data_load warn
   b.jobs = { ...b.jobs, summary: { ...b.jobs.summary, failed24h: 1 } };           // jobs err
-  b.health = { ...b.health, color_wheel: { misses: 2 } };                         // data_load warn
   const s = buildSignals(b);
   assert.deepEqual(s.map(x => x.id).slice(0, 3), ['jobs', 'browser', 'data_load']);
   const b2 = base(); b2.health = { ...b2.health, db: { ...b2.health.db, ping_ms: 100 } };
@@ -174,7 +176,6 @@ function noisy() {
   b.jobs = { summary: { failed24h: 1, missed24h: 0, warning24h: 0, longerThanUsual: [], nextFire: null, scheduler: { ok: false } }, lastFailed: [{ id: 4, job_name: 'Opt', plant: '1008', status: 'failed', started_at: '2026-10-30T11:00:00Z', scheduled_for: null, duration_ms: 1, error: 'e' }], recent: [] };
   b.backendErrors = { total: 6, entries: [] };
   b.dbDeep = { ...b.dbDeep, tables: [table({ needs_vacuum: true, dead_pct: 30 })], locks: [{ blocked_pid: 1 }] };
-  b.health = { ...b.health, color_wheel: { misses: 4 } };
   b.client = { ...b.client, stats: { source: 'backend', raw_received: 10, rendered: 5 }, inv: { autosaveDisabled: true } };
   b.sap = { ...b.sap, status: { ...b.sap.status, error: 3 }, batches: [{ batch_id: 'h', status: 'held' }] };
   b.uploadWarnings = { distribution: 2, batchId: 'bb' };
@@ -193,12 +194,11 @@ test('attention: worst-first, capped at 8, one item per cause', () => {
 
 test('attention: lower-severity items appear when under the cap', () => {
   const b = base();
-  b.health = { ...b.health, color_wheel: { misses: 4 } };
   b.sap = { ...b.sap, batches: [{ batch_id: 'h', status: 'held' }] };
   b.uploadWarnings = { distribution: 2, batchId: 'bb' };
   b.dbDeep = { ...b.dbDeep, tables: [table({ needs_vacuum: true })] };
   const a = buildAttention(buildSignals(b), b);
-  assert.deepEqual(a.map(x => x.id), ['vacuum', 'color_misses', 'sap_held', 'distribution']);
+  assert.deepEqual(a.map(x => x.id), ['vacuum', 'sap_held', 'distribution']);
 });
 
 test('every emitted locale key exists in en.js', () => {
@@ -279,7 +279,6 @@ test('anchors: Data load carries a secondary nav.diagnostics fix to diag-pipe, p
   const cases = [
     withClient({ stats: { source: 'backend', raw_received: 100, rendered: 90 } }),
     withClient({ tasks: 0 }),
-    withHealth({ color_wheel: { misses: 2 } }),
     withClient({ stats: { source: 'cache', raw_received: 100, rendered: 100 } }),
   ];
   for (const c of cases) {
@@ -325,7 +324,7 @@ test('anchors: attention items', () => {
 test('anchors: every nav.* fix and every linkSub in a worst-case input carries an anchor; logs.open carries level and source', () => {
   const sap = base().sap;
   const i = base({
-    ...withHealth({ db: { connected: true, ping_ms: 3000 }, color_wheel: { misses: 3 } }, { pool_size: 10, pool_available: 0, requests_waiting: 4 }),
+    ...withHealth({ db: { connected: true, ping_ms: 3000 } }, { pool_size: 10, pool_available: 0, requests_waiting: 4 }),
     ...withDeep({ locks: [{ blocked_pid: 1 }], tables: [table({ needs_vacuum: true })], connections: { total: 9, long_running: [{ duration_s: 99 }] }, slow_queries: { available: true, queries: [{ mean_ms: 900 }] } }),
     ...withJobs({ failed24h: 2, missed24h: 1, warning24h: 1, longerThanUsual: [{}], scheduler: { ok: false }, maintenance: { enabled: true } }),
     ...withClient({ tasks: 0, stats: { source: 'cache', raw_received: 100, rendered: 80 } }),

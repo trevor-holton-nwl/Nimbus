@@ -165,6 +165,8 @@ def legacy_build_tasks(rows, plant, machine=None, paging=False, total=0):
     meta["machine_filter_active"] = machine
     meta["pre_color_merge_count"] = pre_merge_count
     meta["raw_row_count"] = pre_merge_count
+    meta["queried_row_count"] = len(rows)                    # new meta key (2026-11): rows the reader returned
+    meta["dropped_no_dates"] = len(rows) - pre_merge_count   # new meta key (2026-11): the no-edge/no-queue drop
     meta["unique_id_count"] = len(data)
     meta["total"] = total if paging else len(data)
     meta["visibility_horizon_end"] = None

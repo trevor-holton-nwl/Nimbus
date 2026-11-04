@@ -59,12 +59,12 @@ def test_liveness_remains_available_when_database_checks_would_fail(ops, monkeyp
 def test_health_maps_database_reachability_to_stateless_memory(ops, monkeypatch, connected, count):
     monkeypatch.setattr(db, "get_health_stats", lambda: {"connected": connected, "total_orders": count})
     monkeypatch.setattr(db, "get_pool_stats", lambda: {"pool_size": 4})
-    routes.DIAGNOSTICS.update(loaded_at="2026-10-13T00:00:00Z", color_merge_misses=7, missed_colors=["RED"])
+    routes.DIAGNOSTICS.update(loaded_at="2026-10-13T00:00:00Z")
     response = ops.get("/health")
     assert response.status_code == 200
     assert response.json()["memory"] == {"stateless": True, "loaded": connected, "task_count": count,
                                          "loaded_at": "2026-10-13T00:00:00Z"}
-    assert response.json()["color_wheel"] == {"misses": 7, "missed_colors": ["RED"]}
+    assert "color_wheel" not in response.json()
 
 
 def test_public_health_redacts_internal_errors_without_mutating_cached_stats(ops, monkeypatch):
@@ -221,32 +221,38 @@ def test_reload_snapshot_tolerates_count_probe_failure(ops, monkeypatch):
     assert response.json()["diagnostics"]["loaded_at"]
 
 
-def test_deep_diagnostics_normalizes_distinct_colors_and_uses_plant_wide_lists(ops, monkeypatch):
-    monkeypatch.setattr(db, "get_db_deep_stats", lambda: {"orders": 42})
-    monkeypatch.setattr(db, "distinct_order_colors", lambda: [" red ", "RED", "blue", " green", None, " "])
-    monkeypatch.setattr(cache, "PLANT_LISTS", {
-        "P1": {"": {"colorWheel": {"RED": 1}}, "M1": {"colorWheel": {"GREEN": 1}}},
-        "P2": {"": {"colorWheel": {"BLUE": 1}}},
-    })
-    routes.DIAGNOSTICS["color_merge_misses"] = 9
-    response = ops.get("/diagnostics/deep", headers=ADMIN)
-    assert response.status_code == 200
-    colors = response.json()["color_wheel"]
-    assert colors == {"error": None, "total_in_orders": 3, "matched": 2, "missed": 1,
-                      "missed_colors": ["GREEN"], "wheel_total": 2, "missed_order_count": 9,
-                      "missed_behavior": "sequenced_last"}
-    assert response.json()["pipeline"]["color_merge_is_per_request"] is True
-    assert "color_merge_is_per_request" not in routes.DIAGNOSTICS
-
-
-def test_deep_diagnostics_retains_db_results_when_color_query_fails(ops, monkeypatch):
+def test_deep_diagnostics_has_no_color_wheel_and_no_plant_stats_without_plant(ops, monkeypatch):
     monkeypatch.setattr(db, "get_db_deep_stats", lambda: {"orders": 42})
     monkeypatch.setattr(db, "get_schedule_event_stats", lambda: {"rows_estimate": None})
-    monkeypatch.setattr(db, "distinct_order_colors", MagicMock(side_effect=RuntimeError("color query failed")))
+    count = MagicMock()
+    monkeypatch.setattr(db, "count_orders_in_plant", count)
     response = ops.get("/diagnostics/deep", headers=ADMIN)
     assert response.status_code == 200
-    assert response.json()["db_stats"]["orders"] == 42
-    assert response.json()["color_wheel"]["error"] == "color query failed"
+    body = response.json()
+    assert body["db_stats"]["orders"] == 42
+    assert "color_wheel" not in body and "plant_stats" not in body
+    assert "color_merge_is_per_request" not in body["pipeline"]
+    count.assert_not_called()
+
+
+def test_deep_diagnostics_plant_param_adds_unfiltered_plant_total(ops, monkeypatch):
+    monkeypatch.setattr(db, "get_db_deep_stats", lambda: {"orders": 42})
+    monkeypatch.setattr(db, "get_schedule_event_stats", lambda: {"rows_estimate": None})
+    count = MagicMock(return_value=1234)
+    monkeypatch.setattr(db, "count_orders_in_plant", count)
+    response = ops.get("/diagnostics/deep", params={"plant": "1008"}, headers=ADMIN)
+    assert response.status_code == 200
+    assert response.json()["plant_stats"] == {"plant": "1008", "total": 1234}
+    count.assert_called_once_with("1008")
+
+
+def test_deep_diagnostics_blank_plant_is_400_and_planner_is_refused(ops, monkeypatch):
+    count = MagicMock()
+    monkeypatch.setattr(db, "count_orders_in_plant", count)
+    assert ops.get("/diagnostics/deep", params={"plant": "  "}, headers=ADMIN).status_code == 400
+    planner = {"x-user-email": "planner", "x-api-key": "ops-test-key"}
+    assert ops.get("/diagnostics/deep", params={"plant": "1008"}, headers=planner).status_code == 403
+    count.assert_not_called()
 
 
 def test_db_diagnostics_assembles_all_sections_including_degraded_section(ops, monkeypatch):
@@ -321,7 +327,6 @@ def test_diagnostics_deep_includes_schedule_event_block(ops, monkeypatch):
     monkeypatch.setattr(db, "get_db_deep_stats", lambda: {"total": 0, "by_line": {}})
     monkeypatch.setattr(db, "get_schedule_event_stats",
                         lambda: {"rows_estimate": 5, "oldest_at": "2026-10-01T00:00:00+00:00", "newest_at": "2026-10-23T00:00:00+00:00"})
-    monkeypatch.setattr(db, "distinct_order_colors", lambda: [])
     routes.DIAGNOSTICS["schedule_event_last_sweep"] = {"deleted": 2}
     routes.DIAGNOSTICS["schedule_event_write_failures"] = 4
     response = ops.get("/diagnostics/deep", headers=ADMIN)

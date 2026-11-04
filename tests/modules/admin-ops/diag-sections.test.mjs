@@ -24,7 +24,7 @@ function base(o = {}) {
   return {
     now: NOW,
     client: { build: 'b1', autosave: 'on', errRate: 0, heapUsed: 50, heapLimit: 1000 },
-    deep: { loaded: 100, plant: 80, received: 80, rendered: 80, misses: 0, warnings: 0 },
+    deep: { inDb: 100, plant: 80, hasPlant: true, horizon: 80, sent: 80, loaded: 80, gap: 0, dropped: 0, warnings: 0 },
     dbDeep: {
       pool: { pool_size: 3, pool_available: 2, pool_max: 10, requests_waiting: 0 },
       server: { version: 'PostgreSQL 16.2 (Debian)', started_at: '2026-10-29T12:00:00Z' },
@@ -145,12 +145,18 @@ test('stats age 9 / 10 minutes: warn on the Database line only', () => {
   assert.equal(sec(base({ dbStatsAt: NOW - 10 * MIN }), 'db').lineArgs.age, 10 * MIN);
 });
 
-test('pipeline: a gap is an error, color misses warn; backend warnings warn with a count', () => {
-  assert.equal(sev(base({ deep: { loaded: 9, plant: 9, received: 9, rendered: 8, misses: 0, warnings: 0 } }), 'pipe'), 'err');
-  const miss = sec(base({ deep: { loaded: 9, plant: 9, received: 9, rendered: 9, misses: 3, warnings: 2 } }), 'pipe');
-  assert.equal(miss.severity, 'warn');
-  assert.equal(miss.shortArgs.misses, 3);
-  const bw = sec(base({ deep: { loaded: 9, plant: 9, received: 9, rendered: 9, misses: 0, warnings: 2 } }), 'bwarn');
+const DEEP = { inDb: 20, plant: 9, hasPlant: true, horizon: 9, sent: 9, loaded: 9, gap: 0, dropped: 0, warnings: 0 };
+test('pipeline: a load gap is an error, dropped no-date rows warn; backend warnings warn with a count', () => {
+  assert.equal(sev(base({ deep: { ...DEEP, loaded: 8, gap: 1 } }), 'pipe'), 'err');
+  const dropped = sec(base({ deep: { ...DEEP, dropped: 3, warnings: 2 } }), 'pipe');
+  assert.equal(dropped.severity, 'warn');
+  assert.equal(dropped.shortArgs.loaded, 9);
+  assert.deepEqual(dropped.lineArgs, { inDb: 20, plant: 9, horizon: 9, sent: 9, loaded: 9 });
+  assert.equal(sev(base({ deep: DEEP }), 'pipe'), 'ok');
+  // no plant: the plant-scoped figures read as unavailable, the database total stays
+  const np = sec(base({ deep: { ...DEEP, hasPlant: false } }), 'pipe');
+  assert.equal(np.lineArgs.inDb, 20); assert.equal(np.lineArgs.plant, '–');
+  const bw = sec(base({ deep: { ...DEEP, warnings: 2 } }), 'bwarn');
   assert.equal(bw.severity, 'warn');
   assert.equal(bw.count, 2);
 });

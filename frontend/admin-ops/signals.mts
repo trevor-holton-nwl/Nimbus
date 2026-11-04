@@ -23,7 +23,7 @@ export type SignalId = 'jobs' | 'database' | 'backend' | 'data_load' | 'connecti
 export type AdminSub = 'overview' | 'logs' | 'diagnostics' | 'order-maintenance' | 'jobs' | 'manage' | 'interface' | 'security' | 'system-config' | 'table-browser';
 
 /** A one-click remedy. `id` is dispatched by the pane (jobs.rerun, jobs.open_run, db.vacuum_all,
- *  db.vacuum_table, logs.open, data.reload, data.color_wheel, client.reset, nav.diagnostics,
+ *  db.vacuum_table, logs.open, data.reload, client.reset, nav.diagnostics,
  *  nav.interface, nav.order_maintenance, nav.jobs); `args` carries what it needs (runId, table, ...). */
 export interface Fix { id: string; labelKey: string; args?: Record<string, unknown>; adminOnly?: boolean }
 
@@ -60,7 +60,6 @@ export interface HealthLike {
   db: { connected: boolean; ping_ms: number; total_orders?: number; error?: string };
   pool: { pool_max?: number; pool_size?: number; pool_available?: number; requests_waiting?: number };
   memory?: { loaded?: boolean; task_count?: number; loaded_at?: string | null };
-  color_wheel: { misses: number; missed_colors?: string[] };
 }
 export interface TableStatLike {
   table: string; live_rows: number; dead_pct: number; last_vacuum: string | null; last_autovacuum: string | null;
@@ -294,16 +293,14 @@ function _dataLoad(i: SignalInputs): Signal {
   const pipe = _nav('nav.diagnostics', 'btn.open_diagnostics', 'diag-pipe');
   if (st && st.rendered < st.raw_received) conds.push({ sev: 'err', key: 'sig.data_gap', args: { n: st.raw_received - st.rendered }, fixes: [reload, pipe] });
   if (h.db.connected && i.client.tasks === 0) conds.push({ sev: 'err', key: 'sig.data_none', args: {}, fixes: [reload, pipe] });
-  if (h.color_wheel.misses > 0) conds.push({ sev: 'warn', key: 'sig.data_misses', args: { n: h.color_wheel.misses }, fixes: [_fix('data.color_wheel', 'btn.open_color_wheel'), pipe] });
   if (st && (st.source === 'cache' || st.source === 'demo')) conds.push({ sev: 'warn', key: 'sig.data_cached', args: {}, fixes: [reload, pipe] });
   const ago = _ms(h.memory?.loaded_at) || i.now;
   return _pick('data_load', conds, { sev: 'ok', key: 'sig.data_ok', args: { orders: i.client.tasks, ago } }, {
     headKeys: ['sig.d_step', 'sig.d_count'],
     rows: [
-      ['pipe.db_load', h.db.total_orders ?? null],
-      ['pipe.color_merge', h.color_wheel.misses],
-      ['pipe.emitted', st ? st.raw_received : null],
-      ['pipe.rendered', st ? st.rendered : null],
+      ['pipe.in_db', h.db.total_orders ?? null],
+      ['pipe.sent', st ? st.raw_received : null],
+      ['pipe.loaded', st ? st.rendered : null],
     ],
     linkKey: 'btn.open_diagnostics', linkSub: 'diagnostics', linkAnchor: 'diag-pipe',
   });
@@ -404,8 +401,6 @@ export function buildAttention(signals: Signal[], i: SignalInputs): AttentionIte
   const locks = _rows<{ blocked_pid: number }>(i.dbDeep?.locks).length;
   if (locks > 0) add({ id: 'locks', severity: 'err', textKey: 'attn.locks', args: { n: locks }, fix: _nav('nav.diagnostics', 'btn.open_diagnostics', 'diag-db-locks') });
 
-  const misses = i.health?.color_wheel.misses ?? 0;
-  if (misses > 0) add({ id: 'color_misses', severity: 'warn', textKey: 'attn.color_misses', args: { n: misses }, fix: _fix('data.color_wheel', 'btn.open_color_wheel') });
   const st = i.client.stats;
   if (st && st.rendered < st.raw_received) add({ id: 'gap', severity: 'err', textKey: 'attn.gap', args: { n: st.raw_received - st.rendered }, fix: _fix('data.reload', 'btn.reload_data') });
 

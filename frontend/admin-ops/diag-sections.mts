@@ -33,10 +33,15 @@ export interface ClientStats {
   /** Browser errors per minute. */
   errRate: number;
 }
-/** The pipeline snapshot (counts the Data pipeline strip shows) plus the backend-warning count. */
+/** The pipeline strip's counts (one active plant; inDb is all plants) plus the backend-warning count. */
 export interface DeepData {
   forbidden?: boolean;
-  loaded: number; plant: number; received: number; rendered: number; misses: number; warnings: number;
+  inDb: number; plant: number; hasPlant: boolean; horizon: number; sent: number; loaded: number;
+  /** sent - loaded, never negative. */
+  gap: number;
+  /** Rows the server dropped for having no start or finish. */
+  dropped: number;
+  warnings: number;
 }
 type ListOrError<T> = Array<T | { error: string }>;
 /** GET /diagnostics/db (each list may be the `[{error}]` sentinel); `forbidden` marks a 403. */
@@ -90,7 +95,7 @@ const _round1 = (n: number): number => Math.round(n * 10) / 10;
 function _shortArgsFor(id: DiagSectionId): Record<string, unknown> {
   switch (id) {
     case 'client': return { heap: NA };
-    case 'pipe': return { misses: NA };
+    case 'pipe': return { loaded: NA };
     case 'bwarn': return { n: NA };
     case 'db': return { pct: NA };
     case 'db-pool': return { used: NA, max: NA, pct: NA };
@@ -127,8 +132,9 @@ function _client(c: ClientStats | null, t: Thresholds): DiagSection {
 function _pipe(d: DeepData | null): DiagSection {
   if (!d) return _unavailable('pipe');
   if (d.forbidden) return _unavailable('pipe', 'info', ADMIN_ONLY);
-  const sev: Severity = d.received > d.rendered ? 'err' : d.misses > 0 ? 'warn' : 'ok';
-  return _sec('pipe', sev, 'diag.line_pipe', { loaded: d.loaded, plant: d.plant, rendered: d.rendered, misses: d.misses }, { misses: d.misses });
+  const sev: Severity = d.gap > 0 ? 'err' : d.dropped > 0 ? 'warn' : 'ok';
+  const n = (v: number): number | string => (d.hasPlant ? v : NA);
+  return _sec('pipe', sev, 'diag.line_pipe', { inDb: d.inDb, plant: n(d.plant), horizon: n(d.horizon), sent: n(d.sent), loaded: n(d.loaded) }, { loaded: n(d.loaded) });
 }
 
 function _bwarn(d: DeepData | null): DiagSection {

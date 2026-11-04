@@ -4042,6 +4042,34 @@ span.flatpickr-weekday {
   margin-top: 3px;
 }
 .admin-pipeline-step.warn .admin-pipeline-delta { color: var(--warn); }
+.admin-pipeline-step.ok .admin-pipeline-delta { color: var(--fg-mute); font-weight: 500; }
+.admin-pipeline-step { max-width: 200px; }
+/* The all-plants database total: an info chip, not a step (no arrow into the steps). */
+.admin-pipeline-info {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex-shrink: 0;
+  margin-right: 20px;
+  padding: 8px 12px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  font: inherit;
+}
+.admin-pipeline-info:hover { background: var(--accent-wash); }
+.admin-pipeline-info-count {
+  font-size: 16px;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace;
+}
+.admin-pipeline-info-label {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--fg-mute);
+}
 .admin-pipeline-arrow {
   font-size: 18px;
   color: var(--fg-faint);
@@ -4072,12 +4100,6 @@ span.flatpickr-weekday {
   color: var(--fg-mute);
   margin: 10px 0 6px;
 }
-.admin-pdtl-ok {
-  color: #27ae60;
-  font-weight: 600;
-  font-size: 12px;
-  margin-top: 6px;
-}
 .admin-pdtl-warn {
   background: rgba(192,57,43,0.08);
   border-left: 3px solid #c0392b;
@@ -4100,24 +4122,6 @@ span.flatpickr-weekday {
   font-weight: 500;
   font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace;
   font-size: 11.5px;
-}
-.admin-pdtl-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 4px;
-}
-.admin-pdtl-chip {
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-size: 11px;
-  font-weight: 600;
-  font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace;
-}
-.admin-pdtl-chip.warn {
-  background: rgba(243,156,18,0.15);
-  color: #92620a;
-  border: 1px solid rgba(243,156,18,0.3);
 }
 
 /* ── Line bars (DB detail) ── */

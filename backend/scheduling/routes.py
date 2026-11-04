@@ -314,12 +314,11 @@ def _build_task_rows(raw_rows: list[dict], plant: str | None) -> tuple[list[dict
     return data, links, stats, pre_merge_count
 
 
-# DIAGNOSTICS keys GET /tasks echoes in `meta` (the Admin pipeline panel reads color_merge_*, missed_colors and
-# pre_color_merge_count; the rest is the load-metadata bag it always carried).
+# DIAGNOSTICS keys GET /tasks echoes in `meta` (the load-metadata bag it always carried). The per-request counts
+# (color_merge_*, missed_colors, emitted_task_count, raw_row_count, unique_id_count, pre_color_merge_count,
+# queried_row_count, dropped_no_dates) are set explicitly in build_tasks_payload, not read from DIAGNOSTICS.
 _TASKS_META_DIAGNOSTIC_KEYS = (
-    "loaded_at", "load_ms", "source_file", "raw_row_count", "unreadable_start_date", "dropped_no_finish_date",
-    "duplicate_ids_suffixed", "color_merge_misses", "color_merge_ms", "missed_colors", "emitted_task_count",
-    "unique_id_count", "lines", "warnings",
+    "loaded_at", "source_file", "unreadable_start_date", "dropped_no_finish_date", "warnings",
 )
 
 _perf_log = logging.getLogger("nimbus.perf")   # child of brain.py's `nimbus` JSON handler
@@ -478,6 +477,7 @@ def build_tasks_payload(plant: str | None, machine: str | None, limit: int | Non
         empty_meta = {"rendered": 0, "link_count": 0, "plant_filter_active": plant,
                       "machine_filter_active": machine, "pre_color_merge_count": 0,
                       "raw_row_count": 0, "unique_id_count": 0,
+                      "queried_row_count": 0, "dropped_no_dates": 0,
                       "color_merge_misses": 0, "missed_colors": [],
                       "emitted_task_count": 0, "color_merge_ms": 0,
                       "total": (db.count_orders(plant=plant, line=machine, allowed_plants=allowed_plants) if paging else 0),
@@ -503,6 +503,8 @@ def build_tasks_payload(plant: str | None, machine: str | None, limit: int | Non
     meta["machine_filter_active"] = machine
     meta["pre_color_merge_count"] = pre_merge_count
     meta["raw_row_count"] = pre_merge_count
+    meta["queried_row_count"] = len(rows)                       # rows the SQL returned (post plant scope + visibility horizon)
+    meta["dropped_no_dates"] = len(rows) - pre_merge_count      # neither edge and not queued: nothing to draw
     meta["unique_id_count"] = len(data)
     meta["total"] = db.count_orders(plant=plant, line=machine, allowed_plants=allowed_plants) if paging else len(data)
     meta["visibility_horizon_end"] = visibility_horizon_end.isoformat() if visibility_horizon_end else None

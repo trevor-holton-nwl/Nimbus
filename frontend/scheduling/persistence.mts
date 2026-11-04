@@ -95,7 +95,6 @@ interface HealthResponse {
   db?: unknown;
   pool?: unknown;
   memory?: unknown;
-  color_wheel?: unknown;
 }
 
 /** Per-attempt ceiling for the bulk save POST (loads use 5-8 s; a real bulk save is slower). */
