@@ -2112,27 +2112,13 @@ function sequenceAdjacencyFailure(
   return null;
 }
 
+/** The boolean twin of `sequenceAdjacencyFailure`: the same checks in the same order, with the edge discarded. */
 function sequenceSatisfiesAdjacency(
   sequence: ReadonlyArray<NimbusTask>,
   fragment: Readonly<FragmentContext>,
   adjacency: Readonly<FragmentAdjacency>,
 ): boolean {
-  if (adjacency.issue) return false;
-  const requiredFirst = requiredFirstOrderId(fragment, adjacency);
-  const first = sequence[0];
-  const last = sequence.at(-1);
-  if (requiredFirst && (!first || taskId(first) !== requiredFirst)) return false;
-  if (fragment.requiredLastOrderId && (!last || taskId(last) !== fragment.requiredLastOrderId)) return false;
-  for (let index = 0; index < sequence.length; index += 1) {
-    const id = taskId(sequence[index]);
-    const requiredSuccessor = adjacency.successorByPredecessor.get(id);
-    const next = sequence[index + 1];
-    if (requiredSuccessor && (!next || taskId(next) !== requiredSuccessor)) return false;
-    const requiredPredecessor = adjacency.predecessorBySuccessor.get(id);
-    const previous = sequence[index - 1];
-    if (requiredPredecessor && (!previous || taskId(previous) !== requiredPredecessor)) return false;
-  }
-  return true;
+  return sequenceAdjacencyFailure('', sequence, fragment, adjacency) === null;
 }
 
 function deferredAdjacencyFailure(
