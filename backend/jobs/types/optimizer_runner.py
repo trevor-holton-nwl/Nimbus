@@ -395,8 +395,9 @@ def _apply(ctx, plant, steps, bundle, tz, node_params, result, out) -> dict:
     if not plan.get("ok"):
         reason = plan.get("refusal") or "unknown"
         changed = reason in REFUSALS or reason.startswith("inputs_changed")
+        kind = "transient" if changed else "system" if reason == "internal_error" else "config"   # a Node-side exception is the platform's
         return _fail(steps, REFUSALS.get(reason, f"apply refused ({reason}); nothing applied"),
-                     kind="transient" if changed else "config", step="guard", **out)
+                     kind=kind, step="guard", **out)
     items = plan.get("apply") or []
     if not items:
         ctx.log("warn" if dropped else "info", "nothing left to apply")
