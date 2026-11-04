@@ -124,7 +124,7 @@ function _client(c: ClientStats | null, t: Thresholds): DiagSection {
   const heapPct = c.heapUsed !== undefined && c.heapLimit ? Math.round((c.heapUsed / c.heapLimit) * 100) : null;
   let sev: Severity = 'ok';
   if (c.autosaveDisabled || c.errRate > t.errRateErrPerMin) sev = 'err';
-  else if (c.degraded || (heapPct !== null && heapPct >= t.heapWarnPct) || c.errRate > 0) sev = 'warn';
+  else if ((heapPct !== null && heapPct >= t.heapWarnPct) || c.errRate > 0) sev = 'warn';
   const heap = heapPct ?? NA;
   return _sec('client', sev, 'diag.line_client', { build: c.build, heap, autosave: c.autosave, errs: _round1(c.errRate) }, { heap });
 }

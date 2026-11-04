@@ -3105,7 +3105,7 @@ export const AdminCockpit = {
     const autosaveTxt = inv.autosaveDisabled
       ? `<span class="admin-bad">${Util.t('ui.ls_quota_disabled')}</span>`
       : inv.degraded
-        ? `<span class="admin-warn">${Util.t('ui.ls_degraded')}</span>`
+        ? `<span>${Util.t('ui.ls_degraded')}</span>`
         : `<span class="admin-good">${Util.t('ui.ls_healthy')}</span>`;
     const errTxt = errRate > THRESHOLDS.errRateErrPerMin
       ? `<span class="admin-bad">${Util.t('ui.diag_err_rate_spike', { count: errCount, rate: errRate })}</span>`
@@ -3160,7 +3160,7 @@ export const AdminCockpit = {
     const top = inv.items.slice(0, 12)
       .map((i) => `${(i.bytes / 1024).toFixed(1).padStart(7)} KB  ${i.key}`)
       .join('\n') || Util.t('ui.ls_empty');
-    const lsStatus = inv.degraded ? Util.t('ui.ls_evicted_tier') : inv.autosaveDisabled ? Util.t('ui.ls_autosave_disabled') : Util.t('ui.ls_healthy');
+    const lsStatus = inv.autosaveDisabled ? Util.t('ui.ls_autosave_disabled') : inv.degraded ? Util.t('ui.ls_evicted_tier') : Util.t('ui.ls_healthy');
     const detail =
       `<pre style="margin:0;font:11px ui-monospace,monospace;white-space:pre;">` +
       Util.t('modal.ls_inv_total', { size: (inv.totalBytes / 1024).toFixed(1), count: inv.count }) + '\n' +

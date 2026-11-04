@@ -183,6 +183,7 @@ test('S7-9: quota tiers never evict dirty tasks; clean tasks are trimmed first',
   const tiers = cacheTiers({ _schemaVersion: 7, _buildId: 'b', _savedAt: 'x', _optimizerDirtyIds: [], _dirtyIds: dirty,
     tasks, blocks: [], calendars: {}, plants: {}, plantBlocks: [], lineSettings: {}, selectedPlant: 'PA', userSettings: {} });
   assert.equal(tiers.length, 4);
+  assert.equal(tiers[3]._optimizerLostCount, undefined, 'no optimizer group, nothing lost');
   for (const tier of tiers) for (const id of dirty) assert.ok(tier.tasks.some(t => t.id === id), `${id} kept in every tier`);
   assert.equal(tiers[1].tasks.length, 2000);
   assert.equal(tiers[2].tasks.length, 500);
@@ -191,9 +192,116 @@ test('S7-9: quota tiers never evict dirty tasks; clean tasks are trimmed first',
   assert.equal(tiers[3].selectedPlant, 'PA');
 });
 
-test('S7-9: a snapshot with optimizer-dirty ids is written whole (single tier)', () => {
-  const snap = { _schemaVersion: 7, _optimizerDirtyIds: ['a'], _dirtyIds: ['a'], tasks: [{ id: 'a' }, { id: 'b' }] };
-  assert.equal(cacheTiers(snap).length, 1);
+// Optimizer-dirty snapshot: 5000 dirty optimizer rows, one manual dirty row, 1000 clean rows.
+function optimizerSnap(nOpt = 5000) {
+  const opt = Array.from({ length: nOpt }, (_, i) => ({ id: `o${i}`, pad: 'x'.repeat(40) }));
+  const tasks = [...Array.from({ length: 1000 }, (_, i) => ({ id: `c${i}` })), { id: 'm1' }, ...opt];
+  return { _schemaVersion: Config.SCHEMA_VERSION, _buildId: 'b', _savedAt: 's1',
+    _optimizerDirtyIds: opt.map(t => t.id), _dirtyIds: ['m1', ...opt.map(t => t.id)],
+    tasks, blocks: [], calendars: {}, plants: {}, plantBlocks: [], lineSettings: { L1: {} }, selectedPlant: 'PA', userSettings: {} };
+}
+
+test('S7-9: an optimizer-dirty snapshot keeps every dirty row in every tier but the last, which drops the optimizer group and reports it', () => {
+  const tiers = cacheTiers(optimizerSnap());
+  const last = tiers[tiers.length - 1];
+  assert.ok(tiers.length >= 3);
+  for (const tier of tiers.slice(0, -1)) {
+    assert.ok(tier._optimizerDirtyIds.length === 5000 || tier === tiers[0], 'optimizer group kept whole in every non-last tier');
+    assert.equal(tier.tasks.filter(t => String(t.id).startsWith('o')).length, 5000);
+    assert.equal(tier._optimizerLostCount, undefined);
+  }
+  assert.deepEqual(last.tasks.map(t => t.id), ['m1']);
+  assert.deepEqual(last._dirtyIds, ['m1']);
+  assert.equal(last._optimizerDirtyIds, undefined, 'no optimizer ids in the last tier');
+  assert.equal(last._optimizerLostCount, 5000);
+  assert.equal(last.selectedPlant, 'PA');
+  assert.deepEqual(last.lineSettings, { L1: {} });
+});
+
+// A localStorage whose setItem rejects any payload above `limit` characters.
+function quotaStorage(limit) {
+  const inner = makeStorage();
+  const calls = [];
+  return { inner, calls, setLimit(n) { limit = n; },
+    getItem: k => inner.getItem(k), removeItem: k => inner.removeItem(k), clear: () => inner.clear(),
+    get length() { return inner.length; }, key: i => inner.key(i),
+    setItem(k, v) {
+      calls.push(String(v).length);
+      if (String(v).length > limit) { const e = new Error('quota'); e.name = 'QuotaExceededError'; e.code = 22; throw e; }
+      inner.setItem(k, v);
+    } };
+}
+function withStorage(storage, fn) {
+  const orig = globalThis.localStorage;
+  globalThis.localStorage = storage;
+  const keep = { d: Persistence._cacheDegraded, a: Persistence._autosaveDisabled, c: Persistence._cacheTierCeiling };
+  Persistence._cacheDegraded = false; Persistence._autosaveDisabled = false; Persistence._cacheTierCeiling = null; Persistence._cacheTierWrites = 0;
+  try { return fn(); } finally {
+    globalThis.localStorage = orig;
+    Persistence._cacheDegraded = keep.d; Persistence._autosaveDisabled = keep.a; Persistence._cacheTierCeiling = keep.c;
+  }
+}
+
+test('S7-9: 5000 optimizer-dirty rows never leave autosave disabled while the last tier fits', () => {
+  const snap = optimizerSnap();
+  const lastSize = JSON.stringify(cacheTiers(snap).at(-1)).length;
+  const st = quotaStorage(lastSize + 100);   // only the last tier fits
+  withStorage(st, () => {
+    assert.equal(Persistence._writeCacheWithQuotaGuard(snap), true);
+    assert.equal(Persistence._autosaveDisabled, false);
+    assert.equal(Persistence._cacheDegraded, true);
+    const written = JSON.parse(st.getItem(Config.LS_KEY));
+    assert.equal(written._optimizerLostCount, 5000);
+    assert.deepEqual(written._dirtyIds, ['m1']);
+  });
+});
+
+test('S7-9: the autosave latch resets after a later successful write, and tier 0 clears the degraded flag', () => {
+  const snap = optimizerSnap(50);
+  const st = quotaStorage(10);   // nothing fits
+  withStorage(st, () => {
+    assert.equal(Persistence._writeCacheWithQuotaGuard(snap), false);
+    assert.equal(Persistence._autosaveDisabled, true, 'latched while nothing fits');
+    st.setLimit(1e9);   // storage frees up
+    assert.equal(Persistence._writeCacheWithQuotaGuard(snap), true);
+    assert.equal(Persistence._autosaveDisabled, false, 'a later write clears the latch');
+    assert.equal(Persistence._cacheDegraded, true, 'landed on the trimmed tier, still labelled as such');
+    for (let i = 0; i < 30; i++) Persistence._writeCacheWithQuotaGuard(snap);   // periodic tier-0 retry
+    assert.equal(Persistence._cacheDegraded, false, 'tier 0 winning clears degraded');
+    assert.equal(JSON.parse(st.getItem(Config.LS_KEY))._optimizerLostCount, undefined);
+  });
+});
+
+test('S7-9: a failing autosave does not re-stringify every larger tier on each tick', () => {
+  const snap = optimizerSnap();
+  const tiers = cacheTiers(snap);
+  const st = quotaStorage(JSON.stringify(tiers.at(-1)).length + 100);
+  withStorage(st, () => {
+    Persistence._writeCacheWithQuotaGuard(snap);
+    const first = st.calls.length;
+    assert.ok(first >= 2, 'first write walked down the tiers');
+    Persistence._writeCacheWithQuotaGuard(snap);
+    assert.equal(st.calls.length - first, 1, 'second write starts at the remembered tier');
+  });
+});
+
+test('S7-9: loading a cache that lost its optimizer group toasts once and marks nothing dirty', () => {
+  const cap = capture();
+  const lost = { _schemaVersion: Config.SCHEMA_VERSION, selectedPlant: 'PA', _savedAt: 'lost-1', _optimizerLostCount: 12,
+    _dirtyIds: [], tasks: [{ id: 'pa-1', MACHINE: 'L1', PLANT: 'PA', RUN_TIME: 1 }] };
+  globalThis.localStorage.setItem(Config.LS_KEY, JSON.stringify(lost));
+  Persistence._lostBatchNotedFor = null;
+  try {
+    Store.setTasks([], 'unit-test'); resetFlags();
+    assert.equal(Persistence._loadCache('PA'), true);
+    assert.equal(Persistence._loadCache('PA'), true);
+    const lostToasts = cap.toasts.filter(t => t.msg.includes('toast.cache_changes_lost') || /12/.test(t.msg) && t.type === 'warn');
+    assert.equal(lostToasts.length, 1, 'one toast for the record');
+    assert.equal(Persistence._dirtyIds.size, 0);
+    assert.equal(Persistence._forceIds.size, 0);
+  } finally {
+    cap.restore(); resetFlags(); Store.setTasks([], 'unit-test'); globalThis.localStorage.removeItem(Config.LS_KEY);
+  }
 });
 
 // ---- S10-1 / S10-4 / S10-7 / S7-14 ------------------------------------------------------------------------------

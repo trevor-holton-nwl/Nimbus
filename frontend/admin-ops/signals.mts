@@ -354,7 +354,7 @@ function _browser(i: SignalInputs, t: Thresholds): Signal {
   const conds: Cond[] = [];
   if (c.inv.autosaveDisabled) conds.push({ sev: 'err', key: 'sig.browser_autosave_off', args: {}, fixes: [reset] });
   if (c.errRate > t.errRateErrPerMin) conds.push({ sev: 'err', key: 'sig.browser_errors', args: { n: c.errors }, fixes: [reset] });
-  if (c.inv.degraded) conds.push({ sev: 'warn', key: 'sig.browser_degraded', args: {}, fixes: [reset] });
+  if (c.inv.degraded) conds.push({ sev: 'info', key: 'sig.browser_degraded', args: {} });
   const heapPct = c.heapUsed !== undefined && c.heapLimit ? Math.round((c.heapUsed / c.heapLimit) * 100) : null;
   if (heapPct !== null && heapPct >= t.heapWarnPct) conds.push({ sev: 'warn', key: 'sig.browser_heap', args: { pct: heapPct }, fixes: [reset] });
   if (c.errors > 0) conds.push({ sev: 'warn', key: 'sig.browser_errors', args: { n: c.errors }, fixes: [reset] });

@@ -669,6 +669,8 @@ export interface LiveState {
 export interface StoredState {
   /** Dependent optimizer edits must survive offline hydration as one atomic save. */
   _optimizerDirtyIds?: string[];
+  /** Set only on the last quota tier: how many optimizer-dirty orders were dropped from this copy. */
+  _optimizerLostCount?: number;
   /** All locally edited orders must remain visibly unsaved after a reload. */
   _dirtyIds?: string[];
   _schemaVersion: number;

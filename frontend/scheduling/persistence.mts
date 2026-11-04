@@ -160,28 +160,43 @@ export function describeRejections(reasons: Record<string, string> | undefined |
   return shown.join('; ') + (more > 0 ? Util.t('ui.reject_more', { count: more }) : '');
 }
 
-/** S7-9: the quota-eviction tiers for one cache snapshot, most complete first. Every tier below the first trims
- *  CLEAN tasks only: a dirty (unsaved) task is never evicted, because losing it loses the planner's edit. A snapshot
- *  carrying optimizer-dirty ids is written whole (a partial dependent task set must never be cached). */
+/** Failed-or-trimmed cache writes retry tier 0 only every this many writes (a write is a 1.2 s debounced autosave). */
+const CACHE_RETRY_EVERY = 25;
+
+/** S7-9: the quota-eviction tiers for one cache snapshot, most complete first. Every tier except the LAST trims CLEAN
+ *  tasks only: a dirty (unsaved) task is kept whole, so a partial dependent (optimizer) group is never cached.
+ *  When the snapshot carries optimizer-dirty ids a final tier drops that whole group and keeps only the other dirty
+ *  rows (manual edits), recording `_optimizerLostCount` so the next load can say so once. Tiers that would hold the
+ *  same rows as the previous one are skipped (no point stringifying the same payload twice). */
 export function cacheTiers(snapshot: StoredState): Array<Partial<StoredState>> {
-  if (snapshot._optimizerDirtyIds?.length) return [snapshot];
   const dirty = new Set((snapshot._dirtyIds ?? []).map(String));
   const dirtyTasks = snapshot.tasks.filter(t => dirty.has(String(t.id)));
   const clean = snapshot.tasks.filter(t => !dirty.has(String(t.id)));
   const keep = (n: number): Array<Record<string, unknown>> =>
     [...clean.slice(Math.max(0, clean.length - Math.max(0, n - dirtyTasks.length))), ...dirtyTasks];
-  return [
+  const optimizerIds = new Set((snapshot._optimizerDirtyIds ?? []).map(String));
+  const minimal = (rows: Array<Record<string, unknown>>, withGroup: boolean): Partial<StoredState> => ({
+    _schemaVersion: snapshot._schemaVersion,
+    _buildId:       snapshot._buildId,
+    _savedAt:       snapshot._savedAt,
+    _dirtyIds:      rows.map(t => String(t.id)),
+    ...(withGroup ? { _optimizerDirtyIds: [...optimizerIds] } : optimizerIds.size ? { _optimizerLostCount: optimizerIds.size } : {}),
+    selectedPlant:  snapshot.selectedPlant,
+    lineSettings:   snapshot.lineSettings,
+    tasks:          rows });
+  const candidates: Array<Partial<StoredState>> = [
     snapshot,
     { ...snapshot, tasks: keep(2000) },
     { ...snapshot, tasks: keep(500) },
-    { _schemaVersion: snapshot._schemaVersion,
-      _buildId:       snapshot._buildId,
-      _savedAt:       snapshot._savedAt,
-      _dirtyIds:      dirtyTasks.map(t => String(t.id)),
-      selectedPlant:  snapshot.selectedPlant,
-      lineSettings:   snapshot.lineSettings,
-      tasks:          dirtyTasks },
+    minimal(dirtyTasks, optimizerIds.size > 0),
   ];
+  if (optimizerIds.size) candidates.push(minimal(dirtyTasks.filter(t => !optimizerIds.has(String(t.id))), false));
+  const tiers: Array<Partial<StoredState>> = [];
+  for (const c of candidates) {
+    if (tiers.length && (c.tasks?.length ?? 0) >= (tiers[tiers.length - 1].tasks?.length ?? 0)) continue;
+    tiers.push(c);
+  }
+  return tiers;
 }
 
 export const Persistence = {
@@ -389,6 +404,12 @@ export const Persistence = {
   _lastCacheAt: 0,
   _cacheDegraded: false,
   _autosaveDisabled: false,
+  // Tier memory: after a write succeeds only at a trimmed tier, later writes start there (task-count ceiling) instead of
+  // re-stringifying every larger tier on each autosave tick; tier 0 is retried every CACHE_RETRY_EVERY writes or when the
+  // dirty count shrinks. null = tier 0 last won.
+  _cacheTierCeiling: null as number | null,
+  _cacheTierDirty: 0,
+  _cacheTierWrites: 0,
   // Set at sign-out so no late _saveCache (autosave, in-flight save .finally) can rewrite
   // the planner cache that sign-out just cleared.
   _cacheWritesHalted: false,
@@ -748,6 +769,7 @@ export const Persistence = {
           serverKeys.set(String(id), Persistence._baselineKey(Persistence._taskEditSnapshot(probe)));
         }
         if (!discardLocalEdits && cacheData?.tasks?.length) {
+          Persistence._noteLostBatch(cacheData);
           const optimizerIds = new Set<string>(cacheData._optimizerDirtyIds ?? []);
           const dirtyIds = cacheData._dirtyIds == null ? null : new Set<string>(cacheData._dirtyIds);
           restoredDirtyIds = Persistence._overlayUserMoves(tasks, cacheData.tasks.filter((task: NimbusTask) =>
@@ -1362,6 +1384,19 @@ export const Persistence = {
     Toast.show(Util.t('toast.backend_unreachable_empty'), 'error', UNREACHABLE_TOAST_MS);
   },
 
+  /** A last-tier cache write dropped the optimizer group (`_optimizerLostCount`): say so ONCE, and mark nothing dirty
+   *  for those orders (the last tier carries no `_optimizerDirtyIds`, so the restore loops never see them). */
+  _noteLostBatch(data: { _optimizerLostCount?: number; _savedAt?: string } | null | undefined): void {
+    const n = Number(data?._optimizerLostCount ?? 0);
+    if (!(n > 0)) return;
+    // Once per cache record: a later load before the next cache write re-reads the same record.
+    const stamp = String(data?._savedAt ?? n);
+    if (Persistence._lostBatchNotedFor === stamp) return;
+    Persistence._lostBatchNotedFor = stamp;
+    Toast.show(Util.t('toast.cache_changes_lost', { count: n }), 'warn', 15000);
+  },
+  _lostBatchNotedFor: null as string | null,
+
   _loadCache(plant?: string | null): boolean {
     let raw: string | null | undefined;
     try { raw = localStorage.getItem(Config.LS_KEY); }
@@ -1429,6 +1464,7 @@ export const Persistence = {
       Store.setFrozenHorizonEnd(null, 'persistence');
       // Restore all non-task state first so alerts compute with correct context
       Persistence._restoreNonTaskState(data);
+      Persistence._noteLostBatch(data);
       // Sync plant from task data for any lines not yet in lineSettings
       for (const t of tasks) {
         const line = t.MACHINE;
@@ -2267,17 +2303,36 @@ export const Persistence = {
     // (partial) StoredState snapshot, and JSON.stringify/localStorage.setItem
     // below don't care that some tiers omit keys.
     const tiers: Array<Partial<StoredState>> = cacheTiers(snapshot);
-    for (let i = 0; i < tiers.length; i++) {
+    const dirtyN = snapshot._dirtyIds?.length ?? 0;
+    let first = 0;
+    const ceiling = Persistence._cacheTierCeiling;
+    if (ceiling !== null) {
+      Persistence._cacheTierWrites++;
+      if (Persistence._cacheTierWrites < CACHE_RETRY_EVERY && dirtyN >= Persistence._cacheTierDirty) {
+        const found = tiers.findIndex(t => (t.tasks?.length ?? 0) <= ceiling);
+        first = found < 0 ? tiers.length - 1 : found;
+      }
+    }
+    for (let i = first; i < tiers.length; i++) {
       try {
         const payload = JSON.stringify(tiers[i]);
         localStorage.setItem(Config.LS_KEY, payload);
         Persistence._lastCacheBytes = payload.length;
         Persistence._lastCacheAt    = Date.now();
+        // Any successful write proves the store accepts writes again: the autosave latch always clears.
+        Persistence._autosaveDisabled = false;
         if (i > 0) {
-          ErrorLog.warn('persistence',
-            `Cache evicted to tier ${i} (${(payload.length / 1024).toFixed(1)} KB) due to quota pressure`);
+          const ceilingNow = tiers[i].tasks?.length ?? 0;
+          if (Persistence._cacheTierCeiling !== ceilingNow) {
+            ErrorLog.warn('persistence',
+              `Cache trimmed to tier ${i} (${(payload.length / 1024).toFixed(1)} KB) due to quota pressure`);
+            Persistence._cacheTierWrites = 0;
+          }
+          Persistence._cacheTierCeiling = ceilingNow;
+          Persistence._cacheTierDirty = dirtyN;
           Persistence._cacheDegraded = true;
         } else {
+          Persistence._cacheTierCeiling = null;
           Persistence._cacheDegraded = false;
         }
         return true;
@@ -2290,8 +2345,12 @@ export const Persistence = {
         }
       }
     }
-    ErrorLog.error('persistence', 'Cache write failed at all eviction tiers — autosave disabled this session');
+    ErrorLog.error('persistence', 'Cache write failed at all eviction tiers — autosave disabled until a write succeeds');
     Persistence._autosaveDisabled = true;
+    // Next attempt starts at the smallest tier; tier 0 is retried only occasionally.
+    Persistence._cacheTierCeiling = tiers[tiers.length - 1].tasks?.length ?? 0;
+    Persistence._cacheTierDirty = dirtyN;
+    Persistence._cacheTierWrites = 0;
     return false;
   },
 
@@ -2330,7 +2389,6 @@ export const Persistence = {
 
   _autosave: Util.debounce(() => {
     if (typeof Sandbox !== 'undefined' && Sandbox.active) return;
-    if (Persistence._autosaveDisabled) return;
     Persistence._saveCache();
   }, 1200)
 };
@@ -2370,7 +2428,7 @@ if (typeof window !== 'undefined' && typeof window.addEventListener === 'functio
     e.returnValue = '';
   });
   window.addEventListener('pagehide', () => {
-    if (Sandbox.active || Persistence._autosaveDisabled) return;
+    if (Sandbox.active) return;
     Persistence._saveCache();
   });
 }
