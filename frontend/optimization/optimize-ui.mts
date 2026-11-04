@@ -796,6 +796,10 @@ export const OptimizeDialog = (() => {
     const bgEl = document.getElementById('opt-chk-background') as HTMLInputElement | null;
     // Exhaustive runs in the background: no preview spinner, the planner keeps working.
     const exhaustive = bgEl?.checked === true && mode !== 'backlog';
+    // Snapshot the checkboxes NOW: the confirms and the rank-map fetch below are awaited, and the planner can flip a
+    // box while one is open. The run uses what was ticked when Run was clicked.
+    const respectFirmed = sfEl?.checked ?? true;
+    const respectCalendarChecked = scEl?.checked ?? true;
 
     // Remember the chosen strategy/window/options as this user's optimizer
     // defaults so the dialog pre-fills the same way next time (feature: optimizer
@@ -803,9 +807,9 @@ export const OptimizeDialog = (() => {
     try {
       Session.setPref('optimizerDefaults', {
         mode, preset: _preset,
-        respectFirmed:   sfEl?.checked ?? true,
+        respectFirmed,
         // In Backlog the box is forced on for the run: save what the planner chose, not the forced value.
-        respectCalendar: mode === 'backlog' ? (_calendarBeforeBacklog ?? scEl?.checked ?? true) : (scEl?.checked ?? true),
+        respectCalendar: mode === 'backlog' ? (_calendarBeforeBacklog ?? respectCalendarChecked) : respectCalendarChecked,
       });
     } catch (err) { ErrorLog.warn('optimizer', `Could not save optimizer defaults: ${err instanceof Error ? err.message : String(err)}`); }
 
@@ -924,8 +928,8 @@ export const OptimizeDialog = (() => {
       lines:           linesScope,
       startDate:       winStart ?? (() => { const d = Store.plantNow(plant) ?? Store.serverNow(); d.setSeconds(0, 0); return d; })(),
       endDate:         winEnd   ?? new Date((Store.plantNow(plant) ?? Store.serverNow()).getTime() + 28 * Config.MS_DAY),
-      respectFirmed:   sfEl?.checked ?? true,
-      respectCalendar: mode === 'backlog' ? true : (scEl?.checked ?? true),
+      respectFirmed,
+      respectCalendar: mode === 'backlog' ? true : respectCalendarChecked,
       runAt:           Store.serverNow(),
       searchBudgetMs:  exhaustive ? SETUP_AWARE_EXHAUSTIVE_BUDGET_MS : SETUP_AWARE_NORMAL_BUDGET_MS,
       exhaustive,

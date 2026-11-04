@@ -2746,6 +2746,30 @@ test('P0-13: cancelling the calendar confirm re-shows the Optimize dialog instea
     assert.equal(calls.bg + calls.fg, 0);
   }));
 
+// A checkbox toggled while a pre-run confirm is open must not change the run: Run reads the dialog before its first await.
+test('run() reads the firmed/calendar checkboxes when Run is clicked, not after the confirms resolve', () =>
+  withCalendarGate('failed', true, async (calls, chk) => {
+    const firmed = makeSandboxElement('opt-chk-firmed');
+    const calendar = makeSandboxElement('opt-chk-calendar');
+    firmed.checked = true;
+    calendar.checked = true;
+    const baseGet = globalThis.document.getElementById;
+    globalThis.document.getElementById = id => (id === 'opt-chk-firmed' ? firmed : id === 'opt-chk-calendar' ? calendar : baseGet(id));
+    try {
+      let captured = null;
+      OptimizerPreview.runWithPreview = async (mode, opts) => { captured = opts; };
+      Modal.confirm = async () => { firmed.checked = false; calendar.checked = false; return true; };   // the planner flips them mid-confirm
+      chk.checked = false;
+      await OptimizeDialog.run();
+      await wait(20);
+      assert.ok(captured, 'the run started');
+      assert.equal(captured.respectFirmed, true, 'respectFirmed is the value at the click');
+      assert.equal(captured.respectCalendar, true, 'respectCalendar is the value at the click');
+    } finally {
+      globalThis.document.getElementById = baseGet;
+    }
+  }));
+
 // P0-14: no stuck spinner on early returns or exceptions.
 test('P0-14: an exception in the pre-run steps restores the Run button, drops the spinner and logs', () =>
   withCalendarGate('failed', false, async (calls, chk) => {
