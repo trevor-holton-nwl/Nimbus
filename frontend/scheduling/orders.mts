@@ -2811,7 +2811,7 @@ export const Inspector = {
       if (sid) el.addEventListener('click', () => NIMBUS!.Timeline!.focus!(sid));
     });
     body.querySelectorAll<HTMLButtonElement>('[data-act="open-tool-inventory"]').forEach((el) => {
-      el.addEventListener('click', () => raiseToolInventory(el.dataset.plant, el.dataset.tool ?? ''));
+      el.addEventListener('click', () => { void raiseToolInventory(el.dataset.plant, el.dataset.tool ?? ''); });
     });
     body.querySelector('[data-act="open-distribution"]')?.addEventListener('click', () => {
       const app = (globalThis as unknown as { NIMBUS?: { App?: { gotoGanttSub?: (sub: string) => void } } }).NIMBUS?.App;

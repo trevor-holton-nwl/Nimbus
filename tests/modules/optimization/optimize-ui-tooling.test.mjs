@@ -6,9 +6,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { OptimizerPreview, toolFingerprint, ensureToolInventoryForRun } from '../../../frontend/optimization/optimize-ui.mjs';
-import { toolQueueSummary, confirmToolQueue } from '../../../frontend/optimization/tool-queue-confirm.mjs';
+import { toolQueueSummary, confirmToolQueue, raiseToolInventory } from '../../../frontend/optimization/tool-queue-confirm.mjs';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
-import { Toast, Modal } from '../../../frontend/platform/foundation.mjs';
+import { Toast, Modal, ErrorLog } from '../../../frontend/platform/foundation.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 import { validateCandidate } from '../../../frontend/optimization/setup-scheduler.mjs';
@@ -473,6 +473,34 @@ test('Raise inventory from the preview: confirm first (Cancel keeps the preview)
     assert.equal(nav.length, 2);
   } finally {
     Modal.confirm = prior.confirm; Modal.close = prior.close; Toast.show = prior.show; f.restore();
+  }
+});
+
+test('Raise inventory: cancelling the plant-switch confirm shows no "closed" toast and navigates nowhere; a throwing confirm is caught and logged', async () => {
+  const plant = 'TQ-RAISE2';
+  setMd(plant, 'hard', []);
+  const f = openPreview(plant, [previewTask('rb-a', plant, 1)]);
+  const prior = { confirm: Modal.confirm, close: Modal.close, show: Toast.show, plantSwitch: Persistence.confirmPlantSwitch, warn: ErrorLog.warn };
+  const toasts = [], nav = [], warned = [];
+  Modal.confirm = async () => true;                       // accept "discard this plan"
+  Modal.close = () => {};
+  Toast.show = (m, k) => { toasts.push([String(m), k]); };
+  ErrorLog.warn = (...a) => { warned.push(a); };
+  try {
+    globalThis.NIMBUS = { App: { goto: s => nav.push(s), gotoMasterSub: s => nav.push(s) } };
+    OptimizerPreview._plant = 'TQ-RAISE2-OTHER';          // differs from Store.selectedPlant: the plant-switch guard runs
+    Persistence.confirmPlantSwitch = async () => false;   // the planner cancels the unsaved-edits confirm
+    await OptimizerPreview._raiseInventory('T1');
+    assert.deepEqual(nav, [], 'no navigation after Cancel');
+    assert.equal(toasts.length, 0, 'no "preview closed" toast when the raise did not happen');
+
+    Persistence.confirmPlantSwitch = async () => { throw new Error('boom'); };
+    assert.equal(await raiseToolInventory('TQ-RAISE2-OTHER', 'T1'), false, 'a failure resolves (never rejects)');
+    assert.ok(warned.some(w => /boom|Tool Inventory/.test(String(w[1]))), 'and is logged');
+    assert.deepEqual(nav, []);
+  } finally {
+    Modal.confirm = prior.confirm; Modal.close = prior.close; Toast.show = prior.show;
+    Persistence.confirmPlantSwitch = prior.plantSwitch; ErrorLog.warn = prior.warn; f.restore();
   }
 });
 

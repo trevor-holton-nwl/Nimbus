@@ -52,20 +52,24 @@ export async function confirmToolQueue(
   });
 }
 
-/** "Raise inventory": Master Data > Tool Inventory filtered to the tool (same lazy import as the alert deep link). */
-export async function raiseToolInventory(plant: string | null | undefined, tool: string): Promise<void> {
+/** "Raise inventory": Master Data > Tool Inventory filtered to the tool (same lazy import as the alert deep link).
+ *  Never rejects (its callers fire it from click handlers without awaiting). Resolves true when the planner was taken to
+ *  Tool Inventory, false when they cancelled the plant-switch confirm or the step failed (logged). */
+export async function raiseToolInventory(plant: string | null | undefined, tool: string): Promise<boolean> {
   const target = String(plant ?? '');
-  // openForTool switches the selected plant: honour the unsaved-edits guard first (no await, so no delay, when the plant is unchanged).
-  if (target && target !== Store.selectedPlant) {
-    const { Persistence } = await import('../scheduling/persistence.mjs');   // lazy: keeps this leaf free of an import cycle
-    if (!(await Persistence.confirmPlantSwitch(target))) return;
-  }
-  NIMBUS?.App?.goto?.('masterdata');
-  NIMBUS?.App?.gotoMasterSub?.('tool-inventory');
   try {
+    // openForTool switches the selected plant: honour the unsaved-edits guard first (no await, so no delay, when the plant is unchanged).
+    if (target && target !== Store.selectedPlant) {
+      const { Persistence } = await import('../scheduling/persistence.mjs');   // lazy: keeps this leaf free of an import cycle
+      if (!(await Persistence.confirmPlantSwitch(target))) return false;
+    }
+    NIMBUS?.App?.goto?.('masterdata');
+    NIMBUS?.App?.gotoMasterSub?.('tool-inventory');
     const m = await import('../master-data/tool-inventory.mjs');
     m.ToolInventory.openForTool(target, tool);
+    return true;
   } catch (err) {
     ErrorLog.warn('optimizer', `Could not open Tool Inventory: ${err instanceof Error ? err.message : String(err)}`, err);
+    return false;
   }
 }

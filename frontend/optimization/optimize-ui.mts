@@ -2727,8 +2727,9 @@ export const OptimizerPreview = {
       OptimizerPreview._clear();
       Modal.close('modal-opt-preview');
     }
-    await raiseToolInventory(plant, tool);
-    if (previewOpen) Toast.show(Util.t('toast.opt_tool_raise_closed'), 'info', 7000);
+    const raised = await raiseToolInventory(plant, tool);
+    // The preview is already closed; say so only when the planner actually went to Tool Inventory (not after a cancelled plant switch).
+    if (previewOpen && raised) Toast.show(Util.t('toast.opt_tool_raise_closed'), 'info', 7000);
   },
 
   /** Await an apply-tail promise and route a failure to ErrorLog, so it is never silent. */
