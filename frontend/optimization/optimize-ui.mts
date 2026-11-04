@@ -2776,7 +2776,9 @@ export const OptimizerPreview = {
     const toolSummary = toolQueueSummary(candidate, kept);
     // No await when there is nothing to confirm: the commit stays synchronous exactly as before.
     if (toolSummary.queued.length) {
-      OptimizerPreview._applying = true;   // set before the await so a second Apply gesture cannot start a second commit
+      // Set before the await. It does not block a second Apply (apply() has no _applying check); it makes the task watch
+      // ignore the engine's own writes while this commit is under way (see the 'engine' guard in the task subscriber).
+      OptimizerPreview._applying = true;
       // The confirm is async and a planner can still edit tasks behind it: remember what the kept patches' orders looked
       // like, and refuse to commit if any of them changed (or vanished) before the answer arrived.
       const before = taskBaseline(kept.map(patch => Store.tasks[String(patch.id)]).filter((task): task is NimbusTask => !!task));
@@ -3577,7 +3579,8 @@ export const SandboxAdapter = {
       // Diff the pre-sandbox snapshot to also propagate blackouts DELETED in-session,
       // so a delete-then-promote doesn't resurrect the block on next hydration. (F3)
       // Include every plant touched by the trial, not just the plant selected at
-      // promote time: plant selection remains editable while What-If is active.
+      // promote time. A header plant switch now ends the trial (P0-20), so this is normally just the plant the trial
+      // started in plus whatever its changes touched; the add stays as a safety net.
       if (Store.selectedPlant) affectedPlants?.add(Store.selectedPlant);
       for (const plant of affectedPlants || []) {
         // Store._state.blocks/.plantBlocks direct touch — deliberate, out of scope
