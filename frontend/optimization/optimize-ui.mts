@@ -2888,7 +2888,7 @@ export const OptimizerPreview = {
     const hadDismissed = Alerts.clearDismissed();
     // Push an undo entry so Ctrl+Z restores the pre-optimization state later.
     UndoStack.push(`Optimization (${mode})${plant ? ' · ' + plant : ''}`,
-      undoFn, snap.map(t => t.id));
+      undoFn, snap.map(t => t.id), { redo: true });
     Toast.show(Util.t('toast.opt_applied'), 'success');
     // Fire warning toasts, the same set the deleted live apply tail fired (missing setup, needs planning, left in place,
     // distribution separation, guarded lines).

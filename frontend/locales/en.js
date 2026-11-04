@@ -199,6 +199,7 @@ window.__NIMBUS_LOCALES.en = {
   'toast.clear_failed':                'Clear failed',
   'toast.diag_bundle_downloaded':      'Diagnostics bundle downloaded',
   'toast.undone':                      'Undone: {{label}}',
+  'toast.redone':                      'Redone: {{label}}',
   'toast.dark_mode_on':                'Dark mode on',
   'toast.light_mode_on':               'Light mode on',
   'toast.order_belongs_other_plant':   'Order belongs to another plant — switch plant to inspect.',

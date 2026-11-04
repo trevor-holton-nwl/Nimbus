@@ -168,6 +168,7 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.clear_failed':                'Échec de l\'effacement',
   'toast.diag_bundle_downloaded':      'Paquet de diagnostic téléchargé',
   'toast.undone':                      'Annulé : {{label}}',
+  'toast.redone':                      'Rétabli : {{label}}',
   'toast.machine_rejected':           '{{count}} order(s) could not be moved: the machine is not registered for this plant',
   'toast.dark_mode_on':                'Mode sombre activé',
   'toast.light_mode_on':               'Mode clair activé',

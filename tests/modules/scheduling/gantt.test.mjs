@@ -4769,3 +4769,52 @@ test('Interaction.promptMoveBy: cancel does nothing; a pick applies the delta', 
     assert.equal(Store.tasks['mp-a'].end_date.getTime(), pos.get('mp-a').end.getTime() + 86400000);
   } finally { Modal.choose = priorChoose; fx.restore(); restoreClock(); }
 });
+
+// Redo keys (Stage 3): Ctrl/Cmd+Shift+Z everywhere, Ctrl+Y on Windows/Linux only; the Undo key is unchanged.
+test('Redo keys: Ctrl/Cmd+Shift+Z and Ctrl+Y redo, Ctrl+Z undoes, Ctrl+Shift+Z is never an Undo', () => {
+  const priorActive = Timeline._ganttActive;
+  const priorUndo = UndoStack.pop, priorRedo = UndoStack.popRedo;
+  const priorEntries = UndoStack._entries, priorRedoStack = UndoStack._redo;
+  const calls = [];
+  UndoStack.pop = () => { calls.push('undo'); return null; };
+  UndoStack.popRedo = () => { calls.push('redo'); return null; };
+  Timeline._ganttActive = () => true;
+  const div = { tagName: 'DIV', closest: () => null, isContentEditable: false };
+  const press = (over = {}) => {
+    const ev = { key: 'z', ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, defaultPrevented: false, target: div, prevented: 0, preventDefault() { this.prevented++; }, ...over };
+    Interaction._onKeyDown(ev);
+    return ev;
+  };
+  try {
+    UndoStack._entries = [{ label: 'u', undoFn() {}, at: 0 }];
+    UndoStack._redo = [{ label: 'r', undoFn() {}, at: 0 }];
+    let ev = press({ ctrlKey: true });
+    assert.deepEqual(calls, ['undo']); assert.equal(ev.prevented, 1);
+    calls.length = 0;
+    ev = press({ ctrlKey: true, shiftKey: true, key: 'Z' });
+    assert.deepEqual(calls, ['redo'], 'Ctrl+Shift+Z is Redo, never Undo'); assert.equal(ev.prevented, 1);
+    calls.length = 0;
+    press({ metaKey: true, shiftKey: true });
+    assert.deepEqual(calls, ['redo'], 'Cmd+Shift+Z');
+    calls.length = 0;
+    ev = press({ ctrlKey: true, key: 'y' });
+    assert.deepEqual(calls, ['redo'], 'Ctrl+Y'); assert.equal(ev.prevented, 1);
+    calls.length = 0;
+    press({ metaKey: true, key: 'y' });
+    assert.deepEqual(calls, [], 'Cmd+Y is not bound (Chrome macOS History)');
+    press({ ctrlKey: true, key: 'y', defaultPrevented: true });
+    assert.deepEqual(calls, [], 'an event the grid already handled (AG Grid Ctrl+Y) is ignored');
+    press({ ctrlKey: true, shiftKey: true, target: { tagName: 'INPUT', closest: () => null } });
+    assert.deepEqual(calls, [], 'not while typing');
+    Timeline._ganttActive = () => false;
+    press({ ctrlKey: true, shiftKey: true }); press({ ctrlKey: true, key: 'y' });
+    assert.deepEqual(calls, [], 'not off the Gantt tab');
+    Timeline._ganttActive = () => true;
+    UndoStack._redo = [];
+    ev = press({ ctrlKey: true, shiftKey: true });
+    assert.deepEqual(calls, [], 'nothing to redo: popRedo is not called'); assert.equal(ev.prevented, 0, 'no preventDefault without a redo entry');
+  } finally {
+    Timeline._ganttActive = priorActive; UndoStack.pop = priorUndo; UndoStack.popRedo = priorRedo;
+    UndoStack._entries = priorEntries; UndoStack._redo = priorRedoStack;
+  }
+});

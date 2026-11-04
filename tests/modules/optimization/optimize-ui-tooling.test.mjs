@@ -893,3 +893,63 @@ test('Undo family key includes the plant: same parent + material in another plan
     },
   });
 });
+
+/* Redo (Stage 3): Undo then Redo of an optimizer Apply restores the post-Apply rows exactly. */
+test('Redo: Apply 3 patches, Undo, Redo restores the 3 rows to their post-Apply values; a further Undo returns the pre-Apply values', async () => {
+  const ids = ['ud-a', 'ud-b', 'ud-c'];
+  let post = null;
+  await undoScopeRun({
+    commit: async kept => {
+      const ok = await OptimizerPreview._commitPatches(kept, { ids: [], reason: 'running' });
+      post = new Map(ids.map(id => [id, datesOf(Store.tasks[id])]));
+      return ok;
+    },
+    check: r => {
+      assert.equal(UndoStack._redo.length, 1, 'the redoable Apply entry left a redo entry');
+      assert.deepEqual([...UndoStack._redo[0].ids].sort(), ids);
+      assert.equal(UndoStack._entries.length, 0);
+      r.written.length = 0;
+      assert.equal(UndoStack.popRedo()?.label.startsWith('Optimization'), true);
+      for (const id of ids) {
+        assert.notDeepEqual(post.get(id).slice(0, 2), [null, null], 'precondition: Apply placed the row');
+        assert.deepEqual(datesOf(Store.tasks[id]), post.get(id), `${id} is back at its post-Apply values`);
+      }
+      assert.deepEqual([...r.written].sort(), ids, 'Redo wrote only the captured rows');
+      assert.equal(UndoStack._entries.length, 1, 'the Apply entry can be undone again');
+      UndoStack.pop();
+      for (const id of ids) assert.deepEqual(datesOf(Store.tasks[id]).slice(0, 2), [null, null], `${id} back to the pre-Apply values`);
+    },
+  });
+});
+
+test('Redo does not rewrite a family sibling the planner edited after the Apply', async () => {
+  const plant = 'TQ-UNDO';
+  const edited = new Date(2026, 7, 25, 6);
+  await undoScopeRun({
+    extraFor3: [famRow(plant, 'ud-sib', `${plant}-FAMLINE`)],
+    mutate: famMutate,
+    commit: async kept => {
+      const ok = await OptimizerPreview._commitPatches(kept, { ids: [], reason: 'running' });
+      Store.updateTask('ud-sib', { start_date: edited, end_date: new Date(2026, 7, 25, 7) }, 'unit-test');
+      return ok;
+    },
+    check: r => {
+      r.written.length = 0;
+      assert.ok(UndoStack.popRedo());
+      assert.ok(!r.written.includes('ud-sib'), 'Redo does not write the edited sibling');
+      assert.equal(Store.tasks['ud-sib'].start_date.getTime(), edited.getTime(), 'the planner edit survives Undo and Redo');
+      for (const id of ['ud-a', 'ud-b', 'ud-c']) assert.ok(r.written.includes(id), `${id} redone`);
+    },
+  });
+});
+
+test('Redo: an edit of a redo-entry row after the Undo prunes it (Redo is then a no-op)', async () => {
+  await undoScopeRun({
+    commit: kept => OptimizerPreview._commitPatches(kept, { ids: [], reason: 'running' }),
+    check: () => {
+      Store.updateTask('ud-b', { PRT: 'edited-elsewhere' }, 'table');
+      assert.equal(UndoStack._redo.length, 0);
+      assert.equal(UndoStack.popRedo(), null);
+    },
+  });
+});

@@ -5062,6 +5062,69 @@ describe('reconcile (finish-anchored)', () => {
         assert.equal(Persistence._firmDirtyIds.has('s1'), true);
       } finally { s.cleanup(); }
     });
+
+    // Redo (Stage 3): a Redo re-dirties what the Undo settled, and settles again when it lands back on the saved state.
+    const pushApply = (s, snapshot) => UndoStack.push('apply', () => UndoStack.restoreTasks(snapshot), s.ids, { redo: true });
+
+    test('Redo: Apply 3 -> Undo 0 -> Redo 3 -> Undo 0 unsaved, with the exact post-Apply rows and no stale flag', () => {
+      const s = settleFx();
+      try {
+        const snapshot = UndoStack.snapshotTasks(s.ids);
+        s.apply();
+        pushApply(s, snapshot);
+        const post = s.ids.map(id => [Store.tasks[id].start_date.getTime(), Store.tasks[id].end_date.getTime()]);
+        assert.equal(Persistence._dirtyIds.size, 3);
+        UndoStack.pop();
+        assert.equal(Persistence._dirtyIds.size, 0);
+        assert.equal(s.badge.hidden, true);
+        assert.ok(UndoStack.popRedo());
+        assert.equal(Persistence._dirtyIds.size, 3, 'the Redo changed the rows again: unsaved');
+        assert.equal(s.badge.hidden, false);
+        s.ids.forEach((id, i) => {
+          assert.deepEqual([Store.tasks[id].start_date.getTime(), Store.tasks[id].end_date.getTime()], post[i], `${id} exact post-Apply rows`);
+          assert.equal(Store.tasks[id].runtime_schedule_mismatch, false, 'exact Redo sets no stale-run-time flag');
+        });
+        UndoStack.pop();
+        assert.equal(Persistence._dirtyIds.size, 0, 'the second Undo settles again');
+        assert.equal(s.badge.hidden, true);
+      } finally { UndoStack._redo = []; s.cleanup(); }
+    });
+
+    test('Redo back to the saved state settles: Apply, Save, Undo is dirty, Redo is clean', () => {
+      const s = settleFx();
+      try {
+        const snapshot = UndoStack.snapshotTasks(s.ids);
+        s.apply();
+        pushApply(s, snapshot);
+        // A successful save: the server now holds the applied rows at a new version.
+        for (const id of s.ids) {
+          Store.tasks[id].row_version = 4;
+          Persistence._recordBaseline(id, 4, Persistence._baselineKey(Persistence._taskEditSnapshot(Store.tasks[id])));
+          Persistence.discardDirty(id); Persistence._dirtySource.delete(id);
+        }
+        assert.equal(Persistence._dirtyIds.size, 0);
+        UndoStack.pop();
+        assert.equal(Persistence._dirtyIds.size, 3, 'undone rows differ from what the server holds');
+        assert.ok(UndoStack.popRedo());
+        assert.equal(Persistence._dirtyIds.size, 0, 'Redo returned the rows to the saved state: settled');
+        assert.equal(s.badge.hidden, true);
+      } finally { UndoStack._redo = []; s.cleanup(); }
+    });
+
+    test('Redo does not run the engine reconcile (afterRestore)', () => {
+      const s = settleFx();
+      const priorAfter = UndoStack.afterRestore;
+      try {
+        const snapshot = UndoStack.snapshotTasks(s.ids);
+        s.apply();
+        pushApply(s, snapshot);
+        UndoStack.pop();
+        let reconciles = 0;
+        UndoStack.afterRestore = (...a) => { reconciles++; return priorAfter?.(...a); };
+        UndoStack.popRedo();
+        assert.equal(reconciles, 0);
+      } finally { UndoStack.afterRestore = priorAfter; UndoStack._redo = []; s.cleanup(); }
+    });
   });
 
   test('overlong under a never-split plant queues the row (overlong_never); run time zero places nothing and says so', () => {
