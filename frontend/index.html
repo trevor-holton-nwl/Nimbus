@@ -1186,7 +1186,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         <span class="bell">⚐</span>
         <span class="badge" id="alert-badge" hidden>0</span>
       </button>
-      <button type="button" id="schedule-unsaved" class="unsaved-badge" role="status" data-i18n-title="unsaved.tooltip" title="Show unsaved changes" hidden></button>
+      <button type="button" id="schedule-unsaved" class="unsaved-badge" aria-haspopup="dialog" data-i18n-title="unsaved.tooltip" title="Show unsaved changes" hidden><span role="status"></span></button>
       <button class="btn btn-primary" data-i18n="btn.save" onclick="NIMBUS.Persistence.saveAll()">Save</button>
       <button id="user-settings-btn" class="icon-btn" hidden data-i18n-title="tip.user_settings" title="User Settings"><img src="/Images/user.png" alt="" class="user-icon-avatar"></button>
     </div>

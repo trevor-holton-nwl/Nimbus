@@ -69,7 +69,7 @@ test('opens with one row per unsaved order: title count, material, chip, machine
   seed(['A', 'B'], { edit: id => { if (id === 'A') Store.updateTask('A', { end_date: new Date('2026-10-01T13:00:00'), start_date: new Date('2026-10-01T10:00:00') }, 'table'); else Store.updateTask('B', { MACHINE: 'M2' }, 'table'); } });
   UnsavedDialog.open();
   assert.equal(mount.hidden, false);
-  assert.equal(mount.querySelector('#unsaved-title').textContent, '2 unsaved changes');
+  assert.equal(mount.querySelector('#unsaved-title').textContent, 'Unsaved changes: 2');
   assert.deepEqual(idsShown().sort(), ['A', 'B']);
   const a = trs().find(tr => tr.dataset.id === 'A');
   assert.match(text(a), /MATA/); assert.match(text(a), /Desc A/);
@@ -98,7 +98,7 @@ test('caps the list at 500 rows and says how many more', () => {
   seed(ids, { baseline: false });   // no baseline: cheap rows, all "No saved reference"
   UnsavedDialog.open();
   assert.equal(trs().length, MAX_ROWS);
-  assert.equal(mount.querySelector('#unsaved-title').textContent, `${MAX_ROWS + 3} unsaved changes`);
+  assert.equal(mount.querySelector('#unsaved-title').textContent, `Unsaved changes: ${MAX_ROWS + 3}`);
   const cap = text(mount.querySelector('.unsaved-cap'));
   assert.match(cap, new RegExp(`Showing ${MAX_ROWS} of ${MAX_ROWS + 3}`));
   assert.match(cap, /and 3 more/);
@@ -168,11 +168,11 @@ test('a stale mark (baseline equals current) is listed as No visible change with
   assert.match(text(detailOf('A')), /saved mark is stale/);
 });
 
-test('Show on Gantt closes, selects and centres the order on its machine and start day', () => {
+test('Show on Gantt closes, selects and centres the order on its machine and start day', t => {
   seed(['A'], { edit: () => Store.updateTask('A', { MACHINE: 'M2' }, 'table') });
   const goto = [], sel = [];
-  Timeline.gotoLineDay = (...a) => goto.push(a);
-  Selection.set = ids => sel.push(ids);
+  t.mock.method(Timeline, 'gotoLineDay', (...a) => goto.push(a));
+  t.mock.method(Selection, 'set', ids => sel.push(ids));
   UnsavedDialog.open();
   trs()[0].dispatch('click');
   detailOf('A').querySelector('button.btn').dispatch('click');
@@ -184,17 +184,17 @@ test('Show on Gantt closes, selects and centres the order on its machine and sta
   assert.deepEqual(goto[0][3], { taskId: 'A' });
 });
 
-test('Show on Gantt for an order with no dates selects it and opens the Orders table instead', () => {
+test('Show on Gantt for an order with no dates selects it, switches to the Gantt tab and opens the Orders sub-tab', t => {
   seed(['A'], { edit: () => Store.updateTask('A', { start_date: null, end_date: null, planning_status: 'needs_planning' }, 'table') });
   const sel = [], subs = [], goto = [];
-  Timeline.gotoLineDay = (...a) => goto.push(a);
-  Selection.set = ids => sel.push(ids);
-  globalThis.NIMBUS = { App: { gotoGanttSub: s => subs.push(s) } };
+  t.mock.method(Timeline, 'gotoLineDay', (...a) => goto.push(a));
+  t.mock.method(Selection, 'set', ids => sel.push(ids));
+  globalThis.NIMBUS = { App: { goto: tab => subs.push(`tab:${tab}`), gotoGanttSub: s => subs.push(s) } };
   UnsavedDialog.open();
   assert.equal(trs()[0].querySelector('.unsaved-chip').textContent, 'Needs planning');
   trs()[0].dispatch('click');
   detailOf('A').querySelector('button.btn').dispatch('click');
-  assert.deepEqual(sel, [['A']]); assert.deepEqual(subs, ['orders']); assert.equal(goto.length, 0);
+  assert.deepEqual(sel, [['A']]); assert.deepEqual(subs, ['tab:gantt', 'orders']); assert.equal(goto.length, 0);
 });
 
 test('Escape closes, and only while open; a backdrop press closes but a press inside does not', () => {
@@ -283,6 +283,85 @@ test('unsaved.* keys exist in en, de, es, fr and pt with matching placeholders',
 
 test('the index.html badge is a button keeping id and role=status, with a static mount', () => {
   const html = readFileSync(new URL('../../../frontend/index.html', import.meta.url), 'utf8');
-  assert.match(html, /<button[^>]*id="schedule-unsaved"[^>]*role="status"/);
+  assert.match(html, /<button[^>]*id="schedule-unsaved"[^>]*aria-haspopup="dialog"[^>]*><span role="status"><\/span><\/button>/);
+  assert.doesNotMatch(html, /<button[^>]*id="schedule-unsaved"[^>]*role=/, 'the button keeps its own role');
   assert.match(html, /id="unsaved-modal"/);
+});
+
+test('Show on Gantt reveals a machine hidden by the global line filter (adds to the filter)', t => {
+  seed(['A'], { edit: () => Store.updateTask('A', { MACHINE: 'M2' }, 'table') });
+  t.mock.method(Timeline, 'gotoLineDay', () => {});
+  t.mock.method(Selection, 'set', () => {});
+  Store.setSelectedLines(['M7'], 'test');
+  UnsavedDialog.open();
+  trs()[0].dispatch('click');
+  detailOf('A').querySelector('button.btn').dispatch('click');
+  assert.deepEqual([...Store.selectedLines].sort(), ['M2', 'M7']);
+  Store.setSelectedLines([], 'test');
+});
+
+test('the Tab trap survives close and reopen (the .modal element is reused, not replaced)', async () => {
+  seed(['A', 'B'], { edit: id => Store.updateTask(id, { MACHINE: 'M2' }, 'table') });
+  UnsavedDialog.open(); await tick();
+  const first = mount.querySelector('.modal');
+  UnsavedDialog.close();
+  UnsavedDialog.open(); await tick();
+  assert.equal(mount.querySelector('.modal'), first, 'the same dialog element across opens');
+  const dlg = mount.querySelector('.modal');
+  const focusables = dlg.querySelectorAll('input, select, button').filter(b => !b.hidden);
+  const last = focusables[focusables.length - 1];
+  last.focus();
+  last.dispatch('keydown', { key: 'Tab' });
+  assert.equal(dom.doc.activeElement, focusables[0], 'Tab from the last control wraps to the first');
+});
+
+test('reopening resets filter, sort and the open row', () => {
+  seed(['A', 'B'], { edit: id => Store.updateTask(id, { MACHINE: 'M2' }, 'table') });
+  UnsavedDialog.open();
+  const q = mount.querySelector('#unsaved-q'); q.value = 'a'; q.dispatch('input');
+  trs()[0].dispatch('click');
+  UnsavedDialog.close(); UnsavedDialog.open();
+  assert.equal(mount.querySelector('#unsaved-q').value, '');
+  assert.equal(trs().length, 2);
+  assert.equal(mount.querySelectorAll('tr.unsaved-detail').filter(d => !d.hidden).length, 0);
+});
+
+test('a row click moves focus to its toggle button, and keys inside the dialog do not reach the document (Gantt) handlers', () => {
+  seed(['A'], { edit: () => Store.updateTask('A', { MACHINE: 'M2' }, 'table') });
+  UnsavedDialog.open();
+  trs()[0].dispatch('click');
+  assert.equal(dom.doc.activeElement, btnOf('A'), 'focus stays inside the dialog');
+  const seen = [];
+  dom.doc.addEventListener('keydown', e => seen.push(e.key));
+  for (const key of ['Delete', 'z', 'ArrowRight', 'f']) btnOf('A').dispatch('keydown', { key, ctrlKey: key === 'z' });
+  assert.deepEqual(seen, [], 'owned keys are stopped at the dialog');
+  btnOf('A').dispatch('keydown', { key: 'Tab' });
+  assert.deepEqual(seen, ['Tab'], 'Tab still bubbles (Modal focus trap)');
+});
+
+test('Escape is stopped before the Gantt handler would clear the selection', () => {
+  seed(['A'], { edit: () => Store.updateTask('A', { MACHINE: 'M2' }, 'table') });
+  UnsavedDialog.open();
+  let stopped = false;
+  dom.doc.dispatch('keydown', { key: 'Escape', stopPropagation() { stopped = true; } });
+  assert.equal(stopped, true);
+  assert.equal(mount.hidden, true);
+});
+
+test('the badge count lives in an inner role=status span when there is one, so the button role survives', () => {
+  seed(['A'], { edit: () => Store.updateTask('A', { MACHINE: 'M2' }, 'table') });
+  const live = dom.doc.createElement('span'); live.setAttribute('role', 'status'); badge.appendChild(live);
+  Persistence._syncUnsaved();
+  assert.equal(live.textContent, '1 unsaved');
+  assert.equal(badge.hidden, false);
+  assert.equal(badge.children.length, 1, 'the span is not wiped');
+});
+
+test('hours and Δ units come from the locale', () => {
+  seed(['A'], { edit: () => Store.updateTask('A', { RUN_TIME: 4.5, start_date: new Date('2026-10-01T06:30:00') }, 'table') });
+  UnsavedDialog.open();
+  trs()[0].dispatch('click');
+  assert.match(text(detailOf('A')), /3 h/);
+  assert.match(text(detailOf('A')), /4\.5 h/);
+  assert.equal(text(trs()[0].querySelector('.unsaved-delta')), '-1h 30m');
 });

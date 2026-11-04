@@ -14,8 +14,11 @@ export type UnsavedFieldKind = 'text' | 'date' | 'hours' | 'bool' | 'count';
 export interface UnsavedField {
   key: UnsavedFieldKey;
   kind: UnsavedFieldKind;
-  /** Absent on a "No saved reference" row (there is nothing to compare with). null = the field was empty. */
+  /** Absent on a "No saved reference" row (there is nothing to compare with) and on a firm change (the saved firm
+   *  state is not recorded, so no before is claimed). null = the field was empty. */
   before?: string | number | boolean | Date | null;
+  /** The saved reference held no placement at all (a never-placed order): the dialog says "Not placed". */
+  notPlaced?: boolean;
   after: string | number | boolean | Date | null;
 }
 
@@ -107,19 +110,20 @@ function valueOf(kind: UnsavedFieldKind, raw: unknown, ctx: UnsavedContext): str
   return String(raw);
 }
 
+/** An empty segment list is one continuous bar, so an unsplit order reads 1, never 0. */
 function segmentCount(snap: Snap): number | null {
-  return Array.isArray(snap.schedule_segments) ? snap.schedule_segments.length : null;
+  return Array.isArray(snap.schedule_segments) ? Math.max(1, snap.schedule_segments.length) : null;
 }
 
 function moveNoteOf(task: Task): UnsavedMoveNote | null {
   const issue = task.derivationIssue as { code?: string; from?: Date; to?: Date } | null | undefined;
   const move = task.systemMove as { reason?: string; from?: Date; to?: Date } | null | undefined;
-  const code = issue?.code && MOVE_REASONS.includes(issue.code) ? issue.code
-    : move?.reason && MOVE_REASONS.includes(move.reason) ? move.reason : null;
-  const from = issue?.from ?? move?.from;
-  const to = issue?.to ?? move?.to;
-  if (!code || !(from instanceof Date) || !(to instanceof Date)) return null;
-  return { reason: code, from, to };
+  // from/to come from the source whose code was accepted, never mixed across the two notes.
+  const ok = (code: string | undefined, from: unknown, to: unknown): boolean =>
+    !!code && MOVE_REASONS.includes(code) && from instanceof Date && to instanceof Date;
+  if (ok(issue?.code, issue?.from, issue?.to)) return { reason: issue!.code!, from: issue!.from!, to: issue!.to! };
+  if (ok(move?.reason, move?.from, move?.to)) return { reason: move!.reason!, from: move!.from!, to: move!.to! };
+  return null;
 }
 
 function msOf(f: UnsavedField | undefined): number | null {
@@ -172,14 +176,24 @@ export function unsavedChanges(
 
     const fields: UnsavedField[] = [];
     for (const d of FIELD_DEFS) {
-      const b = valueOf(d.kind, before[d.wire], ctx);
       const a = valueOf(d.kind, now[d.wire], ctx);
+      // A field the saved snapshot does not carry (a never-placed order saves attributes only) is not diffed, except
+      // the placement dates, which read "Not placed" -> the new date.
+      if (!(d.wire in before)) {
+        if (d.kind === 'date' && a !== null) fields.push({ key: d.key, kind: d.kind, before: null, after: a, notPlaced: true });
+        continue;
+      }
+      const b = valueOf(d.kind, before[d.wire], ctx);
       if (!same(a, b)) fields.push({ key: d.key, kind: d.kind, before: b, after: a });
     }
     const bSegs = segmentCount(before), aSegs = segmentCount(now);
-    const segsChanged = JSON.stringify(before.schedule_segments ?? null) !== JSON.stringify(now.schedule_segments ?? null);
-    if (segsChanged) fields.push({ key: 'segments', kind: 'count', before: bSegs, after: aSegs });
-    if (firmDirty) fields.push({ key: 'firm', kind: 'bool', before: !firmNow, after: firmNow });
+    const segsPresent = 'schedule_segments' in before;
+    const segsChanged = segsPresent && JSON.stringify(before.schedule_segments ?? null) !== JSON.stringify(now.schedule_segments ?? null);
+    const segCountChanged = segsPresent && bSegs !== aSegs;
+    if (segCountChanged) fields.push({ key: 'segments', kind: 'count', before: bSegs, after: aSegs });
+    // Firm is not in the baseline key and _firmDirtyIds is not cleared when a toggle is reverted, so there is no proof
+    // the firm differs from saved: report only the current state, never a made-up before.
+    if (firmDirty) fields.push({ key: 'firm', kind: 'bool', after: firmNow });
 
     const has = (k: UnsavedFieldKey): boolean => fields.some(f => f.key === k);
     const startMs = msOf(fields.find(f => f.key === 'start'));
@@ -192,8 +206,8 @@ export function unsavedChanges(
     if (needsNow && !needsBefore) status = 'needs';
     else if (has('machine')) status = 'machine';
     // Finish-anchored: a run time edit that holds the finish only moves the start, and that is a run time change.
-    else if (has('runtime') && !has('finish') && !has('segments')) status = 'runtime';
-    else if (has('start') || has('finish') || has('segments')) status = 'moved';
+    else if (has('runtime') && !has('finish')) status = 'runtime';
+    else if (has('start') || has('finish') || has('segments') || (segsChanged && Math.max(bSegs ?? 1, aSegs ?? 1) > 1)) status = 'moved';
     else if (has('runtime')) status = 'runtime';
     else if (has('pv') || has('prt1') || has('prt2')) status = 'tooling';
     else if (has('firm')) status = 'firm';
@@ -206,7 +220,7 @@ export function unsavedChanges(
 
 /** "Biggest move first": largest |delta| hours, then the more significant change kind, then the order id. */
 export function sortUnsaved(rows: readonly UnsavedChange[], by: 'move' | 'order' | 'machine'): UnsavedChange[] {
-  const cmpId = (a: UnsavedChange, b: UnsavedChange): number => a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  const cmpId = (a: UnsavedChange, b: UnsavedChange): number => a.id.localeCompare(b.id, undefined, { numeric: true });
   const biggest = (a: UnsavedChange, b: UnsavedChange): number => (b.magnitude - a.magnitude) || (b.rank - a.rank) || cmpId(a, b);
   const copy = [...rows];
   if (by === 'order') return copy.sort(cmpId);
@@ -221,13 +235,14 @@ export function filterUnsaved(rows: readonly UnsavedChange[], query: string): Un
   return rows.filter(r => `${r.id} ${r.material} ${r.materialDescription} ${r.machine}`.toLowerCase().includes(q));
 }
 
-/** "+2d 19h", "-2h", "+45m": a signed duration for the delta column (days only from 24 h). */
-export function formatDeltaMs(ms: number): string {
-  if (!ms) return '0h';
+/** "+2d 19h", "-2h", "+45m": a signed duration for the delta column (days only from 24 h). The unit letters are
+ *  injected so the dialog can localise them (`unsaved.unit_d/h/m`). */
+export function formatDeltaMs(ms: number, units: { d: string; h: string; m: string } = { d: 'd', h: 'h', m: 'm' }): string {
+  if (!ms) return `0${units.h}`;
   const sign = ms < 0 ? '-' : '+';
   const totalMin = Math.round(Math.abs(ms) / 60_000);
   const d = Math.floor(totalMin / 1440), h = Math.floor((totalMin % 1440) / 60), m = totalMin % 60;
-  if (d) return `${sign}${d}d${h ? ` ${h}h` : ''}`;
-  if (h) return `${sign}${h}h${m ? ` ${m}m` : ''}`;
-  return `${sign}${m}m`;
+  if (d) return `${sign}${d}${units.d}${h ? ` ${h}${units.h}` : ''}`;
+  if (h) return `${sign}${h}${units.h}${m ? ` ${m}${units.m}` : ''}`;
+  return `${sign}${m}${units.m}`;
 }

@@ -379,7 +379,9 @@ export const Persistence = {
     if (!badge) return;
     const count = Persistence._dirtyIds.size;
     badge.hidden = count === 0;
-    badge.textContent = count ? Util.t('ui.n_unsaved', { count }) : '';
+    // The badge is a button: its live count sits in an inner role="status" span so the button role survives.
+    const live = typeof badge.querySelector === 'function' ? badge.querySelector('[role="status"]') : null;
+    (live ?? badge).textContent = count ? Util.t('ui.n_unsaved', { count }) : '';
   },
   // Lazily-set by _writeCacheWithQuotaGuard/_quarantineCache — declared here
   // (rather than left to first assignment) since plain object-literal

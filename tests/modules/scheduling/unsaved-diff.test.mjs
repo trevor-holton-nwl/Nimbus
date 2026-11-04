@@ -58,22 +58,44 @@ test('PV and PRT edits are the tooling kind, field by field', () => {
   assert.equal(f(row, 'prt2'), undefined, 'unchanged fields are not listed');
 });
 
-test('segments: a changed split-order segment list is a move even when start and finish hold', () => {
-  const seg = [{ sequence: 1, start_date: '2026-11-06T02:30:00', end_date: '2026-11-06T08:00:00' }];
+test('segments: 2 -> 1 is a move even when start and finish hold; an unsplit order never reads 0 segments', () => {
+  const seg = [{ sequence: 1, start_date: '2026-11-06T02:30:00', end_date: '2026-11-06T08:00:00' }, { sequence: 2, start_date: '2026-11-06T09:00:00', end_date: '2026-11-06T14:00:00' }];
   const row = one({ dirty: ['A'], base: { A: key({ schedule_segments: seg }) }, rows: { A: live('A', { schedule_segments: [] }) } });
   assert.equal(row.status, 'moved');
-  assert.deepEqual([f(row, 'segments').before, f(row, 'segments').after], [1, 0]);
+  assert.deepEqual([f(row, 'segments').before, f(row, 'segments').after], [2, 1]);
+  const unsplit = one({ dirty: ['A'], base: { A: key() }, rows: { A: live('A', { MACHINE: 'M2' }) } });
+  assert.equal(f(unsplit, 'segments'), undefined);
+  const noref = one({ dirty: ['A'], base: {}, rows: { A: live('A') } });
+  assert.equal(f(noref, 'segments').after, 1);
 });
 
-test('firm-only: before is the opposite of the live firm (FIRMED is not in the baseline key)', () => {
+test('a finish-held run time edit on a split order is still Run time', () => {
+  const seg = [{ sequence: 1, start_date: '2026-11-06T02:30:00', end_date: '2026-11-06T08:00:00' }, { sequence: 2, start_date: '2026-11-06T09:00:00', end_date: '2026-11-06T14:00:00' }];
+  const seg2 = [{ sequence: 1, start_date: '2026-11-06T04:30:00', end_date: '2026-11-06T08:00:00' }, { sequence: 2, start_date: '2026-11-06T09:00:00', end_date: '2026-11-06T14:00:00' }];
+  const row = one({ dirty: ['A'], base: { A: key({ schedule_segments: seg }) }, rows: { A: live('A', { RUN_TIME: 5, start_date: '2026-11-06T04:30:00', schedule_segments: seg2 }) } });
+  assert.equal(row.status, 'runtime');
+});
+
+test('a never-placed (display-only) baseline: placed dates read Not placed, absent fields are not diffed', () => {
+  const displayOnly = { MACHINE: 'M1', PRT_01: null, PRT_02: null, PRODUCTION_VERSION: null, RUN_TIME: 6.5 };
+  const row = one({ dirty: ['A'], base: { A: JSON.stringify(displayOnly) }, rows: { A: live('A') } });
+  assert.equal(f(row, 'start').notPlaced, true);
+  assert.equal(f(row, 'finish').notPlaced, true);
+  assert.equal(f(row, 'segments'), undefined);
+  assert.equal(row.status, 'moved');
+});
+
+test('firm-only: no made-up before (the saved firm state is not recorded; a reverted toggle stays marked)', () => {
   const on = one({ dirty: ['A'], base: { A: key() }, rows: { A: live('A') }, firmDirty: ['A'], firmed: ['A'] });
   assert.equal(on.status, 'firm');
-  assert.deepEqual([f(on, 'firm').before, f(on, 'firm').after], [false, true]);
+  assert.equal('before' in f(on, 'firm'), false);
+  assert.equal(f(on, 'firm').after, true);
   const off = one({ dirty: ['A'], base: { A: key() }, rows: { A: live('A') }, firmDirty: ['A'], firmed: [] });
-  assert.deepEqual([f(off, 'firm').before, f(off, 'firm').after], [true, false]);
+  assert.equal('before' in f(off, 'firm'), false);
+  assert.equal(f(off, 'firm').after, false);
 });
 
-test('a firm change alongside a move lists both and the move wins the chip', () => {
+test('a firm mark alongside a move lists both and the move wins the chip', () => {
   const row = one({ dirty: ['A'], base: { A: key() }, rows: { A: live('A', { end_date: '2026-11-06T16:00:00' }) }, firmDirty: ['A'], firmed: ['A'] });
   assert.equal(row.status, 'moved');
   assert.ok(f(row, 'firm') && f(row, 'finish'));
@@ -135,6 +157,10 @@ test('the engine move note is carried (derivationIssue first), and ignored for n
   assert.equal(b.moveNote.reason, 'reversal_forward');
   const c = one({ dirty: ['A'], base: { A: key() }, rows: { A: live('A', {}, { derivationIssue: { code: 'missing_timezone' } }) } });
   assert.equal(c.moveNote, null);
+  // A rejected issue code never lends its from/to to the accepted systemMove (and vice versa).
+  const other = new Date('2026-12-01T00:00:00');
+  const d = one({ dirty: ['A'], base: { A: key() }, rows: { A: live('A', {}, { systemMove: { from, to, reason: 'run_time_changed' }, derivationIssue: { code: 'missing_timezone', from: other, to: other } }) } });
+  assert.deepEqual(d.moveNote, { reason: 'run_time_changed', from, to });
 });
 
 test('sort: biggest move first, then change kind, then id; order and machine sorts', () => {
@@ -169,4 +195,16 @@ test('formatDeltaMs', () => {
   assert.equal(formatDeltaMs(45 * 60_000), '+45m');
   assert.equal(formatDeltaMs(90 * 60_000), '+1h 30m');
   assert.equal(formatDeltaMs(24 * 3_600_000), '+1d');
+});
+
+test('Order sort compares ids numerically-aware', () => {
+  const rows = run({ dirty: ['100', '20', '3'], base: { 100: key(), 20: key(), 3: key() }, rows: { 100: live('100'), 20: live('20'), 3: live('3') } }).rows;
+  assert.deepEqual(sortUnsaved(rows, 'order').map(r => r.id), ['3', '20', '100']);
+});
+
+test('formatDeltaMs takes localised unit letters', () => {
+  const u = { d: 'T', h: 'Std.', m: 'Min.' };
+  assert.equal(formatDeltaMs(0, u), '0Std.');
+  assert.equal(formatDeltaMs(-(26 * 3_600_000), u), '-1T 2Std.');
+  assert.equal(formatDeltaMs(45 * 60_000, u), '+45Min.');
 });

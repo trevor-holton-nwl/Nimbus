@@ -37,15 +37,17 @@ const KEY_FIELDS: Record<string, UnsavedFieldKey[]> = {
   tooling: ['prt1', 'prt2', 'pv'], firm: ['firm'], noref: ['finish', 'machine'],
 };
 
+const units = (): { d: string; h: string; m: string } => ({ d: t('unsaved.unit_d'), h: t('unsaved.unit_h'), m: t('unsaved.unit_m') });
+
 export function fieldLabel(key: UnsavedFieldKey): string { return t(`unsaved.f_${key}`); }
 
 export function formatValue(f: Pick<UnsavedField, 'kind'>, v: unknown): string {
   if (v === null || v === undefined || v === '') return t('unsaved.val_none');
   switch (f.kind) {
     case 'date': return Util.fmtDTPref(v) || t('unsaved.val_none');
-    case 'hours': return t('unsaved.val_hours', { count: Math.round(Number(v) * 100) / 100 });
+    case 'hours': return t('unsaved.val_hours', { count: new Intl.NumberFormat(Util.locale() || undefined, { maximumFractionDigits: 2 }).format(Number(v)) });
     case 'bool': return v ? t('unsaved.val_yes') : t('unsaved.val_no');
-    case 'count': return t('unsaved.val_segments', { count: v as number });
+    case 'count': return String(v);
     default: return String(v);
   }
 }
@@ -61,11 +63,11 @@ function keyField(row: UnsavedChange): UnsavedField | null {
 function deltaOf(row: UnsavedChange): { text: string; cls: string; sub?: string } {
   switch (row.status) {
     case 'needs': return { text: t('unsaved.delta_unsched'), cls: 'pos' };
-    case 'machine': return { text: t('unsaved.delta_machine'), cls: 'kind', ...(row.deltaMs ? { sub: formatDeltaMs(row.deltaMs) } : {}) };
+    case 'machine': return { text: t('unsaved.delta_machine'), cls: 'kind', ...(row.deltaMs ? { sub: formatDeltaMs(row.deltaMs, units()) } : {}) };
     case 'firm': return { text: t('unsaved.delta_firm'), cls: 'kind' };
     case 'tooling': return { text: row.fields.some(f => f.key === 'prt1' || f.key === 'prt2') ? t('unsaved.delta_prt') : t('unsaved.delta_pv'), cls: 'kind' };
     case 'moved': case 'runtime':
-      return row.deltaMs ? { text: formatDeltaMs(row.deltaMs), cls: row.deltaMs > 0 ? 'pos' : 'neg' } : { text: '—', cls: 'mute' };
+      return row.deltaMs ? { text: formatDeltaMs(row.deltaMs, units()), cls: row.deltaMs > 0 ? 'pos' : 'neg' } : { text: '—', cls: 'mute' };
     default: return { text: '—', cls: 'mute' };
   }
 }
@@ -116,14 +118,15 @@ export const UnsavedDialog = {
     if (!UnsavedDialog._escape) {
       UnsavedDialog._escape = (e: KeyboardEvent) => {
         const m = document.getElementById(MODAL_ID);
-        if (e.key === 'Escape' && m && !m.hidden) { e.preventDefault?.(); UnsavedDialog.close(); }
+        if (e.key === 'Escape' && m && !m.hidden) { e.preventDefault?.(); e.stopPropagation?.(); UnsavedDialog.close(); }
       };
-      document.addEventListener('keydown', UnsavedDialog._escape);
+      // Capture: the Gantt's own Escape (clear selection) must not also run behind the dialog.
+      document.addEventListener('keydown', UnsavedDialog._escape, true);
     }
   },
 
   close(): void {
-    if (UnsavedDialog._escape) { document.removeEventListener('keydown', UnsavedDialog._escape); UnsavedDialog._escape = null; }
+    if (UnsavedDialog._escape) { document.removeEventListener('keydown', UnsavedDialog._escape, true); UnsavedDialog._escape = null; }
     Modal.close(MODAL_ID);
   },
 
@@ -140,8 +143,12 @@ export const UnsavedDialog = {
 
   _build(): void {
     const mount = UnsavedDialog._mount();
+    // The .modal element is built ONCE per mount and only its contents are refreshed: Modal wires its Tab trap a
+    // single time per backdrop around the first dialog element, so replacing it would break the trap on reopen.
+    if (UnsavedDialog._els.dlg && mount.children[0] === UnsavedDialog._els.dlg) { UnsavedDialog._reset(); return; }
     const E = UnsavedDialog._els = {} as Record<string, HTMLElement>;
     const dlg = el('div', 'modal unsaved-dlg');
+    E.dlg = dlg;
     const head = el('header', 'modal-head');
     const title = el('h3'); title.id = 'unsaved-title'; E.title = title;
     const x = el('button', 'icon-btn sm', '✕'); x.setAttribute('type', 'button'); x.setAttribute('aria-label', t('btn.close'));
@@ -150,10 +157,10 @@ export const UnsavedDialog = {
 
     const body = el('div', 'modal-body unsaved-body');
     const ctrl = el('div', 'unsaved-ctrl');
-    const q = el('input'); q.id = 'unsaved-q'; q.setAttribute('type', 'search'); q.setAttribute('autocomplete', 'off');
+    const q = el('input'); q.id = 'unsaved-q'; E.q = q; q.setAttribute('type', 'search'); q.setAttribute('autocomplete', 'off');
     q.setAttribute('placeholder', t('unsaved.filter')); q.setAttribute('aria-label', t('unsaved.filter'));
     q.addEventListener('input', () => { UnsavedDialog._query = q.value; UnsavedDialog._renderBody(); });
-    const sort = el('select'); sort.id = 'unsaved-sort'; sort.setAttribute('aria-label', t('unsaved.sort_label'));
+    const sort = el('select'); sort.id = 'unsaved-sort'; E.sort = sort; sort.setAttribute('aria-label', t('unsaved.sort_label'));
     for (const [v, key] of [['move', 'unsaved.sort_move'], ['order', 'unsaved.sort_order'], ['machine', 'unsaved.sort_machine']] as const) {
       const o = el('option', undefined, t(key)); o.setAttribute('value', v); (o as HTMLOptionElement).value = v; sort.appendChild(o);
     }
@@ -161,8 +168,8 @@ export const UnsavedDialog = {
     sort.addEventListener('change', () => { UnsavedDialog._sort = (sort as HTMLSelectElement).value as SortKey; UnsavedDialog._renderBody(); });
     ctrl.append(q, sort);
 
-    const banner = el('div', 'unsaved-banner', t('unsaved.whatif')); banner.setAttribute('role', 'note'); banner.hidden = !Sandbox.active; E.banner = banner;
-    const skip = el('div', 'unsaved-skipped', UnsavedDialog._skipped ? t('unsaved.skipped_note', { count: UnsavedDialog._skipped }) : ''); skip.hidden = !UnsavedDialog._skipped;
+    const banner = el('div', 'unsaved-banner', t('unsaved.whatif')); banner.setAttribute('role', 'note'); E.banner = banner;
+    const skip = el('div', 'unsaved-skipped'); E.skip = skip;
 
     const wrap = el('div', 'unsaved-tablewrap');
     const table = el('table', 'unsaved-table');
@@ -185,11 +192,25 @@ export const UnsavedDialog = {
 
     dlg.append(head, body, foot);
     mount.replaceChildren(dlg);
+    UnsavedDialog._reset();
     // A press on the dimmed backdrop (not on the dialog) closes.
     if (!(mount as HTMLElement & { _unsavedWired?: boolean })._unsavedWired) {
       (mount as HTMLElement & { _unsavedWired?: boolean })._unsavedWired = true;
       mount.addEventListener('click', (e: MouseEvent) => { if (e.target === mount) UnsavedDialog.close(); });
+      // While the dialog is open its keys are its own: Delete, Ctrl+Z, arrows, F... must not reach the Gantt's
+      // document handler behind it. Tab is left alone (Modal's focus trap); Escape closes via the capture listener.
+      mount.addEventListener('keydown', (e: KeyboardEvent) => { if (e.key !== 'Tab') e.stopPropagation(); });
     }
+  },
+
+  /** Per-open state of the (reused) dialog: filter, sort, banner and the skipped note. */
+  _reset(): void {
+    const E = UnsavedDialog._els;
+    (E.q as HTMLInputElement).value = '';
+    (E.sort as HTMLSelectElement).value = 'move';
+    E.banner.hidden = !Sandbox.active;
+    E.skip.hidden = !UnsavedDialog._skipped;
+    E.skip.textContent = UnsavedDialog._skipped ? t('unsaved.skipped_note', { count: UnsavedDialog._skipped }) : '';
   },
 
   _renderBody(): void {
@@ -226,7 +247,7 @@ export const UnsavedDialog = {
     const tdChip = el('td'); tdChip.appendChild(el('span', `unsaved-chip ${row.status}`, t(`unsaved.chip_${row.status}`)));
     const kf = keyField(row);
     const noBefore = !kf || kf.before === undefined;
-    const tdBefore = el('td', `unsaved-val${noBefore ? ' mute' : ' old'}`, kf && !noBefore ? formatValue(kf, kf.before) : '—');
+    const tdBefore = el('td', `unsaved-val${noBefore ? ' mute' : ' old'}`, kf && !noBefore ? (kf.notPlaced ? t('unsaved.val_not_placed') : formatValue(kf, kf.before)) : '—');
     const tdAfter = el('td', `unsaved-val${kf ? '' : ' mute'}`, kf ? formatValue(kf, kf.after) : '—');
     const d = deltaOf(row);
     const tdDelta = el('td'); const dl = el('span', `unsaved-delta ${d.cls}`, d.text);
@@ -238,7 +259,8 @@ export const UnsavedDialog = {
     btn.setAttribute('aria-label', t('unsaved.details_for', { id: row.id }));
     tdBtn.appendChild(btn);
     tr.append(tdOrd, tdMachine, tdChip, tdBefore, tdAfter, tdDelta, tdBtn);
-    tr.addEventListener('click', () => UnsavedDialog._toggle(row.id));
+    // Focus stays inside the dialog: a click on the (non-focusable) cell would otherwise leave it on <body>.
+    tr.addEventListener('click', () => { UnsavedDialog._toggle(row.id); btn.focus(); });
 
     const detail = el('tr', 'unsaved-detail'); detail.id = `unsaved-d-${row.id}`; detail.hidden = true;
     UnsavedDialog._views.set(row.id, { tr, detail, btn, row });
@@ -281,7 +303,9 @@ export const UnsavedDialog = {
       for (const f of row.fields) {
         grid.appendChild(el('span', 'unsaved-lab', fieldLabel(f.key)));
         if (row.hasBaseline) {
-          grid.append(el('span', 'unsaved-val old', formatValue(f, f.before)), el('span', 'unsaved-arr', '→'), el('span', 'unsaved-val', formatValue(f, f.after)));
+          // No `before` key = nothing proves what the saved value was (firm); a never-placed order reads "Not placed".
+          const beforeText = !('before' in f) ? '—' : f.notPlaced ? t('unsaved.val_not_placed') : formatValue(f, f.before);
+          grid.append(el('span', `unsaved-val ${'before' in f ? 'old' : 'mute'}`, beforeText), el('span', 'unsaved-arr', '→'), el('span', 'unsaved-val', formatValue(f, f.after)));
         } else grid.appendChild(el('span', 'unsaved-val', formatValue(f, f.after)));
       }
       wrap.appendChild(grid);
@@ -310,9 +334,15 @@ export const UnsavedDialog = {
     if (!task) return;
     Selection.set([id]);
     if (task.start_date && task.end_date && task.MACHINE) {
-      Timeline.gotoLineDay(String(task.MACHINE), Util.dayKey(task.start_date), undefined, { taskId: id });
+      const line = String(task.MACHINE);
+      // Reveal a line hidden by the global line filter (add to it, never replace), as the alert Go To does.
+      const sel = Store.selectedLines;
+      if (sel.size > 0 && !sel.has(line)) Store.setSelectedLines([...sel, line], 'unsaved-dialog');
+      Timeline.gotoLineDay(line, Util.dayKey(task.start_date), undefined, { taskId: id });
     } else {
-      (globalThis as { NIMBUS?: { App?: { gotoGanttSub?(sub: string): void } } }).NIMBUS?.App?.gotoGanttSub?.('orders');
+      const app = (globalThis as { NIMBUS?: { App?: { goto?(tab: string): void; gotoGanttSub?(sub: string): void } } }).NIMBUS?.App;
+      app?.goto?.('gantt');
+      app?.gotoGanttSub?.('orders');
     }
   },
 
