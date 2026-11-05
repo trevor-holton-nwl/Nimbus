@@ -1451,6 +1451,8 @@ export const AlertsUIAdapter = {
         } else if (a.taskId) {
           chipsHtml = `<div class="ac-chips">${renderChip(a.taskId)}</div>`;
         }
+      } else if (a.type === 'runtime-unknown') {
+        if (a.taskId) chipsHtml = `<div class="ac-chips">${renderChip(a.taskId)}</div>`;
       } else if (a.type === 'blackout') {
         headline = AlertsUIAdapter.headlineFor('blackout');
         if (a.taskId) chipsHtml = `<div class="ac-chips">${renderChip(a.taskId)}</div>`;
