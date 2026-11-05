@@ -226,6 +226,22 @@ export function convertLegacyState(raw: unknown, user: string, schemaVersion: nu
   }
 }
 
+/** The legacy blob's whole-board context limited to one plant, the same way `Persistence._cacheContext(plant)` limits a live
+ *  one: lineSettings stay whole (the machine-to-plant sync needs them before the overlay); calendars follow their line's plant;
+ *  blocks and plantBlocks keep this plant's (or plant-less) entries; `plants` keeps only this plant. */
+function legacyContextFor(st: Record<string, unknown>, plant: string): CacheRecordContext {
+  const asObj = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {});
+  const mine = (x: unknown): boolean => { const p = (x as { plant?: unknown } | null)?.plant; return !p || p === plant; };
+  const lineSettings = asObj(st.lineSettings);
+  const calendars: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(asObj(st.calendars))) { const ls = lineSettings[k]; if (!ls || mine(ls)) calendars[k] = v; }
+  const plants: Record<string, unknown> = {};
+  const allPlants = asObj(st.plants);
+  if (allPlants[plant]) plants[plant] = allPlants[plant];
+  const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v.filter(mine) : []);
+  return { lineSettings: st.lineSettings, calendars, plants, blocks: arr(st.blocks), plantBlocks: arr(st.plantBlocks), userSettings: st.userSettings };
+}
+
 /** Like convertLegacyState, but one record per plant that holds unsaved rows (a legacy blob may have loaded several plants).
  *  A row filed under its own `PLANT`; a row with none goes to the blob's selected plant, else the plant most rows belong to.
  *  `plants` is ordered so the selected (or largest) plant comes LAST: it is the one the marker should end up pointing at.
@@ -266,8 +282,7 @@ export function convertLegacyStatePlants(raw: unknown, user: string, schemaVersi
       const record = buildCacheRecord({
         user, plant, schemaVersion, buildId, savedAt: Date.now(), seq: 0, rows: g,
         dirtyIds: ids, forceIds: optimizer.filter(id => ids.includes(id)), dirtySource: {},
-        context: { lineSettings: st.lineSettings, calendars: st.calendars, blocks: st.blocks, plants: st.plants,
-          plantBlocks: st.plantBlocks, userSettings: st.userSettings },
+        context: legacyContextFor(st, plant),
       });
       plants.push({ plant, record });
     }

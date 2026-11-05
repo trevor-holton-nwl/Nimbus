@@ -136,3 +136,26 @@ test('fingerprintText is stable and sensitive; applyContextChanged ignores unkno
   assert.equal(applyContextChanged({ calendar: null, tools: 't1', setup: null }, { ...a, tools: 't2' }), true);
   assert.equal(applyContextChanged(null, a), false);
 });
+
+test('A4 n8 convertLegacyStatePlants limits the whole-blob context to each plant, the way the live record does', async () => {
+  const { convertLegacyStatePlants } = await import('../../../frontend/scheduling/cache-record.mjs');
+  const blob = {
+    _schemaVersion: 7, selectedPlant: 'P', _dirtyIds: ['a', 'b'],
+    tasks: [{ id: 'a', PLANT: 'P' }, { id: 'b', PLANT: 'Q' }],
+    lineSettings: { LP: { plant: 'P' }, LQ: { plant: 'Q' } },
+    calendars: { LP: { h: 1 }, LQ: { h: 2 } },
+    plants: { P: { tz: 'a' }, Q: { tz: 'b' } },
+    blocks: [{ id: 1, plant: 'P' }, { id: 2, plant: 'Q' }, { id: 3 }],
+    plantBlocks: [{ id: 4, plant: 'Q' }, { id: 5, plant: 'P' }],
+    userSettings: { theme: 'dark' },
+  };
+  const conv = convertLegacyStatePlants(blob, 'u', 7, 'b');
+  const byPlant = Object.fromEntries(conv.plants.map(x => [x.plant, x.record.context]));
+  assert.deepEqual(Object.keys(byPlant.P.calendars), ['LP']);
+  assert.deepEqual(Object.keys(byPlant.Q.calendars), ['LQ']);
+  assert.deepEqual(Object.keys(byPlant.P.plants), ['P']);
+  assert.deepEqual(byPlant.P.blocks.map(b => b.id), [1, 3], 'this plant\'s blocks and plant-less ones');
+  assert.deepEqual(byPlant.Q.plantBlocks.map(b => b.id), [4]);
+  assert.deepEqual(Object.keys(byPlant.P.lineSettings).sort(), ['LP', 'LQ'], 'lineSettings stay whole');
+  assert.deepEqual(byPlant.P.userSettings, { theme: 'dark' });
+});

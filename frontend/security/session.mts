@@ -293,7 +293,9 @@ export const Session = (() => {
     else {
       try {
         const next = (JSON.parse(e.newValue) as { username?: string } | null)?.username;
-        const mine = CacheStore.user();
+        // Compared with the user this PAGE was loaded for, not CacheStore.user(): a stale tab whose store was re-opened for the
+        // newly signed-in user (ready(Y)) must still treat Y as "someone else".
+        const mine = CacheStore.capturedUser();
         halt = !next || (!!mine && next !== mine);
         if (!halt && next && mine === next) sameUser = next;
       } catch { halt = true; }
@@ -305,8 +307,9 @@ export const Session = (() => {
         // Autosave just stopped because of ANOTHER tab: say so once (this tab would otherwise keep editing unprotected).
         if (!st.halted && st.mode !== 'none' && !_leaving) Toast.show(Util.t('toast.cache_halted_other_tab'), 'warn', 15000);
       } else if (sameUser && !_leaving && CacheStore.stats().halted) {
-        // The same user signed back in elsewhere (or the session was refreshed): this tab's autosave may run again.
-        CacheStore.resume(sameUser);
+        // The same user this page was loaded for signed back in elsewhere: autosave may run again (and re-stores the edits held
+        // here). Refused after the page was asked to open the store for another user while halted (sign-in required).
+        CacheStore.resumeSameUser(sameUser);
       }
     } catch { /* best effort */ }
   }
@@ -319,6 +322,8 @@ export const Session = (() => {
   function sweepOrphanCache(): Promise<void> {
     const u = currentUser();
     if (!u) return Promise.resolve();
+    // The boot gate names the user this page loads for; its in-memory edits belong to them for the page's life.
+    try { CacheStore.setPageUser(u.username); } catch { /* best effort */ }
     return CacheStore.sweepOrphans(u.username).then(() => undefined, () => undefined);
   }
 

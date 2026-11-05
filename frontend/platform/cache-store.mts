@@ -43,7 +43,9 @@ export interface WriteResult { ok: boolean; skipped?: boolean; reason?: string; 
 export type CacheNotice = 'put_failed' | 'older_record' | 'dirty_no_record' | 'read_failed' | 'corrupt_record' | 'other_dirty_plants';
 export type CacheMode = 'none' | 'localstorage';
 export interface BootInfo { mode: CacheMode; plant: string | null; record: CacheRecord | null; notices: CacheNotice[] }
-export interface CacheStats { mode: CacheMode; failed: number; pending: number; lastChars: number; halted: boolean; seq: number }
+/** `failed` = cumulative put failures (history); `failedKeys` = records whose LAST put failed (a later success clears it);
+ *  `blocked` = browser storage is unavailable right now (mode 'none' alone also means "not opened yet"). */
+export interface CacheStats { mode: CacheMode; failed: number; failedKeys: number; blocked: boolean; pending: number; lastChars: number; halted: boolean; seq: number }
 
 /* ----------------------------------------------------------------- helpers */
 
@@ -69,6 +71,11 @@ const rowCount = (json: string): number => {
 /** Rows in a record's JSON, or null when it cannot be parsed as a record (never judged empty). */
 const rowsOf = (json: string): number | null => {
   try { const r = (JSON.parse(json) as { rows?: unknown } | null)?.rows; return Array.isArray(r) ? r.length : null; } catch { return null; }
+};
+
+/** The rows array of a record's JSON, or null when it cannot be parsed as a record. */
+const rowListOf = (json: string): unknown[] | null => {
+  try { const r = (JSON.parse(json) as { rows?: unknown } | null)?.rows; return Array.isArray(r) ? r : null; } catch { return null; }
 };
 
 /** The stored wrapper of one record, or null when it is not a usable wrapper. */
@@ -114,6 +121,15 @@ const quarantinedNow = new Set<string>();
 let plantScope: (() => string[] | null) | null = null;
 const allowedList = (): string[] | null => { try { const a = plantScope ? plantScope() : null; return Array.isArray(a) ? a : null; } catch { return null; } };
 let legacyCache: { raw: string; plant: string | null; dirty: boolean } | null | undefined;
+/** The username this page booted or signed in as (set by Session at the boot gate and in signIn). Edits held in memory belong
+ *  to it: a write for anybody else is refused, and only this user's session write can resume a halted tab. */
+let pageUser: string | null = null;
+/** The first user the store was opened for in this page load (the fallback when Session never named the page user). */
+let firstUser: string | null = null;
+/** Set when ready() was called for another user while halted: only a sign-in on this page (resume) lifts it. */
+let signInRequired = false;
+const resumeHooks = new Set<() => void>();
+const capturedUser = (): string | null => pageUser ?? firstUser ?? curUser;
 let notices: CacheNotice[] = [];
 let boot: BootInfo = { mode: 'none', plant: null, record: null, notices: [] };
 
@@ -178,15 +194,16 @@ function withdrawFromMarker(user: string, plant: string, clearIfEmptyAndPointed:
 }
 
 /** Plants of `user` whose stored record holds rows, read from storage (the marker's list is only a claim). */
-function scanDirty(user: string): { plants: string[]; seq: number; rows: Map<string, number> } {
-  const plants: string[] = []; let seq = 0; const rows = new Map<string, number>();
+function scanDirty(user: string): { plants: string[]; seq: number; rows: Map<string, number>; ids: Map<string, string[]> } {
+  const plants: string[] = []; let seq = 0; const rows = new Map<string, number>(); const ids = new Map<string, string[]>();
   for (const k of keysWithPrefix(LS_RECORD_PREFIX + user + '|')) {
     let rec: CacheRecord | null = null;
     try { const raw = lsOrNull()?.getItem(k); rec = raw ? parseStored(raw) : null; } catch { rec = null; }
-    const n = rec ? (rowsOf(rec.json) ?? 0) : 0;
-    if (rec && n > 0) { plants.push(rec.plant); rows.set(rec.plant, n); if (rec.seq > seq) seq = rec.seq; }
+    const list = rec ? rowListOf(rec.json) : null;
+    const n = list ? list.length : 0;
+    if (rec && list && n > 0) { plants.push(rec.plant); rows.set(rec.plant, n); ids.set(rec.plant, list.map(r => String((r as { id?: unknown } | null)?.id))); if (rec.seq > seq) seq = rec.seq; }
   }
-  return { plants, seq, rows };
+  return { plants, seq, rows, ids };
 }
 /** Highest seq in the marker and in the stored record for `key`, read cheaply (the wrapper's own `"seq"` precedes the payload). */
 function storedSeqFloor(key: string): number {
@@ -216,16 +233,19 @@ function putRecord(rec: CacheRecord): PutResult {
 }
 function removeRecord(key: string): void { try { lsOrNull()?.removeItem(LS_RECORD_PREFIX + key); } catch { /* ignore */ } }
 
-/** Copies an unusable record WHOLE to its own per-user quarantine key, then removes it from the record keys. Returns false
- *  (record left in place) when the copy is too big or cannot be stored: a record is never removed without a copy. */
+/** Copies an unusable record to its own per-user quarantine key, then removes it from the record keys. A record that fits the
+ *  cap is copied whole; a bigger one is copied truncated (it can never be parsed anyway) after raising `read_failed`, so it
+ *  cannot hold the plant's writes for the session. Returns false (record left in place) only when no copy can be stored: a
+ *  record is never removed without a copy. */
 function quarantine(key: string, raw: string): boolean {
-  if (raw.length > QUARANTINE_CAP_CHARS) { logWarn('cache record unparseable and too large to set aside, left in place', { key, chars: raw.length }); return false; }
-  try { lsOrNull()?.setItem(quarantineKeyOf(key), JSON.stringify({ key, at: Date.now(), chars: raw.length, raw })); }
+  const tooBig = raw.length > QUARANTINE_CAP_CHARS;
+  const copy = tooBig ? raw.slice(0, QUARANTINE_CAP_CHARS) : raw;
+  try { lsOrNull()?.setItem(quarantineKeyOf(key), JSON.stringify({ key, at: Date.now(), chars: raw.length, raw: copy, ...(tooBig ? { truncated: true } : {}) })); }
   catch (e) { logWarn('cache quarantine copy failed, record left in place', { error: errName(e), key }); return false; }
   removeRecord(key);
   quarantinedNow.add(key);
-  pushNotice('corrupt_record');
-  logWarn('cache record unparseable, quarantined', { key, chars: raw.length });
+  pushNotice(tooBig ? 'read_failed' : 'corrupt_record');
+  logWarn(tooBig ? 'cache record unparseable and too large, quarantined truncated' : 'cache record unparseable, quarantined', { key, chars: raw.length });
   return true;
 }
 
@@ -301,14 +321,16 @@ function loadBoot(user: string, marker: CacheMarker | null): BootInfo {
  *  (so the next autosave rewrites it and an empty write can no longer delete it); a vanished or clobbered marker has its dirty
  *  list recomputed from the stored records; only a full clear() drops everything this tab remembers. */
 function onStorage(e: { key?: string | null; newValue?: string | null }): void {
-  // A halted tab (signed out, reset) must never rebuild a marker from records that are about to be removed.
-  if (halted) return;
+  // Record events invalidate this tab's local view even while halted: a sign-out wipe in another tab removes the records, and a
+  // stale peek would make the first write after a resume look identical to what is "stored" and skip it.
   if (e.key == null) { peekMap.clear(); peekRows.clear(); return; }
   if (e.key.startsWith(LS_RECORD_PREFIX)) {
     const k = e.key.slice(LS_RECORD_PREFIX.length);
     peekMap.delete(k); peekRows.delete(k);
     return;
   }
+  // A halted tab (signed out, reset) must never rebuild a marker from records that are about to be removed.
+  if (halted) return;
   if (e.key !== MARKER_KEY || !curUser || mode === 'none') return;
   try {
     const m = e.newValue ? JSON.parse(e.newValue) as CacheMarker : null;
@@ -372,8 +394,12 @@ export const CacheStore = {
    */
   ready(user: string): Promise<BootInfo> {
     // Never lifts halt(): a load that resolves after sign-out must not revive the store. Only resume(user) does.
+    // A halted page asked to open the store for someone other than the user it was loaded for: only a sign-in lifts this.
+    const cap = capturedUser();
+    if (halted && ((curUser && curUser !== user) || (cap && cap !== user))) signInRequired = true;
     if (readyPromise && curUser === user) return readyPromise;
     if (curUser && curUser !== user) dropOtherUserState(curUser, user);
+    if (!firstUser) firstUser = user;
     curUser = user;
     try { readyPromise = Promise.resolve(initStore(user)); } catch { readyPromise = Promise.resolve(boot); }
     return readyPromise;
@@ -381,9 +407,33 @@ export const CacheStore = {
 
   /** Lifts halt() for a signed-in `user` (the sign-in path). A different user than the one this page was opened for starts clean. */
   resume(user: string): void {
-    halted = false;
+    const wasHalted = halted;
+    halted = false; signInRequired = false; pageUser = user;
     if (curUser && curUser !== user) { dropOtherUserState(curUser, user); curUser = null; readyPromise = null; }
+    else if (wasHalted) { peekMap.clear(); peekRows.clear(); }
+    // The record keys changed while this tab was halted (and the edits held here were not written): re-store them once.
+    if (wasHalted) for (const h of [...resumeHooks]) { try { h(); } catch { /* a hook never breaks resume */ } }
   },
+
+  /** The storage-event resume: only for the user this page was loaded for, and never after the page was asked to open the store
+   *  for someone else while halted (sign-in required). Returns true when it resumed. */
+  resumeSameUser(user: string): boolean {
+    if (!halted || signInRequired) return false;
+    const cap = capturedUser();
+    if (!cap || user !== cap) return false;
+    CacheStore.resume(user);
+    return true;
+  },
+
+  /** Registers a callback run once whenever resume() lifts a halt (Persistence re-stores its in-memory edits). Returns the unsubscribe. */
+  onResume(fn: () => void): () => void { resumeHooks.add(fn); return () => { resumeHooks.delete(fn); }; },
+
+  /** Names the user this page booted or signed in as (see pageUser). */
+  setPageUser(user: string | null): void { pageUser = user || null; },
+  /** The user this page holds edits for (null when never named). */
+  pageUser(): string | null { return pageUser; },
+  /** pageUser, else the first user the store was opened for, else the current store user. */
+  capturedUser(): string | null { return capturedUser(); },
 
   /** The user this store was opened for (null before ready()). */
   user(): string | null { return curUser; },
@@ -411,10 +461,10 @@ export const CacheStore = {
 
   /** Unsaved rows per plant stored for `user`, read from storage (every record, whatever the marker or the plant scope says).
    *  Reset and sign-out use it: they wipe every stored record, so every stored row must be counted. */
-  dirtyFromStorage(user: string): Array<{ plant: string; rows: number }> {
+  dirtyFromStorage(user: string): Array<{ plant: string; rows: number; ids: string[] }> {
     if (!user || user === 'system') return [];
     const s = scanDirty(user);
-    return s.plants.map(plant => ({ plant, rows: s.rows.get(plant) ?? 0 }));
+    return s.plants.map(plant => ({ plant, rows: s.rows.get(plant) ?? 0, ids: s.ids.get(plant) ?? [] }));
   },
 
   /** Tells the store which plants the signed-in user may open (null = unknown or unrestricted); see plantScope. */
@@ -459,6 +509,8 @@ export const CacheStore = {
     try {
       if (halted) return { ok: false, skipped: true, reason: 'halted' };
       if (!meta.user || meta.user === 'system') return { ok: false, skipped: true, reason: 'system-actor' };
+      // This page's in-memory edits belong to the user it was loaded for; never file them under whoever is signed in now.
+      if (pageUser && meta.user !== pageUser) return { ok: false, skipped: true, reason: 'wrong-user' };
       if (!meta.plant) return { ok: false, skipped: true, reason: 'no-plant' };
       if (mode === 'none') return { ok: false, skipped: true, reason: 'not-ready' };
       const key = keyOf(meta.user, meta.plant);
@@ -562,7 +614,7 @@ export const CacheStore = {
   halt(): void { halted = true; },
 
   stats(): CacheStats {
-    return { mode, failed: failedCount, pending: 0, lastChars, halted, seq: seqCounter };
+    return { mode, failed: failedCount, failedKeys: failedKeys.size, blocked: !lsOrNull(), pending: 0, lastChars, halted, seq: seqCounter };
   },
 
   /** One-shot notices raised since the last call (put failure, older record restored, dirty marker without a record, corrupt record, other dirty plants). */
@@ -570,10 +622,10 @@ export const CacheStore = {
 
   /**
    * Imports the old `nimbus.state.v3` blob as this user+plant's record when none exists yet, then removes the legacy key.
-   * A put that hits the quota frees the blob (its content is in memory) and retries once; `keepLegacy` leaves the blob for the
-   * caller to drop once every plant is settled.
+   * A put that hits the quota frees the blob (its content is in memory) and retries once. The caller (Persistence) removes the
+   * blob after its single attempt whatever happened here.
    */
-  async importLegacy(rawJson: string, plant: string, user: string, opts: { converted?: boolean; dirty?: boolean; keepLegacy?: boolean; loadedPlant?: string | null } = {}): Promise<{ imported: boolean; reason?: string }> {
+  async importLegacy(rawJson: string, plant: string, user: string, opts: { converted?: boolean; dirty?: boolean; loadedPlant?: string | null } = {}): Promise<{ imported: boolean; reason?: string }> {
     if (halted) return { imported: false, reason: 'halted' };
     if (!rawJson || !plant || !user || user === 'system') return { imported: false, reason: 'bad-args' };
     if (mode === 'none') return { imported: false, reason: 'not-ready' };
@@ -600,7 +652,7 @@ export const CacheStore = {
     touchMarker(user, plant, !!opts.dirty, rec.seq);
     // Kept edits for a plant other than the one being loaded are announced like the boot's other dirty plants.
     if (opts.dirty && opts.loadedPlant && opts.loadedPlant !== plant) pushNotice('other_dirty_plants');
-    if (!opts.keepLegacy) dropLegacyBlob();
+    dropLegacyBlob();
     return { imported: true };
   },
 
@@ -609,6 +661,7 @@ export const CacheStore = {
     mode = 'none'; curUser = null; readyPromise = null; halted = false;
     seqCounter = 0; failedCount = 0; lastChars = 0; notifiedFail = false;
     failedKeys.clear(); peekMap.clear(); peekRows.clear(); lastSeqWritten.clear(); readFailed.clear(); quarantinedNow.clear(); legacyCache = undefined;
+    pageUser = null; firstUser = null; signInRequired = false;
     notices = [];
     boot = { mode: 'none', plant: null, record: null, notices: [] };
   },

@@ -130,15 +130,16 @@ function presenterDeps({ pending = false, confirmResult = true, staticMarkup = t
     banner.appendChild(makeEl('update-banner-dismiss', doc, 'button'));
   }
   const confirms = [];
+  const pendingArgs = [];
   let reloads = 0, layouts = 0;
   return {
-    doc, confirms, reloads: () => reloads, layouts: () => layouts,
+    doc, confirms, pendingArgs, reloads: () => reloads, layouts: () => layouts,
     banners: () => doc.querySelectorAll('#update-banner'),
     banner: () => doc.getElementById('update-banner'),
     click: id => doc.getElementById(id).dispatch('click'),
     deps: {
       Util: { t: k => k },
-      Persistence: { hasPendingWork: () => pending },
+      Persistence: { hasPendingWork: (includeStored) => { pendingArgs.push(includeStored); return pending; } },
       Modal: { confirm: async o => { confirms.push(o); return confirmResult; } },
       reload: () => { reloads++; },
       doc,
@@ -253,4 +254,12 @@ test('without the static markup the presenter builds exactly one wired strip aft
   assert.equal(p.doc.getElementById('update-banner-refresh').textContent, 'toast.update_refresh');
   assert.equal(p.doc.getElementById('update-banner-dismiss').getAttribute('aria-label'), 'btn.dismiss');
   assert.equal(p.doc.getElementById('update-banner-refresh').listeners.click.length, 1);
+});
+
+test('A4 n3 the Refresh banner asks about in-memory work only: edits a reload keeps never prompt', async () => {
+  const p = presenterDeps({ pending: false });
+  makeUpdatePresenter(p.deps)('b2');
+  p.click('update-banner-refresh'); await flush();
+  assert.deepEqual(p.pendingArgs, [false], 'hasPendingWork(false): stored rows are not counted');
+  assert.equal(p.reloads(), 1);
 });

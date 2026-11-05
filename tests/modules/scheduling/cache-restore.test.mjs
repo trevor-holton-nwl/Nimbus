@@ -18,6 +18,7 @@ import { App } from '../../../frontend/shell/application-shell.mjs';
 import { UnsavedDialog } from '../../../frontend/scheduling/unsaved-dialog.mjs';
 import { Inspector } from '../../../frontend/scheduling/orders.mjs';
 import { ToolInventory } from '../../../frontend/master-data/tool-inventory.mjs';
+import { convertLegacyStatePlants, serializeCacheRecord } from '../../../frontend/scheduling/cache-record.mjs';
 import { resetCacheEnv, readRecord, simulateReload, CACHE_USER } from '../helpers/cache-env.mjs';
 
 globalThis.NimbusComputeCore = globalThis.NimbusComputeCore || createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
@@ -52,7 +53,8 @@ function fixture(t, n = 6) {
   t.mock.method(Alerts, 'scheduleRecompute', () => {});
   for (const k of ['_dirtyIds', '_forceIds', '_conflictedIds', '_firmDirtyIds', '_dirtySource', '_refreshRetry']) Persistence[k].clear();
   Persistence._savedBaseline.clear();
-  Persistence._cacheWritesHalted = false; Persistence._cacheHoldPlant = null; Persistence._applyContext = null;
+  Persistence._cacheWritesHalted = false; Persistence._leaving = false; Persistence._cacheHoldPlant = null; Persistence._applyContext = null;
+  Persistence._announcedKept = null;
   Store.setMasterData({ plants: [{ plant: 'P', routing_runtime_enabled: true, split_order_policy: 'partial_allowed',
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }], lines: [] }, 'test');
   const priorOffset = Store.serverOffsetMs;
@@ -754,23 +756,6 @@ test('F3c the legacy blob is freed when the first put hits the quota (not before
   assert.equal(lostToasts(f).length, 0);
 });
 
-test('A3 m2 a legacy import that fails for a reason that is not about the data keeps the blob for the next boot (no early drop)', async t => {
-  const f = fixture(t, 3);
-  f.lsf.map.clear();
-  const blob = legacyBlob('P', [legacyTask('L1', 'P'), legacyTask('L2', 'P')]);
-  f.lsf.ls.setItem(Config.LS_KEY, blob);
-  await simulateReload();
-  f.lsf.ctl.failGet = k => k === LS_RECORD_PREFIX + `${CACHE_USER}|P`;      // the stored record cannot be read right now
-  await Persistence._migrateLegacyCache(CACHE_USER);
-  assert.equal(f.lsf.map.get(Config.LS_KEY), blob, 'the blob is still there');
-  assert.equal(lostToasts(f).length, 0, 'nothing is declared lost');
-  f.lsf.ctl.failGet = null;
-  await simulateReload();
-  await Persistence._migrateLegacyCache(CACHE_USER);                         // the next boot converts it
-  assert.equal(JSON.parse(CacheStore.peek('P').json).rows.length, 2);
-  assert.equal(f.lsf.map.has(Config.LS_KEY), false);
-});
-
 test('A3 M2 unsavedCount and hasPendingWork count the stored rows of other plants; the page-leave check does not', async t => {
   fixture(t, 3); await CacheStore.ready(CACHE_USER);
   assert.equal(Persistence.unsavedCount(), 0);
@@ -872,4 +857,198 @@ test('F1 boot toasts: a second plant with kept unsaved changes is named; a damag
   Persistence._raiseCacheNotices();
   assert.equal(f.toasts.filter(x => x.msg === 'toast.cache_corrupt_record').length, 1, 'quarantined: told once');
   assert.equal(f.lsf.map.has(recKey('Q')), false);
+});
+
+/* ------------------------------------------------ Review A4: one-shot legacy import, wrong-user, counts, notices */
+
+const recordFor = (plant, ids) => convertLegacyStatePlants(legacyBlob(plant, ids.map(i => legacyTask(i, plant))), CACHE_USER, Config.SCHEMA_VERSION, Config.BUILD_ID).plants[0].record;
+
+test('A4 J3 the legacy import is ONE attempt: a read failure counts the rows as lost, still removes the blob, and later loads say nothing (the old keep-for-next-boot path is gone)', async t => {
+  const f = fixture(t, 3);
+  f.lsf.map.clear();
+  f.lsf.ls.setItem(Config.LS_KEY, legacyBlob('P', [legacyTask('L1', 'P'), legacyTask('L2', 'P')]));
+  await simulateReload();
+  f.lsf.ctl.failGet = k => k === LS_RECORD_PREFIX + `${CACHE_USER}|P`;      // the stored record cannot be read right now
+  await Persistence._migrateLegacyCache(CACHE_USER);
+  assert.equal(f.lsf.map.has(Config.LS_KEY), false, 'the blob is removed after the single attempt');
+  assert.equal(lostToasts(f).length, 1);
+  f.lsf.ctl.failGet = null;
+  f.toasts.length = 0;
+  await simulateReload();
+  await Persistence._migrateLegacyCache(CACHE_USER);                         // the next boot: nothing to import, nothing to announce
+  assert.equal(lostToasts(f).length, 0, 'no repeated toast');
+  assert.equal(CacheStore.peek('P'), null, 'and the lost edits are not resurrected');
+});
+
+test('A4 J3 every failure reason counts the rows and removes the blob: halted store, store not opened, quota after the retry', async t => {
+  const f = fixture(t, 3);
+  const attempt = async setup => {
+    f.lsf.map.clear(); f.toasts.length = 0;
+    f.lsf.ls.setItem(Config.LS_KEY, legacyBlob('P', [legacyTask('L1', 'P'), legacyTask('L2', 'P'), legacyTask('L3', 'P')]));
+    await simulateReload();
+    setup();
+    await Persistence._migrateLegacyCache(CACHE_USER);
+    assert.equal(f.lsf.map.has(Config.LS_KEY), false, 'blob always removed');
+    return lostToasts(f);
+  };
+  assert.equal((await attempt(() => CacheStore.halt())).length, 1, 'halted');
+  assert.equal((await attempt(() => CacheStore._setBackendForTests())).length, 1, 'not ready');
+  assert.equal((await attempt(() => { f.lsf.ctl.quotaChars = 200; })).length, 1, 'quota even after the blob was freed');
+  f.lsf.ctl.quotaChars = Infinity;
+});
+
+test('A4 J3 the toast carries the exact number of rows that could not be imported (per plant, summed)', async t => {
+  const f = fixture(t, 3);
+  const calls = [];
+  const realT = Util.t;
+  t.mock.method(Util, 't', (k, p) => { calls.push([k, p]); return realT.call(Util, k, p); });
+  f.lsf.map.clear();
+  f.lsf.ls.setItem(Config.LS_KEY, legacyBlob(null, [legacyTask('L1', 'Q'), legacyTask('L2', 'Q'), legacyTask('L3', 'Z')]));
+  await simulateReload();
+  // plant Q already has a record holding only L1: its 2 blob rows are not covered; plant Z imports fine
+  CacheStore.write({ user: CACHE_USER, plant: 'Q', dirty: true, rows: 1 }, serializeCacheRecord(recordFor('Q', ['L1'])));
+  await Persistence._migrateLegacyCache(CACHE_USER);
+  const lost = calls.filter(([k]) => k === 'toast.cache_changes_lost');
+  assert.equal(lost.length, 1);
+  assert.equal(lost[0][1].count, 2);
+  assert.equal(JSON.parse(CacheStore.peek('Z').json).rows.length, 1, 'Z imported');
+});
+
+test('A4 J3 a plant whose record already holds every edit the blob had is not a loss; one that misses an id is', async t => {
+  const f = fixture(t, 3);
+  f.lsf.map.clear();
+  await simulateReload();
+  // the record the new build wrote already has L1, L2 and one more
+  CacheStore.write({ user: CACHE_USER, plant: 'P', dirty: true, rows: 3 }, serializeCacheRecord(recordFor('P', ['L1', 'L2', 'L9'])));
+  f.lsf.ls.setItem(Config.LS_KEY, legacyBlob('P', [legacyTask('L1', 'P'), legacyTask('L2', 'P')]));
+  CacheStore._setBackendForTests(); await CacheStore.ready(CACHE_USER);
+  await Persistence._migrateLegacyCache(CACHE_USER);
+  assert.equal(lostToasts(f).length, 0, 'the same edits are already stored: nothing lost');
+  assert.equal(f.lsf.map.has(Config.LS_KEY), false);
+  f.lsf.ls.setItem(Config.LS_KEY, legacyBlob('P', [legacyTask('L1', 'P'), legacyTask('L4', 'P')]));
+  CacheStore._setBackendForTests(); await CacheStore.ready(CACHE_USER);
+  await Persistence._migrateLegacyCache(CACHE_USER);
+  assert.equal(lostToasts(f).length, 1, 'L4 is not in the stored record: lost');
+});
+
+test('A4 J4 edits the planner discarded are not re-imported on a later load, and the blob is gone even when a quota retry freed it', async t => {
+  const f = fixture(t, 3);
+  f.lsf.map.clear();
+  f.lsf.ls.setItem(Config.LS_KEY, legacyBlob('P', [legacyTask('L1', 'P')]));
+  await simulateReload();
+  f.lsf.ctl.failNext = 1;                                                      // quota once: importLegacy frees the blob and retries
+  await Persistence._migrateLegacyCache(CACHE_USER);
+  assert.ok(CacheStore.peek('P'));
+  assert.equal(f.lsf.map.has(Config.LS_KEY), false);
+  await CacheStore.discard('P');                                               // the planner discards them
+  await simulateReload();
+  await Persistence._migrateLegacyCache(CACHE_USER);
+  assert.equal(CacheStore.peek('P'), null, 'not resurrected');
+  assert.equal(lostToasts(f).length, 0);
+});
+
+test('A4 n10 a legacy blob not yet imported counts as unsaved work at Reset/sign-out time; after the attempt it is the stored record', async t => {
+  const f = fixture(t, 3);
+  f.lsf.map.clear();
+  f.lsf.ls.setItem(Config.LS_KEY, legacyBlob('Q', [legacyTask('L1', 'Q'), legacyTask('L2', 'Q')]));
+  CacheStore._setBackendForTests(); await CacheStore.ready(CACHE_USER);
+  assert.equal(Persistence.unsavedCount(), 2);
+  assert.equal(Persistence.hasPendingWork(), true);
+  assert.equal(Persistence.hasPendingWork(false), false, 'a reload still imports it');
+  await Persistence._migrateLegacyCache(CACHE_USER, 'P');
+  assert.equal(Persistence._legacyDirty(), 0);
+  assert.equal(Persistence.unsavedCount(), 2, 'now it is the stored record of plant Q');
+});
+
+test('A4 J2 a stale tab whose actor became someone else never files its in-memory edits under the new user', async t => {
+  const f = fixture(t, 3);
+  CacheStore.setPageUser(CACHE_USER);
+  await CacheStore.ready(CACHE_USER);
+  Store.updateMany([shiftDay('R0', 2)], 'table');
+  Persistence._saveCache();
+  assert.ok(f.lsf.map.get(recKey('P')), 'the page user\'s own edits are stored for them');
+  Util.setActorResolver(() => 'bob');                                            // a superseded load made the actor bob
+  Store.updateMany([shiftDay('R1', 2)], 'table');
+  Persistence._saveCache();
+  assert.equal(f.lsf.map.has(`${LS_RECORD_PREFIX}bob|P`), false, 'nothing under bob');
+  assert.equal(JSON.parse(CacheStore.peek('P').json).rows.length, 1, 'the page user\'s record was not rewritten either');
+});
+
+test('A4 J1 resume hook: Persistence re-stores its in-memory edits once after a halted tab resumes', async t => {
+  const f = fixture(t, 3);
+  CacheStore.setPageUser(CACHE_USER);
+  await CacheStore.ready(CACHE_USER);
+  Store.updateMany([shiftDay('R0', 2)], 'table');
+  Persistence._saveCache();
+  CacheStore.halt();
+  f.lsf.map.delete(recKey('P')); f.lsf.map.delete(MARKER_KEY);                   // another tab's sign-out wipe
+  CacheStore._storageEventForTests({ key: recKey('P'), newValue: null });
+  assert.equal(f.lsf.map.has(recKey('P')), false);
+  CacheStore.resume(CACHE_USER);
+  assert.equal(JSON.parse(f.lsf.map.get(recKey('P'))).json.includes('R0'), true, 'the unbacked edit is on disk again');
+  assert.equal(JSON.parse(f.lsf.map.get(MARKER_KEY)).dirtyPlants[0], 'P');
+});
+
+test('A4 n2 the loaded plant counts the union of stored and in-memory ids and is never listed as an "other" plant', async t => {
+  fixture(t, 3);
+  Store.updateMany([shiftDay('R0', 2), shiftDay('R1', 2)], 'table');
+  Persistence._saveCache();                                                      // stored: R0, R1
+  Persistence._dirtyIds.delete('R1');                                            // an undo settled R1 in memory; the autosave has not run
+  assert.deepEqual(Persistence.unsavedOtherPlants(), [], 'the loaded plant is not "other"');
+  assert.equal(Persistence.unsavedCount(), 2, 'union of stored {R0,R1} and memory {R0}');
+  Persistence._dirtyIds.add('R2');
+  assert.equal(Persistence.unsavedCount(), 3, 'union with a memory-only id');
+});
+
+test('A4 n4 a confirmed Reset or sign-out sets the leaving flag so beforeunload never prompts', async t => {
+  fixture(t, 3);
+  const evt = () => ({ prevented: false, returnValue: undefined, preventDefault() { this.prevented = true; } });
+  Persistence._dirtyIds.add('R0');
+  let e = evt(); Persistence._beforeUnload(e);
+  assert.equal(e.prevented, true, 'unsaved work prompts on an ordinary leave');
+  Persistence.haltCacheWrites();                                                  // what a confirmed Reset or sign-out does first
+  e = evt(); Persistence._beforeUnload(e);
+  assert.equal(e.prevented, false, 'no prompt once leaving on purpose');
+  Persistence._leaving = false;
+});
+
+test('A4 n5/n6/n7 storageInventory: degraded clears after a later good write, paused is a halt, a never-opened store is not blocked', async t => {
+  const f = fixture(t, 3);
+  await CacheStore.ready(CACHE_USER);
+  f.lsf.ctl.quotaChars = 0;
+  Store.updateMany([shiftDay('R0', 2)], 'table');
+  Persistence._saveCache();
+  assert.equal(Persistence.storageInventory().degraded, true);
+  f.lsf.ctl.quotaChars = Infinity;
+  Store.updateMany([shiftDay('R1', 2)], 'table');
+  Persistence._saveCache();
+  let inv = Persistence.storageInventory();
+  assert.equal(inv.degraded, false, 'a later successful write clears it');
+  assert.equal(inv.paused, false);
+  CacheStore.halt();
+  inv = Persistence.storageInventory();
+  assert.equal(inv.paused, true, 'a halt is paused, not "last write failed"');
+  assert.equal(inv.degraded, false);
+  CacheStore._setBackendForTests();                                              // store never opened (no plant loaded)
+  inv = Persistence.storageInventory();
+  assert.equal(inv.mode, 'none');
+  assert.equal(inv.blocked, false, 'not opened is not blocked');
+  assert.equal(inv.degraded, false);
+});
+
+test('A4 n9 a dirty plant hidden by a stale plant scope at boot is announced once after Session.refresh widens the scope', async t => {
+  const f = fixture(t, 3);
+  await CacheStore.ready(CACHE_USER);
+  CacheStore.write({ user: CACHE_USER, plant: 'Q', dirty: true, rows: 1 }, JSON.stringify({ rows: [{ id: 'x' }] }));
+  Store.setAllowedPlantsResolver(() => ['P']);
+  try {
+    f.toasts.length = 0;
+    Store.emit({ type: 'session:changed', kind: 'refresh' });
+    assert.equal(f.toasts.filter(x => x.msg === 'toast.cache_other_plants').length, 0, 'still hidden: nothing to say');
+    Store.setAllowedPlantsResolver(() => ['P', 'Q']);
+    Store.emit({ type: 'session:changed', kind: 'refresh' });
+    assert.equal(f.toasts.filter(x => x.msg === 'toast.cache_other_plants').length, 1, 'now visible: announced');
+    Store.emit({ type: 'session:changed', kind: 'refresh' });
+    assert.equal(f.toasts.filter(x => x.msg === 'toast.cache_other_plants').length, 1, 'the list did not change: not again');
+  } finally { Store.setAllowedPlantsResolver(() => null); }
 });

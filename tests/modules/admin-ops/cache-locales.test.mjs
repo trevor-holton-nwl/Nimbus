@@ -25,7 +25,9 @@ const KEYS = ['toast.cache_put_failed', 'toast.cache_older_record', 'toast.cache
   'modal.ls_inventory_title', 'modal.ls_inventory_msg', 'modal.ls_inv_total', 'modal.ls_inv_snapshot', 'modal.ls_inventory_top_keys',
   'sig.browser_backup_failed', 'sig.browser_backup_blocked', 'attn.autosave', 'diag.line_client',
   // review A3: halt from another tab, other plants named in Reset, edits lost to an expired session
-  'toast.cache_halted_other_tab', 'modal.reset_client_pending_plants', 'sec.session_expired_lost'];
+  'toast.cache_halted_other_tab', 'modal.reset_client_pending_plants', 'sec.session_expired_lost',
+  // review A4: a halt shows as paused, not as a failed write
+  'ui.ls_paused', 'sig.browser_backup_paused', 'attn.autosave_paused'];
 
 const DEAD = ['sig.data_cached', 'toast.cache_cleared', 'btn.clear_cache', 'toast.loaded_cache', 'toast.backend_unreachable_cache',
   'modal.storage_inventory_title', 'modal.storage_inventory_msg', 'modal.storage_inventory_confirm', 'ui.ls_quota_disabled',

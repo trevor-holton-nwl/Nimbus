@@ -107,16 +107,22 @@ test('m1 wipe and discard remove the record keys BEFORE the marker', async () =>
 
 /* ---------------------------------------------------------------- m4 */
 
-test('m4 an oversize unparseable record is NOT removed (no copy fits): it stays and writes for the plant are held', async () => {
+test('A4 n1 an oversize unparseable record is told once (read_failed), copied capped, then REMOVED so writes resume (the old "left in place, held forever" rule is gone on purpose)', async () => {
   lsf.ls.setItem(MARKER_KEY, JSON.stringify({ v: 1, plant: 'P1', seq: 4, user: U, dirty: true, dirtyPlants: ['P1'] }));
   const garbage = '{"key":"alice|P1","json":' + 'z'.repeat(QUARANTINE_CAP_CHARS + 10);
   lsf.ls.setItem(recKey('P1'), garbage);
   const boot = await CacheStore.ready(U);
-  assert.equal(lsf.ls.getItem(recKey('P1')), garbage, 'the record is still there');
-  assert.equal(boot.notices.includes('read_failed'), true);
-  assert.equal(boot.notices.includes('corrupt_record'), false, 'no "a copy was set aside" claim');
-  assert.equal(CacheStore.write(meta('P1', 1), rec(1)).reason, 'read-failed', 'writes for that plant are held');
-  assert.equal([...lsf.map.keys()].some(k => k.startsWith(QUARANTINE_KEY)), false);
+  assert.equal(lsf.ls.getItem(recKey('P1')), null, 'the record is removed');
+  assert.equal(boot.notices.includes('read_failed'), true, 'the user is told');
+  assert.equal(boot.notices.includes('corrupt_record'), false);
+  assert.equal(boot.notices.includes('dirty_no_record'), false, 'no second notice for the same key');
+  const q = JSON.parse(lsf.ls.getItem(`${QUARANTINE_KEY}.alice|P1`));
+  assert.equal(q.raw.length, QUARANTINE_CAP_CHARS, 'the copy is capped');
+  assert.equal(q.truncated, true);
+  assert.equal(CacheStore.write(meta('P1', 1), rec(1)).ok, true, 'writes for that plant resume');
+  // a later boot reads no error
+  CacheStore._setBackendForTests();
+  assert.equal((await CacheStore.ready(U)).notices.includes('read_failed'), false);
 });
 
 test('m4 when the quarantine copy cannot be stored the record stays and is held', async () => {
@@ -196,6 +202,6 @@ test('M2 dirtyFromStorage sums this user\'s stored rows per plant (every record,
   CacheStore.write(meta('A', 3), rec(3));
   CacheStore.write(meta('B', 2), rec(2));
   foreign('C', 5, 1, 'bob');
-  assert.deepEqual(CacheStore.dirtyFromStorage(U).sort((a, b) => a.plant.localeCompare(b.plant)), [{ plant: 'A', rows: 3 }, { plant: 'B', rows: 2 }]);
+  assert.deepEqual(CacheStore.dirtyFromStorage(U).sort((a, b) => a.plant.localeCompare(b.plant)), [{ plant: 'A', rows: 3, ids: ['R0', 'R1', 'R2'] }, { plant: 'B', rows: 2, ids: ['R0', 'R1'] }]);
   assert.deepEqual(CacheStore.dirtyFromStorage('system'), []);
 });

@@ -705,6 +705,7 @@ export const AdminCockpit = {
         build: Config.BUILD_ID,
         autosave: AdminCockpit._backupLabel(inv),
         degraded: !!inv.degraded,
+        paused: !!inv.paused,
         errRate: ErrorLog.errorRatePerMin(),
       };
       if (mem) { c.heapUsed = mem.usedJSHeapSize; c.heapLimit = mem.jsHeapSizeLimit; }
@@ -1257,8 +1258,8 @@ export const AdminCockpit = {
     const s = A._ovSlow;
     let st: ReturnType<typeof Persistence.stats> | null = null;
     try { st = Persistence.stats ? Persistence.stats() : null; } catch { st = null; }
-    let inv: { degraded?: boolean; blocked?: boolean } = {};
-    try { const si = Persistence.storageInventory(); inv = { degraded: si.degraded, blocked: backupState(si) === 'blocked' }; } catch { inv = {}; }
+    let inv: { degraded?: boolean; blocked?: boolean; paused?: boolean } = {};
+    try { const si = Persistence.storageInventory(); inv = { degraded: si.degraded, blocked: si.blocked, paused: si.paused }; } catch { inv = {}; }
     const mem = (typeof performance !== 'undefined'
       ? (performance as Performance & { memory?: ChromePerformanceMemory }).memory : undefined);
     const newestUpload = s.uploadAudit[0];
@@ -3140,9 +3141,9 @@ export const AdminCockpit = {
   },
 
   /** The translated backup state: backed up, last write failed, or browser storage blocked. */
-  _backupLabel(inv: { degraded?: boolean; mode?: string }): string {
+  _backupLabel(inv: { degraded?: boolean; blocked?: boolean; paused?: boolean }): string {
     const st = backupState(inv);
-    return Util.t(st === 'blocked' ? 'ui.ls_blocked' : st === 'failed' ? 'ui.ls_degraded' : 'ui.ls_healthy');
+    return Util.t(st === 'blocked' ? 'ui.ls_blocked' : st === 'paused' ? 'ui.ls_paused' : st === 'failed' ? 'ui.ls_degraded' : 'ui.ls_healthy');
   },
 
   async _resetClientState(): Promise<void> {

@@ -116,7 +116,11 @@ test('storage units: one unit (chars), shown as thousands; backup state from the
   assert.equal(fmtKChars(undefined), '0.0');
   assert.equal(backupState({ degraded: false, mode: 'localstorage' }), 'ok');
   assert.equal(backupState({ degraded: true, mode: 'localstorage' }), 'failed');
-  assert.equal(backupState({ degraded: true, mode: 'none' }), 'blocked');
+  // A4 n6/n7: only a real storage block is "blocked" (mode 'none' alone is "not opened yet"); a halt is "paused"
+  assert.equal(backupState({ degraded: false, mode: 'none' }), 'ok');
+  assert.equal(backupState({ degraded: true, blocked: true }), 'blocked');
+  assert.equal(backupState({ paused: true, degraded: true }), 'paused');
+  assert.equal(backupState({ paused: true, blocked: true }), 'blocked');
   assert.equal(backupState({}), 'ok');
 });
 
