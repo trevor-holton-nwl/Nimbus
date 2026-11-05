@@ -594,8 +594,29 @@ test('computeAlerts raises runtime-unknown for a task held with planning_reason.
   assert.equal(hits[0].sev, 'err');
   assert.equal(hits[0].taskId, 'held-1');
   assert.equal(hits[0].line, 'L1');
-  // The resolver's own message is used verbatim, not re-worded/re-translated.
-  assert.equal(hits[0].msg, t.planning_reason.message);
+  // The message names the order and the routing step (keyed for localization).
+  assert.equal(hits[0].msgKey, 'alert.runtime_unknown');
+  assert.deepEqual(hits[0].msgVars, { order: 'PO-9', step: 'workcenter_unmapped' });
+  assert.match(hits[0].msg, /PO-9/);
+  assert.match(hits[0].msg, /workcenter_unmapped/);
+});
+
+test('runtime-unknown is dated by the order due date when the held order has no start', () => {
+  const due = new Date(2026, 9, 20, 0, 0, 0);
+  const t = {
+    id: 'held-3', ORDER: 'PO-3', MACHINE: 'L1', RUN_TIME: 0, PLANT: 'P',
+    planning_status: 'needs_planning',
+    planning_reason: { code: 'runtime_unknown', step: 'pv_not_found' },
+    start_date: null, end_date: null, original_end_date: due,
+  };
+  const res = Core.computeAlerts({
+    tasks: [t], blocks: [], plantBlocks: [], calendars: {}, plants: {},
+    lineSettings: {}, masterData: noPlant, dismissed: [], opts: {},
+    now: { P: new Date(2026, 10, 4, 20, 13) },
+  });
+  const hit = res.alerts.find(a => a.type === 'runtime-unknown');
+  assert.ok(hit.time instanceof Date);
+  assert.equal(hit.time.getFullYear() * 10000 + (hit.time.getMonth() + 1) * 100 + hit.time.getDate(), 20261020);
 });
 
 test('computeAlerts does not raise runtime-unknown for needs_planning held for an unrelated reason', () => {

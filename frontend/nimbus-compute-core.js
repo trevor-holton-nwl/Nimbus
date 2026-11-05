@@ -1501,14 +1501,15 @@
 
   // RUNTIME-UNKNOWN: held in Needs Planning because the routing resolver could not determine a run time.
   function ruleRuntimeUnknown(ctx) {
-    const { onlyLines, tasks, orderNumber, fallbackTime, plantOf } = ctx;
+    const { onlyLines, tasks, orderNumber, fallbackTime, plantOf, dayWindowForLine } = ctx;
     const alerts = [];
     // RUNTIME-UNKNOWN (ROUTING_RUNTIME_DESIGN.md §8.6) — a task held in Needs
     // Planning specifically because the routing resolver (backend/routing/resolver.py
     // §5.2) couldn't determine a run time, distinguished from any OTHER
     // needs_planning reason by planning_reason.code. One alert per affected
-    // task; the message is the resolver's own already-i18n'd text
-    // (planning_reason.message) — never re-translated or re-worded here.
+    // task. The message names the order and the failing routing step (keyed,
+    // alert.runtime_unknown); the alert is dated by the order's due instant
+    // (original_end_date) since a held order has no start, else the plant now.
     const runtimeUnknownTasks = onlyLines
       ? tasks.filter(t => onlyLines.has(lineOf(t)))
       : tasks;
@@ -1516,10 +1517,15 @@
       const reason = t.planning_reason;
       if (t.planning_status !== 'needs_planning' || !reason || reason.code !== 'runtime_unknown') continue;
       const line = lineOf(t);
+      const order = orderNumber(t);
+      const step = String(reason.step || 'unknown');
+      const rawDue = parseDate(t.original_end_date);
+      const due = rawDue ? dueDateInstant(rawDue, dayWindowForLine(line)) : null;
       alerts.push({
         id: `runtime-unknown-${t.id}`, sev: 'err', type: 'runtime-unknown',
-        msg: reason.message || `Order "${orderNumber(t)}" runtime could not be resolved (step: ${reason.step}).`,
-        taskId: t.id, line, time: t.start_date || fallbackTime(t.PLANT || plantOf(line)),
+        msg: `Order "${order}": run time could not be resolved from routing (step: ${step}).`,
+        msgKey: 'alert.runtime_unknown', msgVars: { order, step },
+        taskId: t.id, line, time: t.start_date || (due instanceof Date && !isNaN(due) ? due : null) || fallbackTime(t.PLANT || plantOf(line)),
       });
     }
     return alerts;

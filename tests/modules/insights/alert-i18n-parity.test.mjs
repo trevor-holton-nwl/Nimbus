@@ -22,9 +22,8 @@ for (const l of LOCALES) {
   dicts[l] = win.__NIMBUS_LOCALES[l];
 }
 
-// Alert types whose message is deliberately NOT keyed. runtime-unknown carries the routing resolver's own, already
-// translated text (planning_reason.message); the core must never re-word it.
-const ALLOW_UNKEYED = new Set(['runtime-unknown']);
+// Alert types whose message is deliberately NOT keyed (none now: runtime-unknown is keyed as alert.runtime_unknown).
+const ALLOW_UNKEYED = new Set([]);
 
 const render = (tpl, vars) => tpl.replace(/\{\{(\w+)\}\}/g, (_, k) => String(vars?.[k] ?? ''));
 const placeholders = tpl => [...tpl.matchAll(/\{\{(\w+)\}\}/g)].map(m => m[1]);
