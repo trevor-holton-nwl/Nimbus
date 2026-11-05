@@ -107,13 +107,14 @@ test('m1 wipe and discard remove the record keys BEFORE the marker', async () =>
 
 /* ---------------------------------------------------------------- m4 */
 
-test('A4 n1 an oversize unparseable record is told once (read_failed), copied capped, then REMOVED so writes resume (the old "left in place, held forever" rule is gone on purpose)', async () => {
+test('A4 n1 an oversize unparseable record is told once (corrupt_removed, A5 k4), copied capped, then REMOVED so writes resume (the old "left in place, held forever" rule is gone on purpose)', async () => {
   lsf.ls.setItem(MARKER_KEY, JSON.stringify({ v: 1, plant: 'P1', seq: 4, user: U, dirty: true, dirtyPlants: ['P1'] }));
   const garbage = '{"key":"alice|P1","json":' + 'z'.repeat(QUARANTINE_CAP_CHARS + 10);
   lsf.ls.setItem(recKey('P1'), garbage);
   const boot = await CacheStore.ready(U);
   assert.equal(lsf.ls.getItem(recKey('P1')), null, 'the record is removed');
-  assert.equal(boot.notices.includes('read_failed'), true, 'the user is told');
+  assert.equal(boot.notices.includes('corrupt_removed'), true, 'the user is told the edits are gone');
+  assert.equal(boot.notices.includes('read_failed'), false, 'read_failed (not backed up) is for the hold-in-place case only');
   assert.equal(boot.notices.includes('corrupt_record'), false);
   assert.equal(boot.notices.includes('dirty_no_record'), false, 'no second notice for the same key');
   const q = JSON.parse(lsf.ls.getItem(`${QUARANTINE_KEY}.alice|P1`));

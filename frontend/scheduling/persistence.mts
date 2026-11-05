@@ -32,7 +32,7 @@
 import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
 import { CacheStore } from '../platform/cache-store.mjs';
-import { buildCacheRecord, serializeCacheRecord, parseCacheRecord, fingerprintText, applyContextChanged, convertLegacyStatePlants, legacyDirtyCount } from './cache-record.mjs';
+import { buildCacheRecord, projectRowForCache, serializeCacheRecord, parseCacheRecord, fingerprintText, applyContextChanged, convertLegacyStatePlants, legacyDirtyCount } from './cache-record.mjs';
 import type { CacheRecord, CacheApplyContext } from './cache-record.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
 import { CalendarSync } from '../calendar/calendar-sync.mjs';
@@ -1454,6 +1454,7 @@ export const Persistence = {
       else if (n === 'dirty_no_record') Toast.show(Util.t('toast.cache_dirty_no_record'), 'warn', 15000);
       else if (n === 'read_failed') Toast.show(Util.t('toast.cache_read_failed'), 'warn', 15000);
       else if (n === 'corrupt_record') Toast.show(Util.t('toast.cache_corrupt_record'), 'warn', 15000);
+      else if (n === 'corrupt_removed') Toast.show(Util.t('toast.cache_corrupt_removed'), 'warn', 15000);
       else if (n === 'other_dirty_plants') Persistence._announceOtherPlants(false);
       else ErrorLog.info('persistence', `Cache store notice: ${n}`);
     }
@@ -1481,8 +1482,10 @@ export const Persistence = {
   async _openCache(plant: string | null): Promise<void> {
     try {
       const user = Persistence._cacheUser();
+      // Nobody signed in ('system'): no records to open or read, and opening the store must not disturb the page owner's state.
+      if (user === 'system') return;
       await CacheStore.ready(user);
-      if (user !== 'system') await Persistence._migrateLegacyCache(user, plant);
+      await Persistence._migrateLegacyCache(user, plant);
       if (plant) await CacheStore.read(plant);
     } catch (e) { ErrorLog.warn('persistence', `Cache open failed: ${(e as Error)?.message}`); }
   },
@@ -1511,7 +1514,15 @@ export const Persistence = {
             if (r.reason === 'record-exists') {
               const have = await CacheStore.read(plant).then(x => x.record, () => null);
               const parsed = have ? parseCacheRecord(have.json) : null;
-              if (parsed) { const ids = new Set(parsed.rows.map(x => String(x.id))); covered = record.rows.every(x => ids.has(String(x.id))); }
+              // Covered only when the stored record holds the SAME edit for every blob row (an old-build tab can keep rewriting
+              // the blob with newer versions of the same orders): rows compare by their projection, bookkeeping aside.
+              if (parsed) {
+                const canon = (row: unknown): string => { const p = projectRowForCache(row as Record<string, unknown>); delete (p as Record<string, unknown>).dirtySource; return JSON.stringify(p); };
+                const stored = new Map(parsed.rows.map(x => [String(x.id), canon(x)] as const));
+                const differing = record.rows.filter(x => stored.get(String(x.id)) !== canon(x)).length;
+                covered = differing === 0;
+                if (!covered) lost += differing - n;
+              }
             }
             if (!covered) lost += n;
           }
@@ -1529,6 +1540,7 @@ export const Persistence = {
   /** This plant's cache record for the signed-in user, parsed and checked. `unreadable` = a record holding rows exists but
    *  cannot be used (bad shape, other schema): say so once instead of dropping edits silently. */
   _readCacheRecord(plant: string): { record: CacheRecord | null; unreadable: boolean } {
+    if (Persistence._cacheUser() === 'system') return { record: null, unreadable: false };
     const raw = CacheStore.peek(plant);
     if (!raw || raw.legacy) return { record: null, unreadable: false };
     const rec = parseCacheRecord(raw.json);

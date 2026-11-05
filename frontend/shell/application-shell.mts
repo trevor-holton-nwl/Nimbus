@@ -250,6 +250,15 @@ const Settings = (() => {
                                        too.
    ========================================================================== */
 const SessionUIAdapter = {
+  /** What Sign out hands to Session.signOut: the shell owns the Persistence knowledge (no import cycle). beforeClear marks the
+   *  page as leaving, so no late autosave or beforeunload write can file edits after the wipe. */
+  _signOutOptions(): { hasPendingWork: () => boolean; beforeClear: () => void } {
+    return {
+      hasPendingWork: () => Persistence.hasPendingWork(),
+      beforeClear:    () => Persistence.haltCacheWrites(),
+    };
+  },
+
   init(): void {
     Store.subscribe(evt => {
       if (evt.type === 'settings:change' && evt.source === 'settings-pref-revert') SessionUIAdapter._onPrefRevert();
@@ -375,10 +384,7 @@ const SessionUIAdapter = {
         if (signingOut) return;
         signingOut = true;
         // Shell owns the Persistence knowledge; Session takes it as callbacks (no import cycle).
-        void Session.signOut({
-          hasPendingWork: () => Persistence.hasPendingWork(),
-          beforeClear:    () => Persistence.haltCacheWrites(),
-        }).finally(() => { signingOut = false; });
+        void Session.signOut(SessionUIAdapter._signOutOptions()).finally(() => { signingOut = false; });
       });
     }
     const saveBtn = document.getElementById('us-save-btn') as WiredElement | null;

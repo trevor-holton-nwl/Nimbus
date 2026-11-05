@@ -40,7 +40,7 @@ export interface CacheMarker { v: 1; plant: string; seq: number; user: string; d
 /** `rows` = unsaved rows in the record. 0 deletes the stored record instead of writing an empty one (undefined = unknown, written as is). */
 export interface WriteMeta { user: string; plant: string; dirty: boolean; rows?: number }
 export interface WriteResult { ok: boolean; skipped?: boolean; reason?: string; error?: string }
-export type CacheNotice = 'put_failed' | 'older_record' | 'dirty_no_record' | 'read_failed' | 'corrupt_record' | 'other_dirty_plants';
+export type CacheNotice = 'put_failed' | 'older_record' | 'dirty_no_record' | 'read_failed' | 'corrupt_record' | 'corrupt_removed' | 'other_dirty_plants';
 export type CacheMode = 'none' | 'localstorage';
 export interface BootInfo { mode: CacheMode; plant: string | null; record: CacheRecord | null; notices: CacheNotice[] }
 /** `failed` = cumulative put failures (history); `failedKeys` = records whose LAST put failed (a later success clears it);
@@ -84,6 +84,14 @@ function parseStored(raw: string): CacheRecord | null {
     const rec = JSON.parse(raw) as CacheRecord | null;
     return rec && typeof rec.json === 'string' ? rec : null;
   } catch { return null; }
+}
+/** Like parseStored, but says WHY a record is unusable: 'syntax' = JSON.parse throws (the text is damaged), 'shape' = it parses
+ *  but is not a record wrapper (valid JSON, unexpected structure: never judged damaged). */
+function classifyStored(raw: string): { kind: 'ok'; rec: CacheRecord } | { kind: 'syntax' } | { kind: 'shape' } {
+  let v: unknown;
+  try { v = JSON.parse(raw); } catch { return { kind: 'syntax' }; }
+  const rec = v as CacheRecord | null;
+  return rec && typeof rec.json === 'string' ? { kind: 'ok', rec } : { kind: 'shape' };
 }
 
 function keysWithPrefix(prefix: string): string[] {
@@ -129,7 +137,10 @@ let firstUser: string | null = null;
 /** Set when ready() was called for another user while halted: only a sign-in on this page (resume) lifts it. */
 let signInRequired = false;
 const resumeHooks = new Set<() => void>();
-const capturedUser = (): string | null => pageUser ?? firstUser ?? curUser;
+/** The user the edits held in this page belong to. 'system' (nobody signed in) is never an owner. */
+const capturedUser = (): string | null => pageUser ?? firstUser ?? (curUser && curUser !== 'system' ? curUser : null);
+/** True when `user` is somebody other than the user this page was named for: their records must never reach this page's board. */
+const foreignToPage = (user: string | null | undefined): boolean => !!pageUser && !!user && user !== pageUser;
 let notices: CacheNotice[] = [];
 let boot: BootInfo = { mode: 'none', plant: null, record: null, notices: [] };
 
@@ -171,6 +182,8 @@ function openableDirty(m: CacheMarker): string[] {
 }
 /** A marker only speaks for the user who wrote it; with no user known the caller cannot compare, so it is trusted. */
 function markerBelongsTo(m: CacheMarker, user?: string): boolean {
+  // Once a page user is named, only that user's marker is ever visible to this page.
+  if (pageUser && m.user && m.user !== pageUser) return false;
   const u = user ?? curUser;
   return !u || !m.user || m.user === u;
 }
@@ -234,7 +247,7 @@ function putRecord(rec: CacheRecord): PutResult {
 function removeRecord(key: string): void { try { lsOrNull()?.removeItem(LS_RECORD_PREFIX + key); } catch { /* ignore */ } }
 
 /** Copies an unusable record to its own per-user quarantine key, then removes it from the record keys. A record that fits the
- *  cap is copied whole; a bigger one is copied truncated (it can never be parsed anyway) after raising `read_failed`, so it
+ *  cap is copied whole; a bigger one is copied truncated (it can never be parsed anyway) after raising `corrupt_removed`, so it
  *  cannot hold the plant's writes for the session. Returns false (record left in place) only when no copy can be stored: a
  *  record is never removed without a copy. */
 function quarantine(key: string, raw: string): boolean {
@@ -244,7 +257,8 @@ function quarantine(key: string, raw: string): boolean {
   catch (e) { logWarn('cache quarantine copy failed, record left in place', { error: errName(e), key }); return false; }
   removeRecord(key);
   quarantinedNow.add(key);
-  pushNotice(tooBig ? 'read_failed' : 'corrupt_record');
+  // A truncated copy means the stored edits are gone (and the writes resumed): say so, never "not backed up".
+  pushNotice(tooBig ? 'corrupt_removed' : 'corrupt_record');
   logWarn(tooBig ? 'cache record unparseable and too large, quarantined truncated' : 'cache record unparseable, quarantined', { key, chars: raw.length });
   return true;
 }
@@ -256,9 +270,12 @@ function readStored(key: string): { status: 'ok'; record: CacheRecord | null } |
   try { raw = lsOrNull()?.getItem(LS_RECORD_PREFIX + key); }
   catch (e) { logWarn('cache get failed', { error: errName(e) }); return { status: 'error' }; }
   if (!raw) return { status: 'ok', record: null };
-  const rec = parseStored(raw);
-  if (!rec) return quarantine(key, raw) ? { status: 'ok', record: null } : { status: 'error' };
-  return { status: 'ok', record: rec };
+  const c = classifyStored(raw);
+  if (c.kind === 'ok') return { status: 'ok', record: c.rec };
+  // Valid JSON in an unexpected shape is not damage: a big one stays where it is and holds the plant's writes (read_failed);
+  // truncating and removing is only for text JSON.parse cannot read.
+  if (c.kind === 'shape' && raw.length > QUARANTINE_CAP_CHARS) { logWarn('cache record has an unexpected shape and is too large to copy, left in place', { key, chars: raw.length }); return { status: 'error' }; }
+  return quarantine(key, raw) ? { status: 'ok', record: null } : { status: 'error' };
 }
 
 function recordPutResult(rec: CacheRecord, r: PutResult): void {
@@ -284,6 +301,8 @@ function initStore(user: string): BootInfo {
   if (marker && marker.seq > seqCounter) seqCounter = marker.seq;
   if (!lsOrNull()) { mode = 'none'; return { mode: 'none', plant: null, record: null, notices: [] }; }
   mode = 'localstorage';
+  // A page named for X never reads Y's records: Y's unsaved rows must not be overlaid on X's board.
+  if (foreignToPage(user)) { boot = { mode, plant: null, record: null, notices: [] }; return boot; }
   return loadBoot(user, marker);
 }
 
@@ -396,10 +415,15 @@ export const CacheStore = {
     // Never lifts halt(): a load that resolves after sign-out must not revive the store. Only resume(user) does.
     // A halted page asked to open the store for someone other than the user it was loaded for: only a sign-in lifts this.
     const cap = capturedUser();
-    if (halted && ((curUser && curUser !== user) || (cap && cap !== user))) signInRequired = true;
+    // 'system' (nobody signed in, e.g. a load in a stale tab after another tab signed out) says nothing about who is signed in:
+    // it never latches and, on a page that already has an owner, never touches the store (no foreign state, no reads).
+    if (user === 'system' && cap) return Promise.resolve({ mode, plant: null, record: null, notices: [] });
+    // Any other user than this page's owner needs a sign-in on this page, halted or not (a Y that is only opened while this tab
+    // is live would otherwise let a later same-user resume pass with Y's rows in memory).
+    if (cap && user !== cap && user !== 'system') signInRequired = true;
     if (readyPromise && curUser === user) return readyPromise;
     if (curUser && curUser !== user) dropOtherUserState(curUser, user);
-    if (!firstUser) firstUser = user;
+    if (!firstUser && user !== 'system') firstUser = user;
     curUser = user;
     try { readyPromise = Promise.resolve(initStore(user)); } catch { readyPromise = Promise.resolve(boot); }
     return readyPromise;
@@ -442,12 +466,13 @@ export const CacheStore = {
   peek(plant?: string): CacheRecord | null {
     const m = plant ? null : readMarker();
     const p = plant ?? (m ? rememberedOf(m) : null);
-    if (!p || !curUser) return null;
+    if (!p || !curUser || foreignToPage(curUser)) return null;
     return peekMap.get(keyOf(curUser, p)) || null;
   },
 
   /** Plant the previous page load should open: a plant holding unsaved rows when there is one, else the last one written. */
   rememberedPlant(user?: string): string | null {
+    if (foreignToPage(user)) return null;
     const m = readMarker();
     if (m) return markerBelongsTo(m, user) ? rememberedOf(m) : null;
     return legacyInfo()?.plant ?? null;
@@ -455,6 +480,7 @@ export const CacheStore = {
 
   /** Plants of this user that hold unsaved rows, per the marker, limited to plants the user can still open (when known). */
   dirtyPlants(user?: string): string[] {
+    if (foreignToPage(user)) return [];
     const m = readMarker();
     return m && markerBelongsTo(m, user) ? openableDirty(m) : [];
   },
@@ -462,7 +488,7 @@ export const CacheStore = {
   /** Unsaved rows per plant stored for `user`, read from storage (every record, whatever the marker or the plant scope says).
    *  Reset and sign-out use it: they wipe every stored record, so every stored row must be counted. */
   dirtyFromStorage(user: string): Array<{ plant: string; rows: number; ids: string[] }> {
-    if (!user || user === 'system') return [];
+    if (!user || user === 'system' || foreignToPage(user)) return [];
     const s = scanDirty(user);
     return s.plants.map(plant => ({ plant, rows: s.rows.get(plant) ?? 0, ids: s.ids.get(plant) ?? [] }));
   },
@@ -475,6 +501,7 @@ export const CacheStore = {
 
   /** True when the marker says some plant holds unsaved edits (a boot-time guard for plant auto-switches). */
   rememberedDirty(user?: string): boolean {
+    if (foreignToPage(user)) return false;
     const m = readMarker();
     if (m) return markerBelongsTo(m, user) && openableDirty(m).length > 0;
     return !!legacyInfo()?.dirty;
@@ -493,11 +520,11 @@ export const CacheStore = {
    */
   async read(plant: string): Promise<{ ok: boolean; record: CacheRecord | null }> {
     if (halted) return { ok: false, record: null };
-    if (!curUser || mode === 'none' || !plant) return { ok: true, record: null };
+    if (!curUser || mode === 'none' || !plant || foreignToPage(curUser)) return { ok: true, record: null };
     const key = keyOf(curUser, plant);
     if (!readFailed.has(key) && peekMap.has(key)) return { ok: true, record: peekMap.get(key) || null };
     const r = readStored(key);
-    if (r.status === 'error') { readFailed.add(key); pushNotice('read_failed'); return { ok: false, record: null }; }
+    if (r.status === 'error') { if (!readFailed.has(key)) pushNotice('read_failed'); readFailed.add(key); return { ok: false, record: null }; }
     readFailed.delete(key);
     if (r.record && !peekMap.has(key)) { peekMap.set(key, r.record); peekRows.set(key, rowCount(r.record.json)); }
     if (r.record && r.record.seq > seqCounter) seqCounter = r.record.seq;
@@ -583,7 +610,7 @@ export const CacheStore = {
    */
   async sweepOrphans(user: string): Promise<{ deleted: number; kept: number }> {
     const out = { deleted: 0, kept: 0 };
-    if (!user || user === 'system') return out;
+    if (!user || user === 'system' || foreignToPage(user)) return out;
     const m = readMarker();
     if (m && m.user !== user) clearMarker();
     const live = m && m.user === user ? m : null;
@@ -628,6 +655,7 @@ export const CacheStore = {
   async importLegacy(rawJson: string, plant: string, user: string, opts: { converted?: boolean; dirty?: boolean; loadedPlant?: string | null } = {}): Promise<{ imported: boolean; reason?: string }> {
     if (halted) return { imported: false, reason: 'halted' };
     if (!rawJson || !plant || !user || user === 'system') return { imported: false, reason: 'bad-args' };
+    if (foreignToPage(user)) return { imported: false, reason: 'wrong-user' };
     if (mode === 'none') return { imported: false, reason: 'not-ready' };
     try {
       const parsed: unknown = JSON.parse(rawJson);

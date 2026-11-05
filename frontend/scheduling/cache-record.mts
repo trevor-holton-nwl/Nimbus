@@ -239,7 +239,9 @@ function legacyContextFor(st: Record<string, unknown>, plant: string): CacheReco
   const allPlants = asObj(st.plants);
   if (allPlants[plant]) plants[plant] = allPlants[plant];
   const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v.filter(mine) : []);
-  return { lineSettings: st.lineSettings, calendars, plants, blocks: arr(st.blocks), plantBlocks: arr(st.plantBlocks), userSettings: st.userSettings };
+  const lineSettingsOfPlant: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(lineSettings)) if (mine(v)) lineSettingsOfPlant[k] = v;
+  return { lineSettings: lineSettingsOfPlant, calendars, plants, blocks: arr(st.blocks), plantBlocks: arr(st.plantBlocks), userSettings: st.userSettings };
 }
 
 /** Like convertLegacyState, but one record per plant that holds unsaved rows (a legacy blob may have loaded several plants).

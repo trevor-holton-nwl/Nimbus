@@ -81,3 +81,28 @@ test('A3 new keys: the expiry line carries a count, the Reset line names plants,
   assert.match(D.es['sec.session_expired_lost'], /cambios/);
   assert.doesNotMatch(D.de['toast.cache_halted_other_tab'], /\bdu\b|\bdeine/i, 'formal address');
 });
+
+test('A5 k6 paused/halted texts lead with Save and never tell the planner to reload (a reload discards the edits)', () => {
+  const PAUSED = ['ui.ls_paused', 'sig.browser_backup_paused', 'attn.autosave_paused', 'toast.cache_halted_other_tab'];
+  const RELOAD = { en: /reload|refresh/i, de: /neu laden|neu starten|aktualisier/i, es: /recarg|actualiz/i, fr: /recharg|actualis/i, pt: /recarreg|atualiz/i };
+  const SAVE = { en: /Save/, de: /[Ss]peichern/, es: /[Gg]uarde/, fr: /[Ee]nregistrez/, pt: /[Ss]alve/ };
+  for (const l of LOCALES) for (const k of PAUSED) {
+    assert.doesNotMatch(D[l][k], RELOAD[l], `${l} "${k}" must not recommend reloading`);
+    assert.match(D[l][k], SAVE[l], `${l} "${k}" leads with Save`);
+    assert.equal(ph(D[l][k]), '', `${l} "${k}" has no placeholders`);
+  }
+});
+
+test('A5 k4 the removed-record notice exists in all five locales, is translated, and says the changes are gone', () => {
+  const k = 'toast.cache_corrupt_removed';
+  for (const l of LOCALES) {
+    assert.ok(typeof D[l][k] === 'string' && D[l][k].trim(), `${l} is missing "${k}"`);
+    assert.equal(ph(D[l][k]), ph(D.en[k]), `${l} placeholders`);
+    if (l !== 'en') assert.notEqual(D[l][k], D.en[k], `${l} is still English`);
+  }
+  assert.match(D.en[k], /gone/);
+  assert.match(D.fr[k], /perdues/); assert.doesNotMatch(D.fr[k], /\bordres?\b/i);
+  assert.match(D.es[k], /perdido/); assert.doesNotMatch(D.es[k], /\b[Oo]rden/);
+  assert.match(D.de[k], /verloren/);
+  assert.match(D.pt[k], /perdidas/);
+});

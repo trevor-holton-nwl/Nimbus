@@ -156,6 +156,7 @@ test('A4 n8 convertLegacyStatePlants limits the whole-blob context to each plant
   assert.deepEqual(Object.keys(byPlant.P.plants), ['P']);
   assert.deepEqual(byPlant.P.blocks.map(b => b.id), [1, 3], 'this plant\'s blocks and plant-less ones');
   assert.deepEqual(byPlant.Q.plantBlocks.map(b => b.id), [4]);
-  assert.deepEqual(Object.keys(byPlant.P.lineSettings).sort(), ['LP', 'LQ'], 'lineSettings stay whole');
+  assert.deepEqual(Object.keys(byPlant.Q.lineSettings), ['LQ']);
+  assert.deepEqual(Object.keys(byPlant.P.lineSettings),['LP'], 'lineSettings follow the same plant predicate as the live record (A5 k7)');
   assert.deepEqual(byPlant.P.userSettings, { theme: 'dark' });
 });

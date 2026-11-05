@@ -905,12 +905,12 @@ test('A4 J3 the toast carries the exact number of rows that could not be importe
   f.lsf.map.clear();
   f.lsf.ls.setItem(Config.LS_KEY, legacyBlob(null, [legacyTask('L1', 'Q'), legacyTask('L2', 'Q'), legacyTask('L3', 'Z')]));
   await simulateReload();
-  // plant Q already has a record holding only L1: its 2 blob rows are not covered; plant Z imports fine
+  // plant Q already has a record holding only L1 (identical): of its 2 blob rows only L2 is not covered (A5 k3 counts differing rows); plant Z imports fine
   CacheStore.write({ user: CACHE_USER, plant: 'Q', dirty: true, rows: 1 }, serializeCacheRecord(recordFor('Q', ['L1'])));
   await Persistence._migrateLegacyCache(CACHE_USER);
   const lost = calls.filter(([k]) => k === 'toast.cache_changes_lost');
   assert.equal(lost.length, 1);
-  assert.equal(lost[0][1].count, 2);
+  assert.equal(lost[0][1].count, 1);
   assert.equal(JSON.parse(CacheStore.peek('Z').json).rows.length, 1, 'Z imported');
 });
 
@@ -1051,4 +1051,54 @@ test('A4 n9 a dirty plant hidden by a stale plant scope at boot is announced onc
     Store.emit({ type: 'session:changed', kind: 'refresh' });
     assert.equal(f.toasts.filter(x => x.msg === 'toast.cache_other_plants').length, 1, 'the list did not change: not again');
   } finally { Store.setAllowedPlantsResolver(() => null); }
+});
+
+test('A5 k3 a stored record with the same ids but different content does not cover the blob: the differing rows are counted lost, an identical one is not', async t => {
+  const f = fixture(t, 3);
+  const mk = extra => convertLegacyStatePlants(legacyBlob('Q', [legacyTask('L1', 'Q', extra), legacyTask('L2', 'Q', extra)]), CACHE_USER, Config.SCHEMA_VERSION, Config.BUILD_ID).plants[0].record;
+  // identical: covered, nothing lost
+  f.lsf.map.clear(); f.toasts.length = 0;
+  f.lsf.ls.setItem(Config.LS_KEY, legacyBlob('Q', [legacyTask('L1', 'Q'), legacyTask('L2', 'Q')]));
+  await simulateReload();
+  CacheStore.write({ user: CACHE_USER, plant: 'Q', dirty: true, rows: 2 }, serializeCacheRecord(mk({})));
+  await Persistence._migrateLegacyCache(CACHE_USER);
+  assert.equal(lostToasts(f).length, 0, 'identical content is covered');
+  // same ids, newer content in the stored record (the old-build tab rewrote the blob with other versions): lost
+  f.lsf.map.clear(); f.toasts.length = 0;
+  f.lsf.ls.setItem(Config.LS_KEY, legacyBlob('Q', [legacyTask('L1', 'Q', { MACHINE: 'M9' }), legacyTask('L2', 'Q')]));
+  await simulateReload();
+  CacheStore.write({ user: CACHE_USER, plant: 'Q', dirty: true, rows: 2 }, serializeCacheRecord(mk({})));
+  await Persistence._migrateLegacyCache(CACHE_USER);
+  const lost = lostToasts(f);
+  assert.equal(lost.length, 1, 'the differing row is reported');
+});
+
+test('A5 K1 opening the cache as "system" (nobody signed in) never opens the store, so it cannot latch or disturb the page owner', async t => {
+  const f = fixture(t, 3);
+  CacheStore.setPageUser(CACHE_USER);
+  await CacheStore.ready(CACHE_USER);
+  CacheStore.halt();
+  t.mock.method(Persistence, '_cacheUser', () => 'system');
+  const before = CacheStore.user();
+  await Persistence._openCache('P');
+  assert.equal(CacheStore.user(), before, 'the store was not re-opened for system');
+  assert.equal(CacheStore.resumeSameUser(CACHE_USER), true, 'the page owner can still resume');
+  assert.equal(f.lsf.map.has(Config.LS_KEY), false);
+});
+
+test('A5 k8 Sign out through the shell options sets Persistence._leaving and halts cache writes before the wipe', async t => {
+  fixture(t, 3);
+  const { Session } = await import('../../../frontend/security/session.mjs');
+  const { SessionUIAdapter } = await import('../../../frontend/shell/application-shell.mjs');
+  const realLoc = globalThis.location;
+  globalThis.location = { reload: () => {} };
+  globalThis.sessionStorage = { clear() {}, getItem: () => null, setItem() {}, removeItem() {} };
+  t.after(() => { globalThis.location = realLoc; Persistence._leaving = false; Persistence._cacheWritesHalted = false; Session._resetLeavingForTests(); });
+  Persistence._leaving = false; Persistence._cacheWritesHalted = false;
+  t.mock.method(Persistence, 'hasPendingWork', () => false);
+  await CacheStore.ready(CACHE_USER);
+  await Session.signOut(SessionUIAdapter._signOutOptions());
+  assert.equal(Persistence._leaving, true, 'the shell beforeClear marks the page as leaving');
+  assert.equal(Persistence._cacheWritesHalted, true);
+  assert.equal(CacheStore.stats().halted, true);
 });
