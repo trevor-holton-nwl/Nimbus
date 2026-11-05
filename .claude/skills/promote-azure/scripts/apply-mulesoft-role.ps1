@@ -26,14 +26,20 @@
 [CmdletBinding()]
 param(
   [string] $PsqlPath = "C:\Program Files\PostgreSQL\18\bin\psql.exe",
-  [string] $SqlFile  = (Join-Path (Get-Item $PSScriptRoot).Parent.Parent.Parent.Parent.FullName "migrations\manual\2026-10-08-nimbus-mulesoft-role.sql"),
+  [string] $SqlFile  = '',
   [switch] $Force
 )
 
 $ErrorActionPreference = "Stop"
 
+# $PSScriptRoot is empty inside param() defaults under `powershell -File`, so resolve paths here.
+$ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+$repoRoot = (Get-Item -LiteralPath $ScriptDir).Parent.Parent.Parent.Parent.FullName
+if ([string]::IsNullOrWhiteSpace($SqlFile)) {
+  $SqlFile = Join-Path $repoRoot "migrations\manual\2026-10-08-nimbus-mulesoft-role.sql"
+}
+
 # ---- Defaults, optionally from .env at the repo root ----
-$repoRoot = (Get-Item $PSScriptRoot).Parent.Parent.Parent.Parent.FullName
 $envVals = @{}
 $envFile = Join-Path $repoRoot ".env"
 if (Test-Path -LiteralPath $envFile) {
