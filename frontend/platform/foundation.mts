@@ -246,6 +246,9 @@ const _DEFAULT_CHANGEOVER_FIELDS: readonly string[] = Object.freeze(['COLOR', 'F
 export const Util = {
   setPreferenceResolver(fn: PreferenceResolver): void { _prefResolver = typeof fn === 'function' ? fn : () => undefined; },
   setActorResolver(fn: ActorResolver): void { _actorResolver = typeof fn === 'function' ? fn : () => undefined; },
+  /** The actor the wired resolver reports (undefined before one is wired, e.g. Node tests). Read-only seam for callers
+   *  that key local storage per user (the autosave cache); fetchTraced reads the same resolver. */
+  currentActor(): string | undefined { try { return _actorResolver(); } catch { return undefined; } },
   setUtilizationResolver(fn: UtilizationResolverFn | null): void { _utilizationResolver = typeof fn === 'function' ? fn : null; },
   setChangeoverFieldsResolver(fn: (() => string[]) | null): void { _changeoverFieldsResolver = typeof fn === 'function' ? fn : null; },
   setDueCalendarResolver(fn: DueCalendarResolver | null): void {

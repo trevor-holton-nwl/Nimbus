@@ -2,10 +2,13 @@
 // S7-1/2/3/4/5/7/8/9, S10-1/2/4/6/7, S7-14. Same split-realm-free, DOM-less environment as persistence.test.mjs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Persistence, cacheTiers } from '../../../frontend/scheduling/persistence.mjs';
+import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Config, Toast } from '../../../frontend/platform/foundation.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
+import { CacheStore } from '../../../frontend/platform/cache-store.mjs';
+import { makeFakeBackend } from '../helpers/cache-backend-fake.mjs';
+import { resetCacheEnv, readRecord, CACHE_USER } from '../helpers/cache-env.mjs';
 
 globalThis.window = globalThis.window || {};
 if (typeof globalThis.document === 'undefined') {
@@ -47,30 +50,32 @@ function capture() {
 
 // ---- S7-3 / S10-6 ----------------------------------------------------------------------------------------------
 
-test('S7-3: _loadCache(plant) rejects a cache written for another plant and accepts its own', () => {
-  globalThis.localStorage.setItem(Config.LS_KEY, JSON.stringify({
-    _schemaVersion: Config.SCHEMA_VERSION, selectedPlant: 'PA',
-    tasks: [{ id: 'pa-1', MACHINE: 'L1', PLANT: 'PA', RUN_TIME: 1 }],
-  }));
-  const cap = capture();
-  try {
-    Store.setTasks([], 'unit-test');
-    assert.equal(Persistence._loadCache('PB'), false, 'plant B must not show plant A orders');
-    assert.equal(Store.tasks['pa-1'], undefined);
-    assert.ok(globalThis.localStorage.getItem(Config.LS_KEY), 'the other plant\'s cache is kept, not deleted');
-    assert.equal(Persistence._loadCache('PA'), true);
-    assert.ok(Store.tasks['pa-1']);
-  } finally {
-    cap.restore(); resetFlags(); Store.setTasks([], 'unit-test');
-    globalThis.localStorage.removeItem(Config.LS_KEY);
-  }
+/** Seed the store with a cache record for `plant` holding the given dirty rows (projected like the real writer). */
+function seedRecord(plant, rows, extra = {}) {
+  resetCacheEnv();
+  void CacheStore.ready(CACHE_USER);   // Node: the synchronous localStorage backend is installed inside this call
+  const rec = { v: 1, user: CACHE_USER, plant, seq: 0, schemaVersion: Config.SCHEMA_VERSION, buildId: null, savedAt: 0, complete: true,
+    optimizerIds: [], firmDirtyIds: [], rows, context: {}, ...extra };
+  CacheStore.write({ user: CACHE_USER, plant, dirty: rows.length > 0 }, JSON.stringify(rec));
+}
+
+test('S7-3: a cache record is per plant: plant B never reads plant A\'s record, and A\'s own record is still there', () => {
+  seedRecord('PA', [{ id: 'pa-1', row_version: 1, start_date: '2026-09-10T08:00:00', end_date: '2026-09-10T09:00:00' }]);
+  assert.equal(Persistence._readCacheRecord('PB').record, null, 'plant B must not see plant A rows');
+  assert.equal(Persistence._readCacheRecord('PA').record.rows[0].id, 'pa-1');
+  assert.ok(CacheStore.peek('PA'), 'reading for B did not delete or move A\'s record');
 });
 
-test('S10-6: _cacheMatchesPlant accepts untagged caches and no requested plant, rejects a different tag', () => {
-  assert.equal(Persistence._cacheMatchesPlant({ selectedPlant: 'PA' }, 'PA'), true);
-  assert.equal(Persistence._cacheMatchesPlant({ selectedPlant: 'PA' }, 'PB'), false);
-  assert.equal(Persistence._cacheMatchesPlant({ selectedPlant: null }, 'PB'), true);
-  assert.equal(Persistence._cacheMatchesPlant({ selectedPlant: 'PA' }, undefined), true);
+test('S10-6: _readCacheRecord rejects a record of another user, schema or shape and flags an unreadable one that held rows', () => {
+  seedRecord('PA', [{ id: 'x', row_version: 1 }], { schemaVersion: Config.SCHEMA_VERSION - 1 });
+  assert.deepEqual(Persistence._readCacheRecord('PA'), { record: null, unreadable: true }, 'old schema with rows is reported');
+  seedRecord('PA', [], { schemaVersion: Config.SCHEMA_VERSION - 1 });
+  assert.deepEqual(Persistence._readCacheRecord('PA'), { record: null, unreadable: false }, 'old schema with no rows is silent');
+  resetCacheEnv();
+  void CacheStore.ready(CACHE_USER);
+  CacheStore.write({ user: CACHE_USER, plant: 'PA', dirty: true }, '{not json');
+  assert.deepEqual(Persistence._readCacheRecord('PA'), { record: null, unreadable: true });
+  assert.deepEqual(Persistence._readCacheRecord('PZ'), { record: null, unreadable: false }, 'no record is not an error');
 });
 
 // ---- S7-7 ------------------------------------------------------------------------------------------------------
@@ -105,18 +110,17 @@ test('S7-3: a failed load for plant B with only plant A cached shows the empty/r
   const cap = capture();
   globalThis.fetch = () => Promise.resolve({ ok: false, status: 503, clone() { return this; }, json: async () => ({}), text: async () => '' });
   Persistence._reconnect.start = () => {};
-  globalThis.localStorage.setItem(Config.LS_KEY, JSON.stringify({
-    _schemaVersion: Config.SCHEMA_VERSION, selectedPlant: 'PA',
-    tasks: [{ id: 'pa-only', MACHINE: 'L1', PLANT: 'PA', RUN_TIME: 1 }],
-  }));
+  seedRecord('PA', [{ id: 'pa-only', row_version: 1, start_date: '2026-09-10T08:00:00', end_date: '2026-09-10T09:00:00' }]);
+  const before = CacheStore.peek('PA').json;
   try {
     Store.setTasks([], 'unit-test');
     await Persistence.load({ force: true, plant: 'PB' });
     assert.equal(Store.tasks['pa-only'], undefined);
     assert.ok(cap.toasts.some(t => t.type === 'error'));
+    assert.equal(CacheStore.peek('PA').json, before, 'the failed load left plant A\'s record untouched');
   } finally {
     globalThis.fetch = origFetch; Persistence._reconnect.start = origStart; cap.restore();
-    globalThis.localStorage.removeItem(Config.LS_KEY); resetFlags(); Store.setTasks([], 'unit-test');
+    resetFlags(); Store.setTasks([], 'unit-test');
   }
 });
 
@@ -177,130 +181,55 @@ test('S10-2: _sameAsSent treats a concurrent firm, status, reason or exception c
 
 // ---- S7-9 ------------------------------------------------------------------------------------------------------
 
-test('S7-9: quota tiers never evict dirty tasks; clean tasks are trimmed first', () => {
-  const tasks = Array.from({ length: 3000 }, (_, i) => ({ id: `t${i}` }));
-  const dirty = ['t0', 't5', 't17'];   // oldest ids: a plain slice(-N) would drop them
-  const tiers = cacheTiers({ _schemaVersion: 7, _buildId: 'b', _savedAt: 'x', _optimizerDirtyIds: [], _dirtyIds: dirty,
-    tasks, blocks: [], calendars: {}, plants: {}, plantBlocks: [], lineSettings: {}, selectedPlant: 'PA', userSettings: {} });
-  assert.equal(tiers.length, 4);
-  assert.equal(tiers[3]._optimizerLostCount, undefined, 'no optimizer group, nothing lost');
-  for (const tier of tiers) for (const id of dirty) assert.ok(tier.tasks.some(t => t.id === id), `${id} kept in every tier`);
-  assert.equal(tiers[1].tasks.length, 2000);
-  assert.equal(tiers[2].tasks.length, 500);
-  assert.equal(tiers[3].tasks.length, 3, 'the last tier is exactly the dirty tasks');
-  assert.deepEqual(tiers[3]._dirtyIds, dirty);
-  assert.equal(tiers[3].selectedPlant, 'PA');
-});
+// ---- S7-9 (rewritten for the compact record: no tiers, no latch) -------------------------------------------------
 
-// Optimizer-dirty snapshot: 5000 dirty optimizer rows, one manual dirty row, 1000 clean rows.
-function optimizerSnap(nOpt = 5000) {
-  const opt = Array.from({ length: nOpt }, (_, i) => ({ id: `o${i}`, pad: 'x'.repeat(40) }));
-  const tasks = [...Array.from({ length: 1000 }, (_, i) => ({ id: `c${i}` })), { id: 'm1' }, ...opt];
-  return { _schemaVersion: Config.SCHEMA_VERSION, _buildId: 'b', _savedAt: 's1',
-    _optimizerDirtyIds: opt.map(t => t.id), _dirtyIds: ['m1', ...opt.map(t => t.id)],
-    tasks, blocks: [], calendars: {}, plants: {}, plantBlocks: [], lineSettings: { L1: {} }, selectedPlant: 'PA', userSettings: {} };
+function seedBoard(nOpt, { plant = 'PA' } = {}) {
+  const tasks = [...Array.from({ length: 200 }, (_, i) => row(`c${i}`, { PLANT: plant })),
+    ...Array.from({ length: nOpt }, (_, i) => row(`o${i}`, { PLANT: plant }))];
+  Store.setTasks(tasks, 'unit-test');
+  resetFlags();
+  Persistence._currentLoadedPlant = plant;
+  for (let i = 0; i < nOpt; i++) { Persistence._dirtyIds.add(`o${i}`); Persistence._forceIds.add(`o${i}`); }
 }
 
-test('S7-9: an optimizer-dirty snapshot keeps every dirty row in every tier but the last, which drops the optimizer group and reports it', () => {
-  const tiers = cacheTiers(optimizerSnap());
-  const last = tiers[tiers.length - 1];
-  assert.ok(tiers.length >= 3);
-  for (const tier of tiers.slice(0, -1)) {
-    assert.ok(tier._optimizerDirtyIds.length === 5000 || tier === tiers[0], 'optimizer group kept whole in every non-last tier');
-    assert.equal(tier.tasks.filter(t => String(t.id).startsWith('o')).length, 5000);
-    assert.equal(tier._optimizerLostCount, undefined);
-  }
-  assert.deepEqual(last.tasks.map(t => t.id), ['m1']);
-  assert.deepEqual(last._dirtyIds, ['m1']);
-  assert.equal(last._optimizerDirtyIds, undefined, 'no optimizer ids in the last tier');
-  assert.equal(last._optimizerLostCount, 5000);
-  assert.equal(last.selectedPlant, 'PA');
-  assert.deepEqual(last.lineSettings, { L1: {} });
-});
-
-// A localStorage whose setItem rejects any payload above `limit` characters.
-function quotaStorage(limit) {
-  const inner = makeStorage();
-  const calls = [];
-  return { inner, calls, setLimit(n) { limit = n; },
-    getItem: k => inner.getItem(k), removeItem: k => inner.removeItem(k), clear: () => inner.clear(),
-    get length() { return inner.length; }, key: i => inner.key(i),
-    setItem(k, v) {
-      calls.push(String(v).length);
-      if (String(v).length > limit) { const e = new Error('quota'); e.name = 'QuotaExceededError'; e.code = 22; throw e; }
-      inner.setItem(k, v);
-    } };
-}
-function withStorage(storage, fn) {
-  const orig = globalThis.localStorage;
-  globalThis.localStorage = storage;
-  const keep = { d: Persistence._cacheDegraded, a: Persistence._autosaveDisabled, c: Persistence._cacheTierCeiling };
-  Persistence._cacheDegraded = false; Persistence._autosaveDisabled = false; Persistence._cacheTierCeiling = null; Persistence._cacheTierWrites = 0;
-  try { return fn(); } finally {
-    globalThis.localStorage = orig;
-    Persistence._cacheDegraded = keep.d; Persistence._autosaveDisabled = keep.a; Persistence._cacheTierCeiling = keep.c;
-  }
-}
-
-test('S7-9: 5000 optimizer-dirty rows never leave autosave disabled while the last tier fits', () => {
-  const snap = optimizerSnap();
-  const lastSize = JSON.stringify(cacheTiers(snap).at(-1)).length;
-  const st = quotaStorage(lastSize + 100);   // only the last tier fits
-  withStorage(st, () => {
-    assert.equal(Persistence._writeCacheWithQuotaGuard(snap), true);
-    assert.equal(Persistence._autosaveDisabled, false);
-    assert.equal(Persistence._cacheDegraded, true);
-    const written = JSON.parse(st.getItem(Config.LS_KEY));
-    assert.equal(written._optimizerLostCount, 5000);
-    assert.deepEqual(written._dirtyIds, ['m1']);
-  });
-});
-
-test('S7-9: the autosave latch resets after a later successful write, and tier 0 clears the degraded flag', () => {
-  const snap = optimizerSnap(50);
-  const st = quotaStorage(10);   // nothing fits
-  withStorage(st, () => {
-    assert.equal(Persistence._writeCacheWithQuotaGuard(snap), false);
-    assert.equal(Persistence._autosaveDisabled, true, 'latched while nothing fits');
-    st.setLimit(1e9);   // storage frees up
-    assert.equal(Persistence._writeCacheWithQuotaGuard(snap), true);
-    assert.equal(Persistence._autosaveDisabled, false, 'a later write clears the latch');
-    assert.equal(Persistence._cacheDegraded, true, 'landed on the trimmed tier, still labelled as such');
-    for (let i = 0; i < 30; i++) Persistence._writeCacheWithQuotaGuard(snap);   // periodic tier-0 retry
-    assert.equal(Persistence._cacheDegraded, false, 'tier 0 winning clears degraded');
-    assert.equal(JSON.parse(st.getItem(Config.LS_KEY))._optimizerLostCount, undefined);
-  });
-});
-
-test('S7-9: a failing autosave does not re-stringify every larger tier on each tick', () => {
-  const snap = optimizerSnap();
-  const tiers = cacheTiers(snap);
-  const st = quotaStorage(JSON.stringify(tiers.at(-1)).length + 100);
-  withStorage(st, () => {
-    Persistence._writeCacheWithQuotaGuard(snap);
-    const first = st.calls.length;
-    assert.ok(first >= 2, 'first write walked down the tiers');
-    Persistence._writeCacheWithQuotaGuard(snap);
-    assert.equal(st.calls.length - first, 1, 'second write starts at the remembered tier');
-  });
-});
-
-test('S7-9: loading a cache that lost its optimizer group toasts once and marks nothing dirty', () => {
+test('S7-9: a failed cache put latches nothing: one toast, the next write retries, the inventory never says disabled', async () => {
+  const fake = makeFakeBackend({ name: 'idb' });
+  fake.ctl.quotaOnPut = 1;   // the first put aborts with a quota error
   const cap = capture();
-  const lost = { _schemaVersion: Config.SCHEMA_VERSION, selectedPlant: 'PA', _savedAt: 'lost-1', _optimizerLostCount: 12,
-    _dirtyIds: [], tasks: [{ id: 'pa-1', MACHINE: 'L1', PLANT: 'PA', RUN_TIME: 1 }] };
-  globalThis.localStorage.setItem(Config.LS_KEY, JSON.stringify(lost));
-  Persistence._lostBatchNotedFor = null;
+  const priorPlant = Persistence._currentLoadedPlant;
   try {
-    Store.setTasks([], 'unit-test'); resetFlags();
-    assert.equal(Persistence._loadCache('PA'), true);
-    assert.equal(Persistence._loadCache('PA'), true);
-    const lostToasts = cap.toasts.filter(t => t.msg.includes('toast.cache_changes_lost') || /12/.test(t.msg) && t.type === 'warn');
-    assert.equal(lostToasts.length, 1, 'one toast for the record');
-    assert.equal(Persistence._dirtyIds.size, 0);
-    assert.equal(Persistence._forceIds.size, 0);
+    resetCacheEnv({ backend: { idb: fake.backend } });
+    await CacheStore.ready(CACHE_USER);
+    seedBoard(50);
+    Persistence._saveCache();
+    await CacheStore.settled();
+    assert.equal(CacheStore.stats().failed, 1);
+    assert.equal(cap.toasts.filter(t => t.msg.includes('toast.cache_put_failed')).length, 1, 'one "not backed up" toast');
+    assert.equal(Persistence.storageInventory().autosaveDisabled, false, 'a failed write never latches autosave off');
+    Store.updateTask('o0', { PRT_01: 'X' }, 'table'); Persistence._dirtyIds.add('o0');
+    Persistence._saveCache();
+    await CacheStore.settled();
+    assert.equal(CacheStore.stats().failed, 1, 'no new failure: the retry went through');
+    assert.equal(JSON.parse(fake.data.get(`${CACHE_USER}|PA`).json).rows.length, 50, 'the retried write holds all 50 dirty rows');
+    assert.equal(cap.toasts.filter(t => t.msg.includes('toast.cache_put_failed')).length, 1, 'still just the one toast');
   } finally {
-    cap.restore(); resetFlags(); Store.setTasks([], 'unit-test'); globalThis.localStorage.removeItem(Config.LS_KEY);
+    cap.restore(); resetFlags(); Store.setTasks([], 'unit-test'); Persistence._currentLoadedPlant = priorPlant;
+    CacheStore._setBackendForTests();
+  }
+});
+
+test('S7-9: 5000 optimizer-dirty rows are one compact record holding only those rows', () => {
+  const priorPlant = Persistence._currentLoadedPlant;
+  try {
+    resetCacheEnv();
+    seedBoard(5000);
+    Persistence._saveCache();
+    const rec = readRecord('PA');
+    assert.equal(rec.rows.length, 5000, 'no clean rows in the record');
+    assert.equal(rec.optimizerIds.length, 5000);
+    assert.equal(Persistence.storageInventory().autosaveDisabled, false);
+  } finally {
+    resetFlags(); Store.setTasks([], 'unit-test'); Persistence._currentLoadedPlant = priorPlant; CacheStore._setBackendForTests();
   }
 });
 

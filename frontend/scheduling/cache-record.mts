@@ -50,6 +50,10 @@ export interface CacheRecordContext {
   userSettings?: unknown;
 }
 
+/** Context fingerprints captured when the optimizer Apply was committed (not when the record was written): the
+ *  plant calendar version, the tool-inventory version and a hash of the setup snapshot. A null side is "unknown". */
+export interface CacheApplyContext { calendar: string | null; tools: string | null; setup: string | null }
+
 export interface CacheRecordInput {
   user: string;
   plant: string;
@@ -61,6 +65,10 @@ export interface CacheRecordInput {
   dirtyIds: Iterable<string>;
   forceIds: Iterable<string>;
   dirtySource: Map<string, string> | Record<string, string>;
+  /** Ids whose manual firm the planner changed; the only rows whose projected `firmed` is an edit. Default []. */
+  firmDirtyIds?: Iterable<string>;
+  /** Fingerprints at Apply time; written only when the record holds a batch (optimizerIds non-empty). */
+  applyContext?: CacheApplyContext | null;
   context: CacheRecordContext;
 }
 
@@ -74,8 +82,28 @@ export interface CacheRecord {
   savedAt: number | string;
   complete: true;
   optimizerIds: string[];
+  /** Ids with an unsaved Firm/Unfirm. Projected `firmed` on any other row is informational only. */
+  firmDirtyIds: string[];
   rows: Row[];
+  applyContext?: CacheApplyContext;
   context: CacheRecordContext;
+}
+
+/** Small stable text hash (FNV-1a, 32 bit, hex) for context fingerprints. Not a security hash. */
+export function fingerprintText(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return h.toString(16).padStart(8, '0');
+}
+
+/** True when any dimension known on BOTH sides differs; an unknown (null/undefined) side never counts as a change. */
+export function applyContextChanged(then: CacheApplyContext | null | undefined, now: CacheApplyContext | null | undefined): boolean {
+  if (!then || !now) return false;
+  for (const k of ['calendar', 'tools', 'setup'] as const) {
+    const a = then[k], b = now[k];
+    if (a != null && b != null && a !== b) return true;
+  }
+  return false;
 }
 
 /**
@@ -118,7 +146,9 @@ export function buildCacheRecord(input: CacheRecordInput): CacheRecord {
     savedAt: input.savedAt,
     complete: true,
     optimizerIds,
+    firmDirtyIds: Array.from(toIdSet(input.firmDirtyIds ?? [])),
     rows,
+    ...(input.applyContext && optimizerIds.length ? { applyContext: input.applyContext } : {}),
     context: {
       lineSettings: ctx.lineSettings, calendars: ctx.calendars, blocks: ctx.blocks,
       plants: ctx.plants, plantBlocks: ctx.plantBlocks, userSettings: ctx.userSettings,
@@ -141,6 +171,7 @@ export function parseCacheRecord(json: unknown): CacheRecord | null {
     if (typeof rec.plant !== 'string' || !rec.plant || typeof rec.user !== 'string' || !rec.user) return null;
     if (!Array.isArray(rec.rows)) return null;
     if (!Array.isArray(rec.optimizerIds)) rec.optimizerIds = [];
+    if (!Array.isArray(rec.firmDirtyIds)) rec.firmDirtyIds = [];
     return rec as CacheRecord;
   } catch {
     return null;

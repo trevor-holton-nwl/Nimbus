@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 import {
-  projectRowForCache, buildCacheRecord, serializeCacheRecord, parseCacheRecord,
+  projectRowForCache, buildCacheRecord, serializeCacheRecord, parseCacheRecord, fingerprintText, applyContextChanged,
   CACHE_ROW_FIELDS, SNAPSHOT_WIRE_TO_ROW, CACHE_RECORD_VERSION,
 } from '../../../frontend/scheduling/cache-record.mjs';
 
@@ -112,4 +112,27 @@ test('size: 5000 dirty rows stay under 4,000,000 chars', () => {
   console.log(`cache-record size: scheduled full ${fullS} -> projected ${ps} chars; queued full ${fullQ} -> projected ${pq} chars; 5000-row record ${json.length} chars`);
   assert.ok(json.length < 4_000_000);
   assert.ok(ps < fullS && pq < fullQ);
+});
+
+test('firmDirtyIds defaults to [] and travels; applyContext is written only when the record holds an optimizer batch', () => {
+  assert.deepEqual(buildCacheRecord(input()).firmDirtyIds, []);
+  const ctx = { calendar: 'c1', tools: 't1', setup: 's1' };
+  const withBatch = buildCacheRecord(input({ firmDirtyIds: ['s1'], applyContext: ctx }));
+  assert.deepEqual(withBatch.firmDirtyIds, ['s1']);
+  assert.deepEqual(withBatch.applyContext, ctx);
+  const noBatch = buildCacheRecord(input({ forceIds: [], applyContext: ctx }));
+  assert.equal('applyContext' in noBatch, false, 'no batch, no context');
+  const old = JSON.parse(serializeCacheRecord(withBatch)); delete old.firmDirtyIds;
+  assert.deepEqual(parseCacheRecord(JSON.stringify(old)).firmDirtyIds, [], 'an older record parses with an empty list');
+});
+
+test('fingerprintText is stable and sensitive; applyContextChanged ignores unknown sides', () => {
+  assert.equal(fingerprintText('abc'), fingerprintText('abc'));
+  assert.notEqual(fingerprintText('abc'), fingerprintText('abd'));
+  const a = { calendar: 'c1', tools: 't1', setup: 's1' };
+  assert.equal(applyContextChanged(a, { ...a }), false);
+  assert.equal(applyContextChanged(a, { ...a, setup: 's2' }), true);
+  assert.equal(applyContextChanged(a, { calendar: null, tools: null, setup: null }), false, 'unknown now is not a change');
+  assert.equal(applyContextChanged({ calendar: null, tools: 't1', setup: null }, { ...a, tools: 't2' }), true);
+  assert.equal(applyContextChanged(null, a), false);
 });

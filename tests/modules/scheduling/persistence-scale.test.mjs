@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Store } from '../../../frontend/platform/store.mjs';
-import { Config, Util, Toast } from '../../../frontend/platform/foundation.mjs';
+import { Util, Toast } from '../../../frontend/platform/foundation.mjs';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 import { App } from '../../../frontend/shell/application-shell.mjs';
+import { resetCacheEnv, readRecord } from '../helpers/cache-env.mjs';
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
@@ -16,8 +17,9 @@ function fixture(t) {
   const flags = ['_dirtyIds', '_forceIds', '_firmDirtyIds', '_conflictedIds'];
   const priorFlags = Object.fromEntries(flags.map(key => [key, [...Persistence[key]]]));
   for (const key of flags) Persistence[key].clear();
-  const storage = new Map();
-  globalThis.localStorage = { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) };
+  const storage = resetCacheEnv().map;
+  const oldLoadedPlant = Persistence._currentLoadedPlant;
+  Persistence._currentLoadedPlant = 'P0';
   t.mock.method(Toast, 'show', () => {}); // user-facing DOM notification boundary
   const requests = [];
   t.mock.method(Util, 'fetchTraced', (url, opts) => {
@@ -37,6 +39,7 @@ function fixture(t) {
     if (oldStorage === undefined) delete globalThis.localStorage; else globalThis.localStorage = oldStorage;
     if (oldWindow === undefined) delete globalThis.window; else globalThis.window = oldWindow;
     App._firmHintShown = oldFirmHint;
+    Persistence._currentLoadedPlant = oldLoadedPlant;
   });
   Store.setMasterData({ plants: [{ plant: 'P0' }], lines: Array.from({ length: 70 }, (_, i) => ({ plant: 'P0', machine: `M${i}` })) }, 'test');
   const tasks = Array.from({ length: 2100 }, (_, i) => ({
@@ -72,9 +75,10 @@ test('bulk edits on 70 machines save exactly 2,100 rows once and preserve 210 ne
   await f.respond(f.requests[0], f.tasks.map(task => task.id));
   assert.deepEqual(Persistence._dirtyIds, new Set(changedAgain.map(task => task.id)));
   for (const task of f.tasks) assert.equal(Store.tasks[task.id].row_version, '101');
-  const cached = JSON.parse(f.storage.get(Config.LS_KEY));
-  assert.equal(cached.tasks.length, 2100);
-  assert.deepEqual(new Set(cached._dirtyIds), Persistence._dirtyIds);
+  // The cache record holds ONLY the dirty rows (the 210 newer edits), never the clean 1,890.
+  const cached = readRecord('P0');
+  assert.equal(cached.rows.length, 210);
+  assert.deepEqual(new Set(cached.rows.map(r => r.id)), Persistence._dirtyIds);
   Persistence.saveAll();
   assert.equal(f.requests.length, 2);
   const retry = JSON.parse(f.requests[1].opts.body).tasks;

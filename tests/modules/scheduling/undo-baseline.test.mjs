@@ -8,6 +8,7 @@ import { Util, Toast, ErrorLog } from '../../../frontend/platform/foundation.mjs
 import { Runtime } from '../../../frontend/routing/runtime-client.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
+import { resetCacheEnv } from '../helpers/cache-env.mjs';
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 const rowFor = (id, extra = {}) => ({ id, PLANT: 'P', MATERIAL_NUMBER: 'MAT', MACHINE: 'M1',
@@ -19,8 +20,7 @@ const rowFor = (id, extra = {}) => ({ id, PLANT: 'P', MATERIAL_NUMBER: 'MAT', MA
 function fixture(t) {
   globalThis.window = {};
   globalThis.document = { getElementById: () => null };
-  const cache = new Map();
-  globalThis.localStorage = { getItem: k => cache.get(k) ?? null, setItem: (k, v) => cache.set(k, v) };
+  resetCacheEnv();
   for (const method of ['info', 'warn', 'error']) t.mock.method(ErrorLog, method, () => {});
   t.mock.method(Toast, 'show', () => {});
   t.mock.method(CalendarSync, 'fetchPlantConfig', async () => {});
@@ -37,10 +37,11 @@ function fixture(t) {
 }
 const keyOf = id => Persistence._baselineKey(Persistence._taskEditSnapshot(Store.tasks[id]));
 
-test('load records a baseline from the server row; a row with a cached edit overlaid gets none', async t => {
+test('load records a baseline from the server row; a restored row gets one too (its server key and version)', async t => {
   fixture(t);
   Store.setTasks([Persistence._prepTask(rowFor('A')), Persistence._prepTask(rowFor('B'))], 'persistence');
-  // A planner moved A and the edit sits in the offline cache.
+  const serverKeyA = keyOf('A');
+  // A planner moved A and the edit sits in the cache record.
   Store.updateTask('A', { start_date: new Date('2026-10-01T12:00:00'), end_date: new Date('2026-10-01T15:00:00') }, 'table');
   Persistence._dirtyIds.add('A');
   Persistence._saveCache();
@@ -49,7 +50,11 @@ test('load records a baseline from the server row; a row with a cached edit over
       : url.endsWith('/system-settings') ? {} : { rows: [] } }));
   await Persistence.load({ plant: 'P' }); await tick();
   assert.equal(Store.tasks.A.start_date.getHours(), 12, 'precondition: the cached edit was overlaid');
-  assert.equal(Persistence._savedBaseline.has('A'), false, 'an overlaid row is not the server row: unknown');
+  // FLIPPED (autosave-cache redesign, owner decision): a restored manual edit now gets a server baseline, so the Unsaved
+  // dialog can show before/after and an undo back to the saved state settles it. It used to be "unknown" (never settles).
+  assert.deepEqual(Persistence._savedBaseline.get('A'), { version: 1, key: serverKeyA }, 'the baseline is the SERVER row, not the restored edit');
+  assert.notEqual(keyOf('A'), serverKeyA, 'the live row differs from its baseline: still unsaved');
+  assert.equal(Persistence._dirtyIds.has('A'), true);
   const b = Persistence._savedBaseline.get('B');
   assert.equal(b.version, 1);
   assert.equal(b.key, keyOf('B'), 'the clean row carries its server key');

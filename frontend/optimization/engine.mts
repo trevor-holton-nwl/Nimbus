@@ -271,7 +271,10 @@ export function snapshotSchedule(plant?: string): ScheduleSnapshot {
  * this as one Store.updateMany call: candidates never publish intermediate
  * task, alert, autosave, or Timeline changes. */
 export function applySchedulePatches(patches: ReadonlyArray<SchedulePatch>): void {
-  if (patches.length) Store.updateMany(Array.from(patches), 'engine');
+  if (!patches.length) return;
+  Store.updateMany(Array.from(patches), 'engine');
+  // The Apply is now unsaved work: remember the board context it was planned in and write the cache record at once.
+  Persistence.noteApplied();
 }
 
 /** The setup-aware evaluators' single notion of "immovable" for a run: the

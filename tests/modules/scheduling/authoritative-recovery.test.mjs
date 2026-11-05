@@ -8,6 +8,8 @@ import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { Table } from '../../../frontend/scheduling/orders.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
 import { createRequire } from 'node:module';
+import { CacheStore } from '../../../frontend/platform/cache-store.mjs';
+import { resetCacheEnv, readRecord, CACHE_USER } from '../helpers/cache-env.mjs';
 
 // Placement derives from the plant clock, which projects through the compute core's zone helper (OQ52).
 globalThis.NimbusComputeCore = globalThis.NimbusComputeCore || createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
@@ -16,8 +18,7 @@ const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 function fixture(t) {
   globalThis.window = {};
   globalThis.document = { getElementById: () => null };
-  const cache = new Map();
-  globalThis.localStorage = { getItem: k => cache.get(k) ?? null, setItem: (k, v) => cache.set(k, v) };
+  resetCacheEnv();
   for (const method of ['info', 'warn', 'error']) t.mock.method(ErrorLog, method, () => {});
   t.mock.method(Toast, 'show', () => {});
   t.mock.method(CalendarSync, 'fetchPlantConfig', async () => {});
@@ -105,21 +106,21 @@ for (const atomic of [false, true]) test(`explicit reload discards same-version 
   assert.equal(Persistence._dirtyIds.size, 0);
   assert.equal(Persistence._forceIds.size, 0);
   assert.equal(Persistence._conflictedIds.size, 0);
-  const cached = JSON.parse(globalThis.localStorage.getItem(Config.LS_KEY));
-  assert.deepEqual(cached._dirtyIds, []);
-  assert.deepEqual(cached._optimizerDirtyIds, []);
+  const cached = readRecord('P');
+  assert.deepEqual(cached.rows, [], 'the deliberate discard cleared the record and the clean rewrite holds no rows');
+  assert.deepEqual(cached.optimizerIds, []);
 });
 
 test('failed explicit reload retains local tasks, conflicts, dirty flags and cache', async t => {
   fixture(t); cacheConflict();
-  const before = globalThis.localStorage.getItem(Config.LS_KEY), live = Store.tasks.A;
+  const before = CacheStore.peek('P').json, live = Store.tasks.A;
   t.mock.method(Util, 'fetchTraced', async () => { throw new Error('offline'); });
   t.mock.method(Persistence._reconnect, 'start', () => {});
   await Persistence.reload();
   assert.equal(Store.tasks.A, live);
   assert.equal(Persistence._conflictedIds.has('A'), true);
   assert.equal(Persistence._dirtyIds.has('A'), true);
-  assert.equal(globalThis.localStorage.getItem(Config.LS_KEY), before);
+  assert.equal(CacheStore.peek('P').json, before, 'a failed reload leaves the cache record exactly as it was');
 });
 
 test('normal startup load still restores same-version cached edits', async t => {
@@ -159,7 +160,7 @@ test('successful empty reload clears deleted tasks and cached dirty optimizer st
   assert.equal(Store.tasksArr.length, 0);
   assert.equal(Persistence._dirtyIds.size, 0);
   assert.equal(Persistence._conflictedIds.size, 0);
-  assert.deepEqual(JSON.parse(globalThis.localStorage.getItem(Config.LS_KEY)).tasks, []);
+  assert.deepEqual(readRecord('P').rows, [], 'the empty plant is marked loaded before the rewrite, so the record is cleared');
 });
 
 test('raw SAP date survives display-baseline snapping and a cache round trip', t => {
@@ -208,9 +209,9 @@ test('C1: the overlay restores the placement exception marker exactly as cached'
 
 for (const version of [6, Config.SCHEMA_VERSION]) test(`U22: online load ${version === Config.SCHEMA_VERSION ? 'keeps' : 'discards'} a cache written under schema ${version}`, async t => {
   const server = fixture(t); cacheConflict();
-  const raw = JSON.parse(globalThis.localStorage.getItem(Config.LS_KEY));
-  raw._schemaVersion = version;
-  globalThis.localStorage.setItem(Config.LS_KEY, JSON.stringify(raw));
+  const raw = readRecord('P');
+  raw.schemaVersion = version;
+  CacheStore.write({ user: CACHE_USER, plant: 'P', dirty: true }, JSON.stringify(raw));
   Persistence._dirtyIds.clear(); Persistence._conflictedIds.clear();
   mockLoad(t, server);
   await Persistence.load({ plant: 'P' }); await tick();
