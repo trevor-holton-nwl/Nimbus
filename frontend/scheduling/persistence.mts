@@ -2554,31 +2554,32 @@ export const Persistence = {
   },
 
   /** Admin/diagnostics inventory. Synchronous on purpose (cached store stats); `degraded` = storage is blocked or a put
-   *  has failed, `autosaveDisabled` is always false now (a failed write never latches). */
-  storageInventory(): { totalBytes: number; count: number; items: Array<{ key: string; bytes: number }>; degraded: boolean; lastBytes: number; lastSavedAt: number; autosaveDisabled: boolean; mode: string; failed: number; pending: number } {
+   *  has failed, `autosaveDisabled` is always false now (a failed write never latches). One unit throughout: UTF-16
+   *  code units ("chars"), key plus value; `lastChars` (the last backup record) counts the same way. */
+  storageInventory(): { totalChars: number; count: number; items: Array<{ key: string; chars: number }>; degraded: boolean; lastChars: number; lastSavedAt: number; autosaveDisabled: boolean; mode: string; failed: number; pending: number } {
     let total = 0, count = 0;
-    const items: Array<{ key: string; bytes: number }> = [];
+    const items: Array<{ key: string; chars: number }> = [];
     try {
       for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i) as string;
         const v = localStorage.getItem(k) || '';
-        const bytes = (k.length + v.length) * 2;   // UTF-16 estimate
-        total += bytes;
+        const chars = k.length + v.length;
+        total += chars;
         count++;
-        items.push({ key: k, bytes });
+        items.push({ key: k, chars });
       }
     } catch (e) { ErrorLog.warn('persistence', `Inventory failed: ${(e as Error).message}`); }
     const st = CacheStore.stats();
     const user = Persistence._cacheUser();
     const plant = Persistence._currentLoadedPlant;
     const rec = plant && user !== 'system' ? CacheStore.peek(plant) : null;
-    items.sort((a, b) => b.bytes - a.bytes);
+    items.sort((a, b) => b.chars - a.chars);
     return {
-      totalBytes:       total,
+      totalChars:       total,
       count,
       items,
       degraded:         st.failed > 0 || st.mode === 'none',
-      lastBytes:        st.lastChars || 0,
+      lastChars:        st.lastChars || 0,
       lastSavedAt:      rec?.savedAt || 0,
       autosaveDisabled: false,
       mode:             st.mode,

@@ -380,7 +380,10 @@ test('storageInventory is synchronous, built from the store stats, never reports
   assert.equal(inv.failed, 0);
   assert.equal(inv.pending, 0);
   assert.equal(inv.mode, 'localstorage');
-  assert.ok(inv.lastBytes > 0);
+  assert.ok(inv.lastChars > 0);
+  assert.equal(inv.items.reduce((n, i) => n + i.chars, 0), inv.totalChars, 'one unit: items sum to the total');
+  const rec = inv.items.find(i => i.key.startsWith(LS_RECORD_PREFIX));
+  assert.ok(rec && rec.chars >= inv.lastChars, 'the record item (key + value chars) is at least the last record chars');
   assert.ok(inv.lastSavedAt > 0);
   assert.equal(typeof inv.then, 'undefined', 'not a promise');
   assert.ok(MARKER_KEY.startsWith('nimbus.cache'));

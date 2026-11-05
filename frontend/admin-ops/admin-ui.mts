@@ -23,7 +23,7 @@ import { JobsClient } from './jobs-client.mjs';
 import { UnifiedLogPane } from './unified-log-pane.mjs';
 import type { JobRun } from './jobs-client.mjs';
 import { buildSignals, buildAttention, FORBIDDEN, NOT_FOUND, THRESHOLDS } from './signals.mjs';
-import { buildDiagSections, defaultOpen, ANCHOR_IDS } from './diag-sections.mjs';
+import { buildDiagSections, defaultOpen, ANCHOR_IDS, fmtKChars, backupState } from './diag-sections.mjs';
 import { buildPipelineSteps } from './pipeline-model.mjs';
 import type { PipelineModel, PipelineStepKey } from './pipeline-model.mjs';
 import type { ClientStats, DbDeep, DeepData, DiagInputs, DiagSection, DiagSectionId, PerfSample } from './diag-sections.mjs';
@@ -703,8 +703,8 @@ export const AdminCockpit = {
       const mem = (performance as Performance & { memory?: ChromePerformanceMemory }).memory;
       const c: ClientStats = {
         build: Config.BUILD_ID,
-        autosave: inv.autosaveDisabled ? Util.t('ui.ls_quota_disabled') : inv.degraded ? Util.t('ui.ls_degraded') : Util.t('ui.ls_healthy'),
-        autosaveDisabled: !!inv.autosaveDisabled, degraded: !!inv.degraded,
+        autosave: AdminCockpit._backupLabel(inv),
+        degraded: !!inv.degraded,
         errRate: ErrorLog.errorRatePerMin(),
       };
       if (mem) { c.heapUsed = mem.usedJSHeapSize; c.heapLimit = mem.jsHeapSizeLimit; }
@@ -1257,8 +1257,8 @@ export const AdminCockpit = {
     const s = A._ovSlow;
     let st: ReturnType<typeof Persistence.stats> | null = null;
     try { st = Persistence.stats ? Persistence.stats() : null; } catch { st = null; }
-    let inv: { autosaveDisabled?: boolean; degraded?: boolean } = {};
-    try { inv = Persistence.storageInventory(); } catch { inv = {}; }
+    let inv: { degraded?: boolean; blocked?: boolean } = {};
+    try { const si = Persistence.storageInventory(); inv = { degraded: si.degraded, blocked: backupState(si) === 'blocked' }; } catch { inv = {}; }
     const mem = (typeof performance !== 'undefined'
       ? (performance as Performance & { memory?: ChromePerformanceMemory }).memory : undefined);
     const newestUpload = s.uploadAudit[0];
@@ -3090,8 +3090,8 @@ export const AdminCockpit = {
     if (!host) return;
 
     const inv  = Persistence.storageInventory();
-    const totK = (inv.totalBytes / 1024).toFixed(1);
-    const lastK = (inv.lastBytes / 1024).toFixed(1);
+    const totK = fmtKChars(inv.totalChars);
+    const lastK = fmtKChars(inv.lastChars);
     const lastWhen = inv.lastSavedAt ? Util._fmtTimePref(new Date(inv.lastSavedAt)) : '—';
     const errCount  = ErrorLog.countBy('error');
     const warnCount = ErrorLog.countBy('warn');
@@ -3103,11 +3103,9 @@ export const AdminCockpit = {
       : 'n/a';
     const stats: AdminPersistenceStats | Record<string, never> = (Persistence.stats && Persistence.stats()) || {};
 
-    const autosaveTxt = inv.autosaveDisabled
-      ? `<span class="admin-bad">${Util.t('ui.ls_quota_disabled')}</span>`
-      : inv.degraded
-        ? `<span>${Util.t('ui.ls_degraded')}</span>`
-        : `<span class="admin-good">${Util.t('ui.ls_healthy')}</span>`;
+    const autosaveTxt = backupState(inv) === 'ok'
+      ? `<span class="admin-good">${AdminCockpit._backupLabel(inv)}</span>`
+      : `<span class="admin-warn">${AdminCockpit._backupLabel(inv)}</span>`;
     const errTxt = errRate > THRESHOLDS.errRateErrPerMin
       ? `<span class="admin-bad">${Util.t('ui.diag_err_rate_spike', { count: errCount, rate: errRate })}</span>`
       : errRate > 0
@@ -3139,6 +3137,12 @@ export const AdminCockpit = {
     document.getElementById('admin-diag-reset'  )!.addEventListener('click', () => AdminCockpit._resetClientState());
     AdminCockpit._computeClientStats();
     AdminCockpit._repaintHeads();
+  },
+
+  /** The translated backup state: backed up, last write failed, or browser storage blocked. */
+  _backupLabel(inv: { degraded?: boolean; mode?: string }): string {
+    const st = backupState(inv);
+    return Util.t(st === 'blocked' ? 'ui.ls_blocked' : st === 'failed' ? 'ui.ls_degraded' : 'ui.ls_healthy');
   },
 
   async _resetClientState(): Promise<void> {
@@ -3182,13 +3186,13 @@ export const AdminCockpit = {
   _showStorageInventory(inv?: AdminStorageInventory): void {
     if (!inv) inv = Persistence.storageInventory();
     const top = inv.items.slice(0, 12)
-      .map((i) => `${(i.bytes / 1024).toFixed(1).padStart(7)} KB  ${i.key}`)
+      .map((i) => `${fmtKChars(i.chars).padStart(7)}  ${i.key}`)
       .join('\n') || Util.t('ui.ls_empty');
-    const lsStatus = inv.autosaveDisabled ? Util.t('ui.ls_autosave_disabled') : inv.degraded ? Util.t('ui.ls_evicted_tier') : Util.t('ui.ls_healthy');
+    const lsStatus = AdminCockpit._backupLabel(inv);
     const detail =
       `<pre style="margin:0;font:11px ui-monospace,monospace;white-space:pre;">` +
-      Util.t('modal.ls_inv_total', { size: (inv.totalBytes / 1024).toFixed(1), count: inv.count }) + '\n' +
-      Util.t('modal.ls_inv_snapshot', { size: (inv.lastBytes / 1024).toFixed(1), status: lsStatus }) + '\n\n' +
+      Util.t('modal.ls_inv_total', { size: fmtKChars(inv.totalChars), count: inv.count }) + '\n' +
+      Util.t('modal.ls_inv_snapshot', { size: fmtKChars(inv.lastChars), status: lsStatus }) + '\n\n' +
       Util.t('modal.ls_inventory_top_keys') + `\n${top}` +
       `</pre>`;
     Modal.confirm({

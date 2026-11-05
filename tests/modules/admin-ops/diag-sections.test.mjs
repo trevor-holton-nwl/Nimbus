@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
-import { buildDiagSections, defaultOpen, ANCHOR_IDS } from '../../../frontend/admin-ops/diag-sections.mjs';
+import { buildDiagSections, defaultOpen, ANCHOR_IDS, fmtKChars, backupState } from '../../../frontend/admin-ops/diag-sections.mjs';
 import { THRESHOLDS } from '../../../frontend/admin-ops/signals.mjs';
 
 const root = new URL('../../../frontend/', import.meta.url);
@@ -102,8 +102,22 @@ test('browser: heap 79 / 80 percent and errors per minute 0 / 1 / 10 / 11', () =
   assert.equal(sev(errs(9), 'client'), 'warn');
   assert.equal(sev(errs(10), 'client'), 'warn');
   assert.equal(sev(errs(11), 'client'), 'err');
-  assert.equal(sev(base({ client: { build: 'b', autosave: 'off', autosaveDisabled: true, errRate: 0 } }), 'client'), 'err');
+  // a failing or blocked backup is a warning, never an error; a healthy one is not an alert
+  assert.equal(sev(base({ client: { build: 'b', autosave: 'x', degraded: true, errRate: 0 } }), 'client'), 'warn');
+  assert.equal(sev(base({ client: { build: 'b', autosave: 'x', degraded: false, errRate: 0 } }), 'client'), 'ok');
+  assert.equal(sev(base({ client: { build: 'b', autosave: 'x', degraded: true, errRate: 11 } }), 'client'), 'err');
   assert.equal(sec(heap(55), 'client').shortArgs.heap, 55);
+});
+
+test('storage units: one unit (chars), shown as thousands; backup state from the inventory', () => {
+  assert.equal(fmtKChars(0), '0.0');
+  assert.equal(fmtKChars(1500), '1.5');
+  assert.equal(fmtKChars(2_345_678), '2345.7');
+  assert.equal(fmtKChars(undefined), '0.0');
+  assert.equal(backupState({ degraded: false, mode: 'localstorage' }), 'ok');
+  assert.equal(backupState({ degraded: true, mode: 'localstorage' }), 'failed');
+  assert.equal(backupState({ degraded: true, mode: 'none' }), 'blocked');
+  assert.equal(backupState({}), 'ok');
 });
 
 test('tables: any needs_vacuum warns; locks: any wait is an error; indexes: unused stays ok', () => {

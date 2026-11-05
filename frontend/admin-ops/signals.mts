@@ -109,7 +109,8 @@ export interface SignalInputs {
   sapErr?: string;
   client: {
     stats: { source: 'backend' | null; raw_received: number; rendered: number } | null;
-    inv: { autosaveDisabled?: boolean; degraded?: boolean };
+    /** degraded = the last backup write failed or storage is blocked; blocked = storage unavailable (no backup at all). */
+    inv: { degraded?: boolean; blocked?: boolean };
     errors: number; warns: number;
     /** Browser errors per minute. */
     errRate: number;
@@ -352,9 +353,9 @@ function _browser(i: SignalInputs, t: Thresholds): Signal {
   const reset = _fix('client.reset', 'btn.reset_client');
   const save = _fix('client.save', 'btn.save');
   const conds: Cond[] = [];
-  if (c.inv.autosaveDisabled) conds.push({ sev: 'err', key: 'sig.browser_autosave_off', args: {}, fixes: [save] });
   if (c.errRate > t.errRateErrPerMin) conds.push({ sev: 'err', key: 'sig.browser_errors', args: { n: c.errors }, fixes: [reset] });
-  if (c.inv.degraded) conds.push({ sev: 'info', key: 'sig.browser_degraded', args: {} });
+  if (c.inv.blocked) conds.push({ sev: 'warn', key: 'sig.browser_backup_blocked', args: {}, fixes: [save] });
+  else if (c.inv.degraded) conds.push({ sev: 'warn', key: 'sig.browser_backup_failed', args: {}, fixes: [save] });
   const heapPct = c.heapUsed !== undefined && c.heapLimit ? Math.round((c.heapUsed / c.heapLimit) * 100) : null;
   if (heapPct !== null && heapPct >= t.heapWarnPct) conds.push({ sev: 'warn', key: 'sig.browser_heap', args: { pct: heapPct }, fixes: [reset] });
   if (c.errors > 0) conds.push({ sev: 'warn', key: 'sig.browser_errors', args: { n: c.errors }, fixes: [reset] });
@@ -409,7 +410,7 @@ export function buildAttention(signals: Signal[], i: SignalInputs): AttentionIte
     const held = i.sap.batches.filter(b => b.status === 'held').length;
     if (held > 0) add({ id: 'sap_held', severity: 'warn', textKey: 'attn.sap_held', args: { n: held }, fix: _nav('nav.interface', 'btn.open_interface', 'sap:staging') });
   }
-  if (i.client.inv.autosaveDisabled) add({ id: 'autosave', severity: 'err', textKey: 'attn.autosave', args: {}, fix: _fix('client.save', 'btn.save') });
+  if (i.client.inv.degraded || i.client.inv.blocked) add({ id: 'autosave', severity: 'warn', textKey: 'attn.autosave', args: {}, fix: _fix('client.save', 'btn.save') });
   if (i.uploadWarnings && i.uploadWarnings.distribution > 0) {
     add({ id: 'distribution', severity: 'warn', textKey: i.uploadWarnings.distribution === 1 ? 'attn.distribution_one' : 'attn.distribution', args: { n: i.uploadWarnings.distribution, batchId: i.uploadWarnings.batchId }, fix: _nav('nav.order_maintenance', 'btn.open_history', 'admin-audit') });
   }
