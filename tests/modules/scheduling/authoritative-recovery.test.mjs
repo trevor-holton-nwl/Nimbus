@@ -106,9 +106,7 @@ for (const atomic of [false, true]) test(`explicit reload discards same-version 
   assert.equal(Persistence._dirtyIds.size, 0);
   assert.equal(Persistence._forceIds.size, 0);
   assert.equal(Persistence._conflictedIds.size, 0);
-  const cached = readRecord('P');
-  assert.deepEqual(cached.rows, [], 'the deliberate discard cleared the record and the clean rewrite holds no rows');
-  assert.deepEqual(cached.optimizerIds, []);
+  assert.equal(readRecord('P'), null, 'the deliberate discard cleared the record and no empty record is rewritten');
 });
 
 test('failed explicit reload retains local tasks, conflicts, dirty flags and cache', async t => {
@@ -160,7 +158,7 @@ test('successful empty reload clears deleted tasks and cached dirty optimizer st
   assert.equal(Store.tasksArr.length, 0);
   assert.equal(Persistence._dirtyIds.size, 0);
   assert.equal(Persistence._conflictedIds.size, 0);
-  assert.deepEqual(readRecord('P').rows, [], 'the empty plant is marked loaded before the rewrite, so the record is cleared');
+  assert.equal(readRecord('P'), null, 'the empty plant is marked loaded before the rewrite, so the record is cleared (deleted, not rewritten empty)');
 });
 
 test('raw SAP date survives display-baseline snapping and a cache round trip', t => {

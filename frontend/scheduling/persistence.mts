@@ -32,7 +32,7 @@
 import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
 import { CacheStore } from '../platform/cache-store.mjs';
-import { buildCacheRecord, serializeCacheRecord, parseCacheRecord, fingerprintText, applyContextChanged } from './cache-record.mjs';
+import { buildCacheRecord, serializeCacheRecord, parseCacheRecord, fingerprintText, applyContextChanged, convertLegacyState } from './cache-record.mjs';
 import type { CacheRecord, CacheApplyContext } from './cache-record.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
 import { CalendarSync } from '../calendar/calendar-sync.mjs';
@@ -153,8 +153,13 @@ interface RestorePlan {
   source: Map<string, string>;
   reasons: Set<RestoreReason>;
   lost: number;
-  /** A server row failed to prepare, so a missing id proves nothing: nothing was discarded, writes are held. */
+  /** A server row failed to prepare, so a missing id proves nothing: nothing was discarded, the unmatched rows are held. */
   deferred: boolean;
+  /** The record's rows a deferral could not place (raw, already projected): kept in memory and merged into every write. */
+  held: Array<Record<string, unknown>>;
+  heldOptimizerIds: string[];
+  heldFirmIds: string[];
+  heldApplyContext: CacheApplyContext | null;
   applyContext: CacheApplyContext | null;
 }
 
@@ -290,7 +295,9 @@ export const Persistence = {
   /** schedule_event retention window (days), from the system-settings blob the boot fetch loads. Default 14. */
   scheduleEventRetentionDays: 14,
   async confirmPlantSwitch(plant: string | null): Promise<boolean> {
-    if (plant === Store.selectedPlant || Persistence._dirtyIds.size === 0) return true;
+    // After the boot restore Store.selectedPlant is still null while the plant IS displayed: picking it again is no switch.
+    if (plant === Store.selectedPlant || plant === Persistence._currentLoadedPlant) return true;
+    if (Persistence._dirtyIds.size === 0 && !Persistence._hasHeldRows()) return true;
     const discard = await Modal.confirm({
       title: Util.t('modal.discard_schedule_title'),
       message: Util.t('modal.discard_schedule_message'),
@@ -312,15 +319,16 @@ export const Persistence = {
     Persistence._conflictedIds.clear();
     Persistence._firmDirtyIds.clear();
     Persistence._dirtySource.clear();
+    Persistence._clearHeld();
     // A later re-selection of the outgoing plant must fetch its saved state,
     // including when the user cleared the selector before re-selecting it.
     Persistence._currentLoadedPlant = null;
     Persistence._syncUnsaved();
   },
   /** Undo-settle baseline: per order, the last SERVER-sourced saved state (the `_taskEditSnapshot` key, minus the
-   *  per-edit `source`/`FIRMED` markers, plus the row_version it was taken at). Recorded only from a server load of a row
-   *  no cached edit was overlaid on, a successful save (what was sent + the new version) and an applied refresh row;
-   *  cleared on every tasks:bulk. A row with no entry is "unknown" and an undo never un-dirties it. */
+   *  per-edit `source`/`FIRMED` markers, plus the row_version it was taken at). Recorded from EVERY server row of a load
+   *  (a restored cache row too: its baseline is the server row it was edited from, same version), a successful save (what
+   *  was sent + the new version) and an applied refresh row; cleared on every tasks:bulk. A row with no entry is "unknown" and an undo never un-dirties it. */
   _savedBaseline: new Map<string, { version: NimbusTask['row_version']; key: string }>(),
   /** The comparable key of an edit snapshot: the per-edit markers differ after an undo and are not saved content. */
   _baselineKey(snapshot: Record<string, unknown>): string {
@@ -389,14 +397,32 @@ export const Persistence = {
   // Fingerprints of the board context (plant calendar, tool inventory, setup snapshot) taken when the oldest still-unsaved
   // optimizer Apply was committed; written into the cache record so a restore can warn that the context moved on.
   _applyContext: null as CacheApplyContext | null,
-  // Plant whose cache record a load deferred (rows it could not match because a row failed to prepare): while it is the
-  // loaded plant, _saveCache must not overwrite the record. Cleared at the top of the next load().
+  // Plant whose cache record a load deferred (rows it could not match because a row failed to prepare, or an empty answer).
+  // Those rows are not on the board: they are kept here (raw, projected), merged into EVERY cache write for that plant, and
+  // counted as unsaved work. Cleared only when a load commits a board (setTasks), a deliberate discard, or a plant switch.
   _cacheHoldPlant: null as string | null,
+  _heldRows: [] as Array<Record<string, unknown>>,
+  _heldOptimizerIds: [] as string[],
+  _heldFirmIds: [] as string[],
+  _heldApplyContext: null as CacheApplyContext | null,
+  _hasHeldRows(): boolean { return Persistence._heldRows.length > 0; },
+  _clearHeld(): void {
+    Persistence._cacheHoldPlant = null; Persistence._heldRows = []; Persistence._heldOptimizerIds = []; Persistence._heldFirmIds = [];
+    Persistence._heldApplyContext = null;
+  },
+  /** Keep the given raw record rows as held for `plant` (rows already held stay). */
+  _holdRows(plant: string, rows: Array<Record<string, unknown>>, optimizerIds: string[], firmIds: string[]): void {
+    Persistence._cacheHoldPlant = plant;
+    const have = new Set(Persistence._heldRows.map(r => String(r.id)));
+    for (const r of rows) if (!have.has(String(r.id))) Persistence._heldRows.push(r);
+    Persistence._heldOptimizerIds = [...new Set([...Persistence._heldOptimizerIds, ...optimizerIds])];
+    Persistence._heldFirmIds = [...new Set([...Persistence._heldFirmIds, ...firmIds])];
+  },
   // Unsaved work a sign-out would discard. Deliberately includes What-If and queued calendar
   // deletes; unsaved admin-form edits (setup, master data) are not detectable here.
   hasPendingWork(): boolean {
     if (Persistence._dirtyIds.size || Persistence._forceIds.size
-        || Persistence._conflictedIds.size || Persistence._firmDirtyIds.size) return true;
+        || Persistence._conflictedIds.size || Persistence._firmDirtyIds.size || Persistence._hasHeldRows()) return true;
     if (Sandbox.active) return true;
     try {
       const raw = localStorage.getItem('nimbus.calendar.pendingDeletes');
@@ -457,6 +483,7 @@ export const Persistence = {
     const acceptDiscard = (): void => {
       if (!discardLocalEdits) return;
       if (plant) Persistence._discardCacheRecord(plant);
+      Persistence._clearHeld();
       Persistence._dirtyIds.clear();
       Persistence._forceIds.clear();
       Persistence._conflictedIds.clear();
@@ -470,7 +497,6 @@ export const Persistence = {
     // _loadRequest field comment above for why this mirrors _setupSnapshotRequest.
     const loadGeneration = ++Persistence._loadRequest;
     Persistence.bootReady = false;
-    Persistence._cacheHoldPlant = null;
     Persistence._lastAttemptedPlant = plant ?? null;
     const stats: LoadStats = Persistence._lastLoad = {
       source: null, ts: new Date().toISOString(), plant: plant ?? null,
@@ -523,6 +549,7 @@ export const Persistence = {
     if (!plant) {
       ErrorLog.info('persistence', 'No plant selected — skipping /tasks; loading master data for the picker');
       stats.source = 'backend';
+      Persistence._clearHeld();
       Store.setTasks([], 'persistence');
       Store.setVisibilityHorizonEnd(null, 'persistence');
       Store.setFrozenHorizonEnd(null, 'persistence');
@@ -562,7 +589,7 @@ export const Persistence = {
         return r.json() as Promise<TasksResponse>;
       })
       // The cache store opens (and reads this user's record) before the first overlay; it never rejects.
-      .then(payload => CacheStore.ready(Persistence._cacheUser()).then(() => payload, () => payload))
+      .then(payload => Persistence._openCache(plant).then(() => payload, () => payload))
       .then(payload => {
         Persistence._raiseCacheNotices();
         // Plant-switch race guard: if a newer load() has started since this fetch
@@ -616,6 +643,7 @@ export const Persistence = {
           ErrorLog.warn('persistence', 'Backend returned zero rows — nothing to render');
           Toast.show(Util.t('toast.backend_zero_orders'), 'warn');
           acceptDiscard();
+          Persistence._clearHeld();
           Store.setTasks([], 'persistence');
           // The plant is marked loaded BEFORE the cache write: _saveCache refuses to write while no plant is loaded.
           Persistence._currentLoadedPlant = plant;
@@ -627,7 +655,11 @@ export const Persistence = {
             const { record: zeroRec } = discardLocalEdits ? { record: null } : Persistence._readCacheRecord(plant);
             if (zeroRec) {
               Persistence._restoreNonTaskState(zeroRec.context as Partial<StoredState>);
-              if (zeroRec.rows.length) Persistence._cacheHoldPlant = plant;
+              if (zeroRec.rows.length) {
+                Persistence._holdRows(plant, zeroRec.rows as Array<Record<string, unknown>>, zeroRec.optimizerIds ?? [], zeroRec.firmDirtyIds ?? []);
+                Persistence._heldApplyContext = zeroRec.applyContext ?? null;
+                Toast.show(Util.t('toast.cache_deferred', { count: zeroRec.rows.length }), 'warn', 15000);
+              }
             }
           } catch (e) { ErrorLog.warn('persistence', 'cached non-task state restore failed (zero-task path)', undefined, { stack: (e as Error)?.stack }); }
           // Fetch master-data so orderless plants/lines appear in Master Data tabs,
@@ -738,7 +770,6 @@ export const Persistence = {
         let restorePlan: RestorePlan | null = null;
         if (cacheRec?.rows.length) {
           restorePlan = Persistence._planRestore(cacheRec, tasks, stats.errors > 0);
-          if (restorePlan.deferred) Persistence._cacheHoldPlant = plant;
           Persistence._toastNotRestored(restorePlan);
         } else if (readRec.unreadable) {
           Persistence._toastNotRestored({ reasons: new Set<RestoreReason>(['unmatched']), lost: 0 });
@@ -748,6 +779,13 @@ export const Persistence = {
         // from its due date by the reconcile, and a placed row keeps the stored edges.)
 
         acceptDiscard();
+        // The board commits here: a hold from an earlier load ends, this load's own deferral (if any) starts.
+        Persistence._clearHeld();
+        if (restorePlan?.deferred) {
+          Persistence._holdRows(plant, restorePlan.held, restorePlan.heldOptimizerIds, restorePlan.heldFirmIds);
+          Persistence._heldApplyContext = restorePlan.heldApplyContext;
+          Toast.show(Util.t('toast.cache_deferred', { count: restorePlan.held.length }), 'warn', 15000);
+        }
         const setResult = Store.setTasks(tasks, 'persistence');
         // setTasks cleared the baseline (tasks:bulk). EVERY server row gets one, a restored row too: its baseline is the
         // server row it was edited from (same version, checked above), so the Unsaved dialog shows before/after and an
@@ -1360,8 +1398,44 @@ export const Persistence = {
       if (n === 'put_failed') Toast.show(Util.t('toast.cache_put_failed'), 'warn', 10000);
       else if (n === 'older_record') Toast.show(Util.t('toast.cache_older_record'), 'warn', 15000);
       else if (n === 'dirty_no_record') Toast.show(Util.t('toast.cache_dirty_no_record'), 'warn', 15000);
+      else if (n === 'read_failed') Toast.show(Util.t('toast.cache_read_failed'), 'warn', 15000);
       else ErrorLog.info('persistence', `Cache store notice: ${n}`);
     }
+  },
+
+  /** Opens the cache store for this user, converts a pre-redesign `nimbus.state.v3` blob (once), then READS this plant's stored
+   *  record: the boot only reads the marker's plant, and a write for a plant whose record was never read would overwrite it
+   *  blind. A failed read holds writes for the plant (store notice 'read_failed'). Never rejects. */
+  async _openCache(plant: string | null): Promise<void> {
+    try {
+      const user = Persistence._cacheUser();
+      await CacheStore.ready(user);
+      if (user !== 'system') await Persistence._migrateLegacyCache(user);
+      if (plant) await CacheStore.read(plant);
+    } catch (e) { ErrorLog.warn('persistence', `Cache open failed: ${(e as Error)?.message}`); }
+  },
+
+  /** The old blob held the whole board; only its unsaved rows matter. Dirty rows become this user's compact record for the
+   *  plant it was saved for (marker dirty=true), then the blob is ALWAYS removed (clean, unparseable, converted or not): it
+   *  is megabytes of localStorage the new records would otherwise hit the quota against. */
+  async _migrateLegacyCache(user: string): Promise<void> {
+    const raw = CacheStore.legacyBlob();
+    if (raw === null) return;
+    let lost = 0;
+    try {
+      const conv = convertLegacyState(raw, user, Config.SCHEMA_VERSION, Config.BUILD_ID);
+      if (conv?.dirty) {
+        if (CacheStore.hasMarker()) {
+          ErrorLog.warn('persistence', 'Legacy cache dropped: the new cache has been in use since');
+        } else {
+          const r = await CacheStore.importLegacy(serializeCacheRecord(conv.record), conv.plant, user, { converted: true, dirty: true });
+          if (!r.imported && r.reason !== 'record-exists') lost = conv.record.rows.length;
+          ErrorLog.info('persistence', `Legacy cache converted for ${conv.plant}: ${conv.record.rows.length} unsaved rows (${r.imported ? 'imported' : r.reason})`);
+        }
+      }
+    } catch (e) { ErrorLog.warn('persistence', `Legacy cache conversion failed: ${(e as Error)?.message}`); }
+    CacheStore.dropLegacy();
+    if (lost > 0) Toast.show(Util.t('toast.cache_changes_lost', { count: lost }), 'warn', 15000);
   },
 
   /** This plant's cache record for the signed-in user, parsed and checked. `unreadable` = a record holding rows exists but
@@ -1402,6 +1476,8 @@ export const Persistence = {
       if (key in c) row[key] = c[key] == null ? null : Util.parseDate(c[key] as string);
     }
     if ('scheduleSegments' in c || 'schedule_segments' in c) t.scheduleSegments = Persistence._segmentsFromRaw(c);
+    // An unsaved Unschedule: the queued row has no dates, whatever keys the record projected.
+    if (c.planning_status === 'needs_planning') { t.start_date = null; t.end_date = null; t.scheduleSegments = []; }
     const issue = Persistence._reviveDerivationIssue(c.derivationIssue as { code?: string } | null | undefined);
     if (issue) t.derivationIssue = issue;
     if ('firmed' in c && firmDirty.has(String(t.id))) t.firmed = !!c.firmed;
@@ -1413,13 +1489,17 @@ export const Persistence = {
   _serverMatchesCached(t: NimbusTask, c: Record<string, unknown>, firmDirty: ReadonlySet<string>): boolean {
     if (!('planning_status' in c) && !('start_date' in c)) return false;
     const text = (v: unknown): string => (v == null ? '' : String(v));
+    // Dates compare as instants. A DST fall-back repeated hour is ambiguous in a naive local string: accepted as-is.
     const sameDate = (a: unknown, b: unknown): boolean => {
       if (a == null || b == null) return a == null && b == null;
       const x = a instanceof Date ? a : Util.parseDate(a as string), y = b instanceof Date ? b : Util.parseDate(b as string);
       return x instanceof Date && y instanceof Date && x.getTime() === y.getTime();
     };
-    const displayOnly = !t.user_scheduled && t.planning_status !== 'needs_planning';
+    // Display-only needs BOTH sides unplaced and unqueued: a cached placement the server row lacks is an unsaved edit.
+    const cachedPlaced = 'user_scheduled' in c ? !!c.user_scheduled : !!t.user_scheduled;
+    const displayOnly = !cachedPlaced && !t.user_scheduled && c.planning_status !== 'needs_planning' && t.planning_status !== 'needs_planning';
     if (!displayOnly) {
+      if (cachedPlaced !== !!t.user_scheduled) return false;
       if ('planning_status' in c && text(c.planning_status ?? 'scheduled') !== text(t.planning_status ?? 'scheduled')) return false;
       if ('planning_reason' in c) {
         const code = (v: unknown): string => text((v as { code?: unknown } | null | undefined)?.code);
@@ -1433,10 +1513,15 @@ export const Persistence = {
       }
     }
     if ('placement_exception' in c && text(c.placement_exception) !== text(t.placement_exception)) return false;
-    for (const key of ['MACHINE', 'PRT_01', 'PRT_02', 'PRODUCTION_VERSION'] as const) {
+    for (const key of ['MACHINE', 'PRT_01', 'PRT_02'] as const) {
       if (key in c && text(c[key]) !== text(t[key])) return false;
     }
-    if ('RUN_TIME' in c && (c.RUN_TIME == null ? null : Number(c.RUN_TIME)) !== (t.RUN_TIME == null ? null : Number(t.RUN_TIME))) return false;
+    // The save path normalises the production version; compare it the same way (a blank and a null are the same value).
+    if ('PRODUCTION_VERSION' in c && text(Runtime.normPv(c.PRODUCTION_VERSION)) !== text(Runtime.normPv(t.PRODUCTION_VERSION))) return false;
+    if ('RUN_TIME' in c) {
+      const a = c.RUN_TIME == null ? null : Number(c.RUN_TIME), b = t.RUN_TIME == null ? null : Number(t.RUN_TIME);
+      if ((a === null) !== (b === null) || (a !== null && b !== null && Math.abs(a - b) > 0.0005)) return false;
+    }
     if (firmDirty.has(String(t.id)) && 'firmed' in c && !!c.firmed !== !!t.firmed) return false;
     return true;
   },
@@ -1470,15 +1555,17 @@ export const Persistence = {
    *     already matches is silent) and also gets its Firm/Unfirm back when its id is in `firmDirtyIds`.
    *  `partialLoad` (a server row failed to prepare) turns a "missing" verdict into a deferral, never a discard. */
   _planRestore(rec: CacheRecord, tasks: NimbusTask[], partialLoad: boolean): RestorePlan {
-    const plan: RestorePlan = { overlaid: [], force: [], firm: [], source: new Map(), reasons: new Set(), lost: 0, deferred: false, applyContext: null };
+    const plan: RestorePlan = { overlaid: [], force: [], firm: [], source: new Map(), reasons: new Set(), lost: 0, deferred: false, held: [], heldOptimizerIds: [], heldFirmIds: [], heldApplyContext: null, applyContext: null };
     const byId = new Map<string, NimbusTask>(tasks.map(t => [String(t.id), t]));
     const firmSet = new Set<string>((rec.firmDirtyIds ?? []).map(String));
     const optSet = new Set<string>((rec.optimizerIds ?? []).map(String));
     const sources = new Map<string, string>();
     const rows: Array<Record<string, unknown>> = [];
+    const rawById = new Map<string, Record<string, unknown>>();
     for (const raw of rec.rows) {
       const { dirtySource, ...c } = raw as Record<string, unknown>;
       c.id = String(c.id);
+      rawById.set(c.id as string, raw as Record<string, unknown>);
       if (typeof dirtySource === 'string' && dirtySource) sources.set(c.id as string, dirtySource);
       rows.push(c);
     }
@@ -1510,6 +1597,12 @@ export const Persistence = {
         plan.applyContext = rec.applyContext ?? null;
       } else if (verdict === 'missing' && partialLoad) {
         plan.deferred = true;
+        for (const c of group) {
+          plan.held.push(rawById.get(c.id as string) as Record<string, unknown>);
+          plan.heldOptimizerIds.push(c.id as string);
+          if (firmSet.has(c.id as string)) plan.heldFirmIds.push(c.id as string);
+        }
+        plan.heldApplyContext = rec.applyContext ?? null;
       } else if (verdict !== 'saved') {
         plan.reasons.add(verdict); plan.lost += group.length;
       }
@@ -1520,15 +1613,28 @@ export const Persistence = {
       const id = c.id as string;
       const t = byId.get(id);
       if (!t) {
-        if (partialLoad) plan.deferred = true; else { plan.reasons.add('missing'); plan.lost++; }
+        if (partialLoad) {
+          plan.deferred = true; plan.held.push(rawById.get(id) as Record<string, unknown>);
+          if (firmSet.has(id)) plan.heldFirmIds.push(id);
+        } else { plan.reasons.add('missing'); plan.lost++; }
         continue;
       }
       const vc = c.row_version as number | null | undefined, vs = t.row_version;
-      if (vc != null && vs != null && vc !== vs) {
-        if (!Persistence._serverMatchesCached(t, c, firmSet)) { plan.reasons.add('stale'); plan.lost++; }
-        continue;   // moved on and equal = already saved, silent
+      if (vc != null && vs != null) {
+        if (vc !== vs) {
+          if (!Persistence._serverMatchesCached(t, c, firmSet)) { plan.reasons.add('stale'); plan.lost++; }
+          continue;   // moved on and equal = already saved, silent
+        }
+        // Equal non-null versions prove the server row is exactly what the edit started from: restore EVERY cached field
+        // (a Slot of a queued order, a placement on a row with no baseline start, an attribute-only edit), like the batch.
+        if (Persistence._cachedRowApplies(t, c, firmSet)) {
+          Persistence._applyCachedRow(t, c, firmSet);
+          plan.overlaid.push(id);
+          if (firmSet.has(id) && 'firmed' in c) plan.firm.push(id);
+        } else { plan.reasons.add('unmatched'); plan.lost++; }
+        continue;
       }
-      apply.push(c);
+      apply.push(c);   // a missing version on either side: only the legacy "start moved" rule can say anything
     }
     const restored = new Set<string>(Persistence._overlayUserMoves(apply.map(c => byId.get(c.id as string) as NimbusTask), apply));
     for (const c of apply) {
@@ -2335,6 +2441,10 @@ export const Persistence = {
   _rememberedPlant(): string | null {
     try { return CacheStore.rememberedPlant(); } catch { return null; }
   },
+  /** True when the cache marker says the remembered plant holds unsaved edits (the boot restore may not have run yet). */
+  _rememberedDirty(): boolean {
+    try { return CacheStore.rememberedDirty(); } catch { return false; }
+  },
 
   /** Leaving the page (visibilitychange->hidden is the main path, pagehide best effort): write the record now, then ask the
    *  store to start any queued put in its own transaction instead of waiting behind an in-flight one. */
@@ -2347,21 +2457,39 @@ export const Persistence = {
   /** Offline boot: tell the planner their unsaved edits are safe (the record is untouched; the reconnect load() overlays it). */
   async _noteKeptEdits(plant: string): Promise<void> {
     try {
-      await CacheStore.ready(Persistence._cacheUser());
+      await Persistence._openCache(plant);
       const n = Persistence._readCacheRecord(plant).record?.rows.length ?? 0;
       if (n > 0) Toast.show(Util.t('toast.cache_kept_offline', { count: n }), 'warn', 15000);
     } catch (e) { ErrorLog.warn('persistence', `Kept-edits notice failed: ${(e as Error)?.message}`); }
   },
 
+  /** The non-task context a record carries, limited to the record's plant (the Store may hold other plants' calendars,
+   *  blocks and settings from earlier visits). `lineSettings` stays: the machine-to-plant sync needs it before the overlay. */
+  _cacheContext(plant: string): import('./cache-record.mjs').CacheRecordContext {
+    const mine = <T extends { plant?: string | null }>(x: T): boolean => !x.plant || x.plant === plant;
+    const lineSettings: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(Store.lineSettings)) if (mine(v)) lineSettings[k] = v;
+    const calendars: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(Store.calendars)) { const ls = Store.lineSettings[k]; if (!ls || mine(ls)) calendars[k] = v; }
+    const plants: Record<string, unknown> = {};
+    if (Store.plants[plant]) plants[plant] = Store.plants[plant];
+    return {
+      lineSettings, calendars, plants,
+      blocks: Store.blocks.filter(b => mine(b)),
+      plantBlocks: Store.plantBlocks.filter(b => mine(b)),
+      userSettings: Store.userSettings,
+    };
+  },
+
   /** Write the compact cache record for the loaded plant: ONLY the dirty rows, projected to their edited fields, plus the
    *  non-task context (see cache-record.mts). Guards: writes halted (sign-out / admin reset), What-If (the Sandbox board is
-   *  not the plant), no plant loaded (a failed boot load or an empty board must never replace a record), a held plant, and
-   *  the 'system' actor. The record's plant tag is the LOADED plant (Store.selectedPlant is still null after the boot load).
+   *  not the plant), no plant loaded (a failed boot load or an empty board must never replace a record), and the
+   *  'system' actor. A held plant is merged, not skipped: its held rows travel in every write. The record's plant tag is the LOADED plant (Store.selectedPlant is still null after the boot load).
    *  A failed write latches nothing: the cache store counts it, toasts once and the next write retries. */
   _saveCache(): void {
     if (Persistence._cacheWritesHalted || Sandbox.active) return;
     const plant = Persistence._currentLoadedPlant;
-    if (!plant || Persistence._cacheHoldPlant === plant) return;
+    if (!plant) return;
     const user = Persistence._cacheUser();
     if (user === 'system') return;
     try {
@@ -2378,12 +2506,18 @@ export const Persistence = {
         user, plant, schemaVersion: Config.SCHEMA_VERSION, buildId: Config.BUILD_ID, savedAt: 0, seq: 0,
         rows, dirtyIds: ids, forceIds: Persistence._forceIds, dirtySource: Persistence._dirtySource,
         firmDirtyIds: Persistence._firmDirtyIds, applyContext: Persistence._applyContext,
-        context: {
-          lineSettings: Store.lineSettings, calendars: Store.calendars, blocks: Store.blocks, plants: Store.plants,
-          plantBlocks: Store.plantBlocks, userSettings: Store.userSettings,
-        },
+        context: Persistence._cacheContext(plant),
       });
-      const res = CacheStore.write({ user, plant, dirty: ids.length > 0 }, serializeCacheRecord(record));
+      // Rows a deferred load could not place are not on the board; they travel in every write so none is ever dropped.
+      if (Persistence._cacheHoldPlant === plant && Persistence._heldRows.length) {
+        const have = new Set(record.rows.map(r => String(r.id)));
+        for (const r of Persistence._heldRows) if (!have.has(String(r.id))) record.rows.push(r);
+        record.optimizerIds = [...new Set([...record.optimizerIds, ...Persistence._heldOptimizerIds])];
+        record.firmDirtyIds = [...new Set([...record.firmDirtyIds, ...Persistence._heldFirmIds])];
+        if (!record.applyContext && Persistence._heldApplyContext && Persistence._heldOptimizerIds.length) record.applyContext = Persistence._heldApplyContext;
+      }
+      const total = record.rows.length;
+      const res = CacheStore.write({ user, plant, dirty: total > 0, rows: total }, serializeCacheRecord(record));
       if (!res.ok && !res.skipped) ErrorLog.warn('persistence', `Cache write failed: ${res.error ?? res.reason ?? 'unknown'}`);
       if (res.pending) void CacheStore.settled().then(() => Persistence._raiseCacheNotices());
       else Persistence._raiseCacheNotices();

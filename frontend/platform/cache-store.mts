@@ -47,9 +47,10 @@ export interface CacheBackend {
 }
 
 export interface CacheMarker { v: 1; plant: string; seq: number; backend: BackendName; user: string; dirty: boolean }
-export interface WriteMeta { user: string; plant: string; dirty: boolean }
+/** `rows` = unsaved rows in the record. 0 deletes the stored record instead of writing an empty one (undefined = unknown, written as is). */
+export interface WriteMeta { user: string; plant: string; dirty: boolean; rows?: number }
 export interface WriteResult { ok: boolean; skipped?: boolean; pending?: boolean; reason?: string; error?: string }
-export type CacheNotice = 'put_failed' | 'older_record' | 'dirty_no_record' | 'idb_fallback';
+export type CacheNotice = 'put_failed' | 'older_record' | 'dirty_no_record' | 'idb_fallback' | 'read_failed';
 export type CacheMode = 'none' | 'idb' | 'localstorage' | 'fallback';
 export interface BootInfo { backend: BackendName | null; mode: CacheMode; plant: string | null; record: CacheRecord | null; notices: CacheNotice[] }
 export interface CacheStats { mode: CacheMode; backend: BackendName | null; failed: number; pending: number; lastChars: number; halted: boolean; seq: number }
@@ -70,6 +71,10 @@ const lsOrNull = (): Storage | null => { try { return typeof localStorage !== 'u
 const logWarn = (msg: string, ctx?: unknown): void => { try { ErrorLog.warn('cache-store', msg, ctx); } catch { /* logging never throws */ } };
 const logInfo = (msg: string, ctx?: unknown): void => { try { ErrorLog.info('cache-store', msg, ctx); } catch { /* logging never throws */ } };
 const keyOf = (user: string, plant: string): string => `${user}|${plant}`;
+/** Rows held by a stored record's JSON (0 when it is not parseable as a record). */
+const rowCount = (json: string): number => {
+  try { const r = (JSON.parse(json) as { rows?: unknown } | null)?.rows; return Array.isArray(r) ? r.length : 0; } catch { return 0; }
+};
 
 /* ------------------------------------------------------- localStorage backend */
 
@@ -202,6 +207,12 @@ let notifiedFail = false;
 let persistAsked = false;
 const failedKeys = new Set<string>();
 const peekMap = new Map<string, CacheRecord>();
+/** Rows in what this tab last wrote or read per key; a zero-row write only deletes a record this tab itself held rows in. */
+const peekRows = new Map<string, number>();
+/** Keys whose stored record could not be read (error or timeout): writes for them are held so an unread record is never
+ *  overwritten. 'primary' clears on a later successful read(); 'alt' (the other store was unreachable) holds for the session. */
+const readFailed = new Map<string, 'primary' | 'alt'>();
+let legacyCache: { raw: string; plant: string | null; dirty: boolean } | null | undefined;
 const queued = new Map<string, CacheRecord>();
 let inflight = false;
 let idleWaiters: Array<() => void> = [];
@@ -304,7 +315,7 @@ function pump(): void {
 
 function initBackend(user: string): Promise<BootInfo> {
   notices = [];
-  peekMap.clear(); queued.clear(); failedKeys.clear();
+  peekMap.clear(); peekRows.clear(); readFailed.clear(); queued.clear(); failedKeys.clear();
   failedCount = 0; notifiedFail = false; lastChars = 0; inflight = false; lastPut = null;
   const marker = readMarker();
   if (marker && marker.seq > seqCounter) seqCounter = marker.seq;
@@ -358,34 +369,86 @@ async function loadBoot(user: string, marker: CacheMarker | null): Promise<BootI
   if (marker && marker.user === user) {
     const key = keyOf(user, marker.plant);
     let rec: CacheRecord | null = null;
-    try { rec = await b.get(key); } catch (e) { logWarn('cache get failed', { error: errName(e) }); }
+    // A read that ERRORS or times out is never "no record": the marker stays, writes for the plant are held and the
+    // planner is told (a zero-row write over an unread record would be silent loss).
+    let failed: 'primary' | 'alt' | null = null;
+    try { rec = await withTimeout(b.get(key), openTimeoutMs, 'cache read'); }
+    catch (e) { failed = 'primary'; logWarn('cache get failed', { error: errName(e) }); }
 
     // The marker names the backend that held the newest write; if it is the other one, that store wins.
-    if (marker.backend !== b.name && (marker.backend === 'idb' ? idbAvailable() : true)) {
+    if (!failed && marker.backend !== b.name && (marker.backend === 'idb' ? idbAvailable() : true)) {
       const alt = makeBackend(marker.backend);
       try {
         await withTimeout(alt.open(), openTimeoutMs, 'alt cache open');
-        const altRec = await alt.get(key);
-        if (altRec) {
+        const altRec = await withTimeout(alt.get(key), openTimeoutMs, 'alt cache read');
+        // A zero-row copy never replaces a record that still holds unsaved rows.
+        if (altRec && !(rec && rowCount(altRec.json) === 0 && rowCount(rec.json) > 0)) {
           rec = altRec;
-          const r = await b.put(altRec);
-          if (r.ok) await alt.del(key);
+          const r = await withTimeout(Promise.resolve(b.put(altRec)), putTimeoutMs, 'alt cache copy');
+          if (r.ok) await withTimeout(alt.del(key), putTimeoutMs, 'alt cache delete');
         }
-      } catch { /* alternate store unreachable: keep what the current one has */ }
+      } catch (e) {
+        // The store that may hold the newest record is unreachable: keep what this one has, write nothing over it.
+        failed = 'alt'; logWarn('alternate cache store unreachable', { error: errName(e) });
+      }
     }
 
-    if (!rec) {
-      if (marker.dirty) pushNotice('dirty_no_record');
-      clearMarker();
-    } else {
+    if (failed) { readFailed.set(key, failed); pushNotice('read_failed'); }
+    if (rec) {
       if (rec.seq < marker.seq) pushNotice('older_record');
-      if (!peekMap.has(key)) peekMap.set(key, rec);
+      if (!peekMap.has(key)) { peekMap.set(key, rec); peekRows.set(key, rowCount(rec.json)); }
       if (rec.seq > seqCounter) seqCounter = rec.seq;
       info.record = rec;
+    } else if (!failed && marker.dirty) {
+      // The marker keeps pointing at the plant (rememberedPlant); only its dirty claim is withdrawn.
+      pushNotice('dirty_no_record');
+      writeMarker({ ...marker, dirty: false });
     }
   }
   info.notices = notices.slice();
   return info;
+}
+
+/** Another tab bumped the marker: what this tab remembers of that plant's record is no longer what is stored, so the next
+ *  autosave rewrites it and an empty write can no longer delete it. */
+function onStorage(e: { key?: string | null; newValue?: string | null }): void {
+  if (e.key != null && e.key !== MARKER_KEY) return;
+  const dropAll = (): void => { peekMap.clear(); peekRows.clear(); };
+  if (e.key == null) { dropAll(); return; }
+  try {
+    const m = e.newValue ? JSON.parse(e.newValue) as CacheMarker : null;
+    if (!m) dropAll();
+    else if (curUser && m.user === curUser) { const k = keyOf(m.user, m.plant); peekMap.delete(k); peekRows.delete(k); }
+  } catch { dropAll(); }
+}
+try {
+  const g = globalThis as unknown as { addEventListener?: (t: string, f: (e: never) => void) => void };
+  if (typeof g.addEventListener === 'function') g.addEventListener('storage', onStorage as (e: never) => void);
+} catch { /* no window */ }
+
+function dropLegacyBlob(): void {
+  legacyCache = null;
+  try { lsOrNull()?.removeItem(Config.LS_KEY); } catch { /* ignore */ }
+}
+
+/** The legacy `nimbus.state.v3` blob, read once (it can be megabytes) with the plant it was saved for. */
+function legacyInfo(): { raw: string; plant: string | null; dirty: boolean } | null {
+  if (legacyCache !== undefined) return legacyCache;
+  legacyCache = null;
+  try {
+    const raw = lsOrNull()?.getItem(Config.LS_KEY);
+    if (raw) {
+      let plant: string | null = null;
+      let dirty = false;
+      try {
+        const p = JSON.parse(raw) as { selectedPlant?: unknown; _dirtyIds?: unknown } | null;
+        plant = typeof p?.selectedPlant === 'string' && p.selectedPlant ? p.selectedPlant : null;
+        dirty = Array.isArray(p?._dirtyIds) && p._dirtyIds.length > 0;
+      } catch { /* unparseable */ }
+      legacyCache = { raw, plant, dirty };
+    }
+  } catch { /* ignore */ }
+  return legacyCache;
 }
 
 /* ---------------------------------------------------------------- public API */
@@ -412,7 +475,48 @@ export const CacheStore = {
   },
 
   /** Plant the previous page load last wrote (from the marker), or null. */
-  rememberedPlant(): string | null { return readMarker()?.plant ?? null; },
+  rememberedPlant(): string | null { return readMarker()?.plant ?? legacyInfo()?.plant ?? null; },
+
+  /** True when a marker exists (the new cache has been in use). */
+  hasMarker(): boolean { return readMarker() !== null; },
+
+  /** True when the marker says the remembered plant holds unsaved edits (a boot-time guard for plant auto-switches). */
+  rememberedDirty(): boolean {
+    const m = readMarker();
+    if (m) return !!m.dirty;
+    return !!legacyInfo()?.dirty;
+  },
+
+  /** The raw legacy `nimbus.state.v3` blob (null when absent). Persistence converts it; see importLegacy / dropLegacy. */
+  legacyBlob(): string | null { return legacyInfo()?.raw ?? null; },
+
+  /** Removes the legacy blob (also when clean or unparseable). Always safe once its dirty rows are converted or void. */
+  dropLegacy(): void { dropLegacyBlob(); },
+
+  /**
+   * Reads `plant`'s stored record (backend get on a peek miss, filling peek). Await it before restoring or writing for a
+   * plant the boot did not read (the marker only names one). A failed or timed-out read holds writes for that plant
+   * (`ok: false`, notice 'read_failed'); a later successful read lifts the hold.
+   */
+  async read(plant: string): Promise<{ ok: boolean; record: CacheRecord | null }> {
+    if (!curUser || !backend || !plant) return { ok: true, record: null };
+    const key = keyOf(curUser, plant);
+    const held = readFailed.get(key);
+    if (held === 'alt') return { ok: false, record: peekMap.get(key) || null };
+    if (!held && peekMap.has(key)) return { ok: true, record: peekMap.get(key) || null };
+    try {
+      const rec = await withTimeout(backend.get(key), openTimeoutMs, 'cache read');
+      readFailed.delete(key);
+      if (rec && !peekMap.has(key)) { peekMap.set(key, rec); peekRows.set(key, rowCount(rec.json)); }
+      if (rec && rec.seq > seqCounter) seqCounter = rec.seq;
+      return { ok: true, record: peekMap.get(key) || null };
+    } catch (e) {
+      logWarn('cache read failed', { error: errName(e), plant });
+      readFailed.set(key, 'primary');
+      pushNotice('read_failed');
+      return { ok: false, record: null };
+    }
+  },
 
   /** Skips identical JSON, bumps the marker and starts (or coalesces) the put. Never throws. */
   write(meta: WriteMeta, json: string): WriteResult {
@@ -422,14 +526,34 @@ export const CacheStore = {
       if (!meta.plant) return { ok: false, skipped: true, reason: 'no-plant' };
       if (!backend) return { ok: false, skipped: true, reason: 'not-ready' };
       const key = keyOf(meta.user, meta.plant);
+      if (readFailed.has(key)) return { ok: false, skipped: true, reason: 'read-failed' };
       const prev = peekMap.get(key);
-      if (prev && prev.json === json && !failedKeys.has(key)) {
+      const sameMarker = (m: CacheMarker | null): boolean => !!m && m.plant === meta.plant && m.user === meta.user;
+      /** The marker follows the plant being written; its dirty flag only ever describes that plant. */
+      const touchMarker = (): void => {
         const m = readMarker();
-        if (m && m.dirty !== meta.dirty) writeMarker({ ...m, dirty: meta.dirty });
+        if (sameMarker(m)) { if (m && m.dirty !== meta.dirty) writeMarker({ ...m, dirty: meta.dirty }); return; }
+        writeMarker({ v: 1, plant: meta.plant, seq: prev?.seq ?? seqCounter, backend: (backend as CacheBackend).name, user: meta.user, dirty: !!meta.dirty });
+      };
+      if (meta.rows === 0) {
+        // Nothing unsaved: delete the stored record, but only one this tab itself held rows in. A tab that never saw
+        // rows (or whose view another tab invalidated) must not delete what another tab is editing.
+        const had = (peekRows.get(key) ?? (prev ? rowCount(prev.json) : 0)) > 0;
+        if (had) {
+          queued.delete(key); peekMap.delete(key); peekRows.delete(key); failedKeys.delete(key);
+          const b = backend;
+          void Promise.resolve(b.del(key)).catch((e: unknown) => logWarn('cache delete failed', { error: errName(e) }));
+        }
+        touchMarker();
+        return { ok: true, skipped: true };
+      }
+      if (prev && prev.json === json && !failedKeys.has(key)) {
+        touchMarker();
         return { ok: true, skipped: true };
       }
       const rec: CacheRecord = { key, user: meta.user, plant: meta.plant, seq: ++seqCounter, savedAt: Date.now(), json };
       peekMap.set(key, rec);
+      peekRows.set(key, meta.rows ?? rowCount(json));
       // Marker first, in the same synchronous block that starts the put.
       writeMarker({ v: 1, plant: meta.plant, seq: rec.seq, backend: backend.name, user: meta.user, dirty: !!meta.dirty });
       queued.set(key, rec);
@@ -472,7 +596,7 @@ export const CacheStore = {
   async discard(plant: string): Promise<void> {
     if (!curUser) return;
     const key = keyOf(curUser, plant);
-    queued.delete(key); peekMap.delete(key); failedKeys.delete(key);
+    queued.delete(key); peekMap.delete(key); peekRows.delete(key); failedKeys.delete(key); readFailed.delete(key);
     const m = readMarker();
     if (m && m.plant === plant && m.user === curUser) clearMarker();
     try { await backend?.del(key); } catch (e) { logWarn('cache discard failed', { error: errName(e) }); }
@@ -480,7 +604,7 @@ export const CacheStore = {
 
   /** Clears every record on the open connection (never deletes the database) plus the marker. */
   async wipe(): Promise<void> {
-    queued.clear(); peekMap.clear(); failedKeys.clear();
+    queued.clear(); peekMap.clear(); peekRows.clear(); readFailed.clear(); failedKeys.clear();
     if (!inflight) settleIdle();
     clearMarker();
     clearLsRecords();
@@ -501,7 +625,7 @@ export const CacheStore = {
    * Imports the old `nimbus.state.v3` blob as this user+plant's record when none exists yet, then removes the
    * legacy key. Not called from anywhere until T6.
    */
-  async importLegacy(rawJson: string, plant: string, user: string): Promise<{ imported: boolean; reason?: string }> {
+  async importLegacy(rawJson: string, plant: string, user: string, opts: { converted?: boolean; dirty?: boolean } = {}): Promise<{ imported: boolean; reason?: string }> {
     if (!rawJson || !plant || !user || user === 'system') return { imported: false, reason: 'bad-args' };
     if (!backend) return { imported: false, reason: 'not-ready' };
     try {
@@ -509,15 +633,19 @@ export const CacheStore = {
       if (!parsed || typeof parsed !== 'object') return { imported: false, reason: 'not-an-object' };
     } catch { return { imported: false, reason: 'unparseable' }; }
     const key = keyOf(user, plant);
-    try { if (peekMap.get(key) || await backend.get(key)) return { imported: false, reason: 'record-exists' }; }
+    try { if (peekMap.get(key) || await withTimeout(backend.get(key), openTimeoutMs, 'cache read')) return { imported: false, reason: 'record-exists' }; }
     catch { return { imported: false, reason: 'read-failed' }; }
-    const rec: CacheRecord = { key, user, plant, seq: ++seqCounter, savedAt: Date.now(), json: rawJson, legacy: true };
-    const r = await putOnce(rec);
+    // `converted` = the caller already built the compact record shape from the legacy blob; the record is then a normal one.
+    const rec: CacheRecord = { key, user, plant, seq: ++seqCounter, savedAt: Date.now(), json: rawJson, ...(opts.converted ? {} : { legacy: true }) };
+    let r = await putOnce(rec);
+    // The multi-MB legacy blob itself can be what fills localStorage: its content is in memory now, so free it and retry once.
+    if (!r.ok && r.quota) { dropLegacyBlob(); r = await putOnce(rec); }
     recordPutResult(rec, r);
     if (!r.ok) return { imported: false, reason: r.error };
     peekMap.set(key, rec);
-    writeMarker({ v: 1, plant, seq: rec.seq, backend: backend.name, user, dirty: false });
-    try { lsOrNull()?.removeItem(Config.LS_KEY); } catch { /* ignore */ }
+    peekRows.set(key, rowCount(rawJson));
+    writeMarker({ v: 1, plant, seq: rec.seq, backend: backend.name, user, dirty: !!opts.dirty });
+    dropLegacyBlob();
     return { imported: true };
   },
 
@@ -529,7 +657,11 @@ export const CacheStore = {
     putTimeoutMs = o.putTimeoutMs ?? PUT_TIMEOUT_MS;
     backend = null; mode = 'none'; curUser = null; readyPromise = null; halted = false;
     seqCounter = 0; failedCount = 0; lastChars = 0; notifiedFail = false; persistAsked = true;
-    failedKeys.clear(); peekMap.clear(); queued.clear(); inflight = false; idleWaiters = []; lastPut = null; notices = [];
+    failedKeys.clear(); peekMap.clear(); peekRows.clear(); readFailed.clear(); legacyCache = undefined;
+    queued.clear(); inflight = false; idleWaiters = []; lastPut = null; notices = [];
     boot = { backend: null, mode: 'none', plant: null, record: null, notices: [] };
   },
+
+  /** Test hook: deliver a `storage` event as another tab would. */
+  _storageEventForTests(e: { key?: string | null; newValue?: string | null }): void { onStorage(e); },
 };

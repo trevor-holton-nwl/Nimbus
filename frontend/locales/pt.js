@@ -61,6 +61,8 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.cache_context_changed':        'Board context changed since this Apply; review alerts before saving.',
   'toast.cache_not_restored':           'Unsaved changes from your last session were not restored: {{reason}}.',
   'toast.cache_kept_offline':           '{{count}} unsaved changes are kept and will return when the server is back.',
+  'toast.cache_deferred':               '{{count}} unsaved changes could not be matched to the orders that loaded; they are kept and will be tried again on the next load.',
+  'toast.cache_read_failed':            'Your saved backup could not be read, so new changes are not backed up until it can be. Save to keep your work.',
   'ui.cache_reason_stale':              'the orders were changed on the server since',
   'ui.cache_reason_missing':            'some of the orders no longer exist',
   'ui.cache_reason_unmatched':          'they could not be matched to the current orders',

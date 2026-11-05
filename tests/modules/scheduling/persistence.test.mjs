@@ -1447,6 +1447,8 @@ test('hasPendingWork counts dirty, force, conflicted, firm-dirty ids, pending ca
     Sandbox.active = false;
     memStore.clear();
     CacheStore._setBackendForTests();
+    // An empty board stores no record any more (nothing unsaved is deleted, not written): hold one row so there is something to write.
+    Persistence._holdRows('HP', [{ id: 'held-1', row_version: 1 }], [], []);
     Persistence._saveCache();
     assert.equal(hasRecord(), true, 'positive control: _saveCache writes before halt');
     Sandbox.active = true;
@@ -1461,6 +1463,7 @@ test('hasPendingWork counts dirty, force, conflicted, firm-dirty ids, pending ca
     assert.equal(hasRecord(), false, 'no cache rewrite after halt');
   } finally {
     Sandbox.active = origActive;
+    Persistence._clearHeld();
     Persistence._cacheWritesHalted = false;
     Persistence._currentLoadedPlant = priorPlant;
     globalThis.localStorage = origLS;

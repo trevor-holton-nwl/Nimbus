@@ -147,14 +147,15 @@ for (const [name, mk] of Object.entries(flavours)) {
     assert.equal(lsf.ls.getItem(MARKER_KEY), null);
   });
 
-  test(`[${name}] marker dirty but no record: notice raised and marker cleared`, async () => {
+  test(`[${name}] marker dirty but no record: notice raised and the dirty claim withdrawn (the plant stays remembered)`, async () => {
     const { opts } = mk();
     CacheStore._setBackendForTests(opts);
     lsf.ls.setItem(MARKER_KEY, JSON.stringify({ v: 1, plant: 'P1', seq: 4, backend: name, user: U, dirty: true }));
     const boot = await CacheStore.ready(U);
     assert.equal(boot.record, null);
     assert.deepEqual(boot.notices, ['dirty_no_record']);
-    assert.equal(lsf.ls.getItem(MARKER_KEY), null);
+    assert.equal(marker().dirty, false);
+    assert.equal(CacheStore.rememberedPlant(), 'P1');
   });
 
   test(`[${name}] record seq lower than marker seq restores the older record and flags it`, async () => {
@@ -484,4 +485,153 @@ test('localStorage blocked at open falls back to IndexedDB; both blocked leaves 
   assert.equal(CacheStore.stats().halted, false);
   assert.equal(CacheStore.write(meta('P1'), '{}').ok, false);
   assert.equal(CacheStore.stats().failed, 0);
+});
+
+/* ------------------------------------------------ adversarial review fixes (2026-11-04) */
+
+const rec = (rows, extra = {}) => JSON.stringify({ rows: Array.from({ length: rows }, (_, i) => ({ id: `R${i}` })), ...extra });
+
+test('B1 read(plant): a record the marker does not name is reachable, and a failed read holds writes for that plant', async () => {
+  const f = makeFakeBackend();
+  CacheStore._setBackendForTests({ defaultBackend: 'idb', idb: f.backend });
+  await CacheStore.ready(U);
+  CacheStore.write({ ...meta('A'), rows: 2 }, rec(2));
+  CacheStore.write({ ...meta('B', false), rows: 1 }, rec(1, { b: 1 }));   // marker now names B
+  await CacheStore.settled();
+  assert.equal(marker().plant, 'B');
+  CacheStore._setBackendForTests({ defaultBackend: 'idb', idb: f.backend });   // new page load
+  const boot = await CacheStore.ready(U);
+  assert.notEqual(boot.record, null, 'the boot reads the marker plant (B)');
+  assert.equal(CacheStore.peek('A'), null, 'but not A');
+  const r = await CacheStore.read('A');
+  assert.equal(r.ok, true);
+  assert.equal(JSON.parse(r.record.json).rows.length, 2, 'A\'s record is read on demand and cached for peek');
+  assert.equal(CacheStore.peek('A').json, r.record.json);
+
+  // A plant whose read FAILS: writes are held, nothing is overwritten, the planner is told.
+  f.ctl.failGet = true;
+  const bad = await CacheStore.read('C');
+  assert.equal(bad.ok, false);
+  assert.deepEqual(CacheStore.takeNotices(), ['read_failed']);
+  assert.deepEqual(CacheStore.write(meta('C'), rec(1)), { ok: false, skipped: true, reason: 'read-failed' });
+  f.ctl.failGet = false;
+  assert.equal((await CacheStore.read('C')).ok, true, 'a later good read lifts the hold');
+  assert.equal(CacheStore.write(meta('C'), rec(1)).ok, true);
+});
+
+test('M4 a boot read ERROR is not "no record": marker kept, no dirty_no_record, writes held; never an empty overwrite', async () => {
+  const f = makeFakeBackend();
+  const opts = { defaultBackend: 'idb', idb: f.backend };
+  CacheStore._setBackendForTests(opts);
+  await CacheStore.ready(U);
+  CacheStore.write(meta('P1'), rec(3));
+  await CacheStore.settled();
+  const before = lsf.ls.getItem(MARKER_KEY);
+  CacheStore._setBackendForTests(opts);
+  f.ctl.failGet = true;
+  const boot = await CacheStore.ready(U);
+  assert.equal(boot.record, null);
+  assert.deepEqual(boot.notices, ['read_failed'], 'no dirty_no_record');
+  assert.equal(lsf.ls.getItem(MARKER_KEY), before, 'the marker survives');
+  assert.equal(CacheStore.write(meta('P1', false), rec(0)).reason, 'read-failed');
+  f.ctl.failGet = false;
+  assert.equal(JSON.parse(f.data.get('alice|P1').json).rows.length, 3, 'the stored record is intact');
+});
+
+test('M4 an unreachable alternate store holds writes and a zero-row alternate copy never replaces a non-empty record', async () => {
+  // Marker says the newest write is in IndexedDB; this session is localStorage-first and IndexedDB cannot be opened.
+  const idb = makeFakeBackend();
+  lsf.ls.setItem(MARKER_KEY, JSON.stringify({ v: 1, plant: 'P1', seq: 5, backend: 'idb', user: U, dirty: true }));
+  lsf.ls.setItem(LS_RECORD_PREFIX + 'alice|P1', JSON.stringify({ key: 'alice|P1', user: U, plant: 'P1', seq: 3, savedAt: 1, json: rec(2) }));
+  idb.ctl.failOpen = true;
+  CacheStore._setBackendForTests({ defaultBackend: 'localstorage', idb: idb.backend });
+  const boot = await CacheStore.ready(U);
+  assert.equal(boot.notices.includes('read_failed'), true);
+  assert.equal(JSON.parse(boot.record.json).rows.length, 2, 'what this store has is still offered for restore');
+  assert.equal(CacheStore.write(meta('P1'), rec(0)).reason, 'read-failed');
+
+  // Reachable alternate with a ZERO-row record: it must not overwrite the non-empty local one.
+  const idb2 = makeFakeBackend();
+  idb2.data.set('alice|P1', { key: 'alice|P1', user: U, plant: 'P1', seq: 9, savedAt: 2, json: rec(0) });
+  CacheStore._setBackendForTests({ defaultBackend: 'localstorage', idb: idb2.backend });
+  const boot2 = await CacheStore.ready(U);
+  assert.equal(JSON.parse(boot2.record.json).rows.length, 2);
+  assert.equal(JSON.parse(JSON.parse(lsf.ls.getItem(LS_RECORD_PREFIX + 'alice|P1')).json).rows.length, 2);
+});
+
+test('m1 a boot get that never settles times out as a failed read (writes held)', async () => {
+  const f = makeFakeBackend();
+  f.backend.get = () => new Promise(() => {});
+  lsf.ls.setItem(MARKER_KEY, JSON.stringify({ v: 1, plant: 'P1', seq: 1, backend: 'idb', user: U, dirty: true }));
+  CacheStore._setBackendForTests({ defaultBackend: 'idb', idb: f.backend, openTimeoutMs: 20 });
+  const boot = await CacheStore.ready(U);
+  assert.deepEqual(boot.notices, ['read_failed']);
+  assert.equal(CacheStore.write(meta('P1'), rec(1)).reason, 'read-failed');
+});
+
+test('M2 an identical-JSON write still moves the marker to its own plant and carries that plant\'s dirty flag', async () => {
+  await CacheStore.ready(U);
+  CacheStore.write(meta('A', true), rec(1));
+  CacheStore.write(meta('B', true), rec(1, { b: 1 }));
+  assert.equal(marker().plant, 'B');
+  const r = CacheStore.write(meta('A', true), rec(1));
+  assert.equal(r.skipped, true, 'identical JSON is still skipped');
+  assert.deepEqual({ plant: marker().plant, dirty: marker().dirty }, { plant: 'A', dirty: true }, 'but the marker follows A');
+  CacheStore.write(meta('B', false), rec(1, { b: 1 }));
+  assert.deepEqual({ plant: marker().plant, dirty: marker().dirty }, { plant: 'B', dirty: false }, 'B\'s clean flag never lands on A\'s marker');
+});
+
+test('M7b rows:0 deletes the stored record (marker kept); a tab that never held rows does not delete another tab\'s record', async () => {
+  await CacheStore.ready(U);
+  CacheStore.write({ ...meta('P1'), rows: 2 }, rec(2));
+  assert.ok(lsf.ls.getItem(LS_RECORD_PREFIX + 'alice|P1'));
+  CacheStore.write({ ...meta('P1', false), rows: 0 }, rec(0));
+  assert.equal(lsf.ls.getItem(LS_RECORD_PREFIX + 'alice|P1'), null, 'the empty record is deleted, not written');
+  assert.equal(marker().plant, 'P1', 'the marker stays so the plant is remembered');
+  assert.equal(marker().dirty, false);
+
+  // A second tab: it never saw rows for P2, another tab holds an unsaved record there.
+  lsf.ls.setItem(LS_RECORD_PREFIX + 'alice|P2', JSON.stringify({ key: 'alice|P2', user: U, plant: 'P2', seq: 50, savedAt: 1, json: rec(4) }));
+  CacheStore.write({ ...meta('P2', false), rows: 0 }, rec(0));
+  assert.ok(lsf.ls.getItem(LS_RECORD_PREFIX + 'alice|P2'), 'refused: this tab never emptied it');
+});
+
+test('M6 another tab bumping the marker drops this tab\'s peek: its next autosave rewrites, and a stale tab cannot delete', async () => {
+  await CacheStore.ready(U);
+  CacheStore.write({ ...meta('P1'), rows: 2 }, rec(2));
+  // Tab B (clean) overwrote the stored record and bumped the marker.
+  lsf.ls.setItem(LS_RECORD_PREFIX + 'alice|P1', JSON.stringify({ key: 'alice|P1', user: U, plant: 'P1', seq: 99, savedAt: 1, json: rec(0) }));
+  const m = JSON.stringify({ v: 1, plant: 'P1', seq: 99, backend: 'localstorage', user: U, dirty: false });
+  lsf.ls.setItem(MARKER_KEY, m);
+  CacheStore._storageEventForTests({ key: MARKER_KEY, newValue: m });
+  assert.equal(CacheStore.peek('P1'), null, 'the stale peek is gone');
+  const r = CacheStore.write({ ...meta('P1'), rows: 2 }, rec(2));
+  assert.equal(r.skipped, undefined, 'identical to its OWN last write, yet not skipped: it rewrites the record');
+  assert.equal(JSON.parse(JSON.parse(lsf.ls.getItem(LS_RECORD_PREFIX + 'alice|P1')).json).rows.length, 2);
+});
+
+test('M7c legacy: rememberedPlant falls back to the legacy blob; importLegacy converts, frees the blob on quota and always removes it', async () => {
+  const blob = JSON.stringify({ selectedPlant: 'P9', _dirtyIds: ['R1'], tasks: [{ id: 'R1' }] });
+  lsf.ls.setItem(Config.LS_KEY, blob);
+  CacheStore._setBackendForTests();
+  assert.equal(CacheStore.rememberedPlant(), 'P9', 'first boot: no marker yet, the legacy plant is remembered');
+  assert.equal(CacheStore.rememberedDirty(), true);
+  assert.equal(CacheStore.legacyBlob(), blob);
+  await CacheStore.ready(U);
+  const r = await CacheStore.importLegacy(rec(1), 'P9', U, { converted: true, dirty: true });
+  assert.deepEqual(r, { imported: true });
+  assert.equal(lsf.ls.getItem(Config.LS_KEY), null, 'blob removed');
+  assert.equal(marker().dirty, true);
+  assert.equal(CacheStore.peek('P9').legacy, undefined, 'a converted record is a normal one');
+
+  // The blob itself fills localStorage: the put hits the quota, the blob is freed, the retry lands.
+  lsf.ls.removeItem(LS_RECORD_PREFIX + 'alice|P9'); lsf.ls.removeItem(MARKER_KEY);
+  CacheStore._setBackendForTests();
+  lsf.ctl.quotaChars = 3200;
+  lsf.ls.setItem(Config.LS_KEY, 'x'.repeat(3000));
+  await CacheStore.ready(U);
+  const r2 = await CacheStore.importLegacy(rec(1), 'P9', U, { converted: true, dirty: true });
+  assert.equal(r2.imported, true);
+  assert.equal(lsf.ls.getItem(Config.LS_KEY), null);
+  CacheStore.dropLegacy();   // idempotent
 });

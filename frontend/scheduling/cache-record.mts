@@ -15,7 +15,8 @@ export const CACHE_RECORD_VERSION = 1;
  *  - overlay: every key `_overlayUserMoves` reads from a cached row (adds original_start_date, user_scheduled,
  *    run_time_source, derivationIssue, row_version, id, plus segments through `_segmentsFromRaw`, which accepts
  *    either `scheduleSegments` or `schedule_segments`);
- *  - mismatch: runtime_schedule_mismatch (the restore dry-run skips those rows).
+ *  - mismatch: runtime_schedule_mismatch (projected so the flag is visible in the record; restore does not special-case
+ *    it: the baseline loop in Persistence.load skips SERVER rows carrying the flag, and the dry-run checks every cached row).
  */
 export const CACHE_ROW_FIELDS: readonly string[] = [
   'id', 'row_version',
@@ -173,6 +174,33 @@ export function parseCacheRecord(json: unknown): CacheRecord | null {
     if (!Array.isArray(rec.optimizerIds)) rec.optimizerIds = [];
     if (!Array.isArray(rec.firmDirtyIds)) rec.firmDirtyIds = [];
     return rec as CacheRecord;
+  } catch {
+    return null;
+  }
+}
+
+/** The pre-redesign `nimbus.state.v3` blob, converted to the compact record shape. `plant` is the plant it was saved for;
+ *  `dirty` is false when it held no unsaved rows (nothing to import). Null on anything unusable. Never throws. */
+export function convertLegacyState(raw: unknown, user: string, schemaVersion: number | string, buildId: string | null):
+  { plant: string; dirty: boolean; record: CacheRecord } | null {
+  try {
+    const st = (typeof raw === 'string' ? JSON.parse(raw) : raw) as Record<string, unknown> | null;
+    if (!st || typeof st !== 'object' || Array.isArray(st)) return null;
+    const plant = typeof st.selectedPlant === 'string' ? st.selectedPlant : '';
+    if (!plant || !user) return null;
+    // A blob written under another schema was always discarded by the old restore; so is it here.
+    if (st._schemaVersion !== undefined && st._schemaVersion !== schemaVersion) return null;
+    const dirtyIds = new Set<string>((Array.isArray(st._dirtyIds) ? st._dirtyIds : []).map(String));
+    const tasks = Array.isArray(st.tasks) ? st.tasks as Row[] : [];
+    const rows = tasks.filter(t => t && dirtyIds.has(String(t.id)));
+    const optimizer = (Array.isArray(st._optimizerDirtyIds) ? st._optimizerDirtyIds : []).map(String);
+    const record = buildCacheRecord({
+      user, plant, schemaVersion, buildId, savedAt: Date.now(), seq: 0, rows,
+      dirtyIds: rows.map(t => String(t.id)), forceIds: optimizer, dirtySource: {},
+      context: { lineSettings: st.lineSettings, calendars: st.calendars, blocks: st.blocks, plants: st.plants,
+        plantBlocks: st.plantBlocks, userSettings: st.userSettings },
+    });
+    return { plant, dirty: rows.length > 0, record };
   } catch {
     return null;
   }
