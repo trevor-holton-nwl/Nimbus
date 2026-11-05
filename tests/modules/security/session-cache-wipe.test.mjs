@@ -4,6 +4,7 @@ import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { Session } from '../../../frontend/security/session.mjs';
 import { CacheStore, MARKER_KEY, LS_RECORD_PREFIX, QUARANTINE_KEY } from '../../../frontend/platform/cache-store.mjs';
+import { Toast } from '../../../frontend/platform/foundation.mjs';
 import { installFakeLocalStorage } from '../helpers/cache-backend-fake.mjs';
 
 globalThis.window = globalThis.window || {};
@@ -14,6 +15,7 @@ beforeEach(() => {
   lsf = installFakeLocalStorage();
   CacheStore._setBackendForTests();
   reloads = [];
+  Session._resetLeavingForTests();
   globalThis.location = { reload: () => reloads.push('reload') };
   globalThis.sessionStorage = { clear() {}, getItem: () => null, setItem() {}, removeItem() {} };
   lsf.ls.setItem('nimbus.session', JSON.stringify({ username: 'alice', role: 'planner', loggedInAt: Date.now() }));
@@ -121,4 +123,62 @@ test('storage event: another tab removing nimbus.session, clearing storage, or s
   Session._storageEventForTests({ key: 'nimbus.session', newValue: JSON.stringify({ username: 'alice', settings: {} }) });
   Session._storageEventForTests({ key: 'nimbus.theme', newValue: null });
   assert.equal(CacheStore.write(meta, '{"rows":[1]}').ok, true);
+});
+
+/* ------------------------------------------------ Review A3: M3 halt recovery, m7 expiry count */
+
+const withToasts = fn => async () => {
+  const real = Toast.show; const toasts = [];
+  Toast.show = (m, t) => { toasts.push({ m, t }); };
+  try { await fn(toasts); } finally { Toast.show = real; }
+};
+
+test('M3 a halt caused by another tab is announced once, and the same user signing back in elsewhere lifts it', withToasts(async toasts => {
+  const meta = { user: 'alice', plant: 'P1', dirty: true };
+  await CacheStore.ready('alice');
+  assert.equal(CacheStore.write(meta, '{"rows":[1]}').ok, true);
+  Session._storageEventForTests({ key: 'nimbus.session', newValue: null });             // another tab signed out
+  assert.equal(CacheStore.stats().halted, true);
+  Session._storageEventForTests({ key: null, newValue: null });                          // a second event: no second toast
+  assert.equal(toasts.filter(x => x.m === 'toast.cache_halted_other_tab' || /halted|paused|Autosave/i.test(String(x.m))).length, 1, JSON.stringify(toasts));
+  Session._storageEventForTests({ key: 'nimbus.session', newValue: JSON.stringify({ username: 'alice', settings: {} }) });   // alice signs in again there
+  assert.equal(CacheStore.stats().halted, false, 'same user back: autosave resumes');
+  assert.equal(CacheStore.write(meta, '{"rows":[1,2]}').ok, true);
+}));
+
+test('M3 another user signing in elsewhere keeps this tab halted; a confirmed sign-out here is never resumed by a session write', withToasts(async () => {
+  await CacheStore.ready('alice');
+  Session._storageEventForTests({ key: 'nimbus.session', newValue: JSON.stringify({ username: 'bob' }) });
+  Session._storageEventForTests({ key: 'nimbus.session', newValue: JSON.stringify({ username: 'bob' }) });
+  assert.equal(CacheStore.stats().halted, true);
+  CacheStore._setBackendForTests();
+  await CacheStore.ready('alice');
+  await Session.signOut({});
+  assert.equal(CacheStore.stats().halted, true);
+  Session._storageEventForTests({ key: 'nimbus.session', newValue: JSON.stringify({ username: 'alice' }) });
+  assert.equal(CacheStore.stats().halted, true, 'this page is leaving: the halt stays');
+}));
+
+test('M3 a tab that never opened the cache does not toast when the session key vanishes', withToasts(async toasts => {
+  Session._storageEventForTests({ key: 'nimbus.session', newValue: null });
+  assert.deepEqual(toasts, []);
+}));
+
+test('m7 expiredEditCount sums the signed-in user stored unsaved rows across plants, before the wipe removes them', () => {
+  lsf.ls.setItem(LS_RECORD_PREFIX + 'alice|P1', JSON.stringify({ key: 'alice|P1', user: 'alice', plant: 'P1', seq: 3, savedAt: 1, json: '{"rows":[{},{}]}' }));
+  lsf.ls.setItem(LS_RECORD_PREFIX + 'alice|P2', JSON.stringify({ key: 'alice|P2', user: 'alice', plant: 'P2', seq: 4, savedAt: 1, json: '{"rows":[{}]}' }));
+  lsf.ls.setItem(LS_RECORD_PREFIX + 'bob|P2', JSON.stringify({ key: 'bob|P2', user: 'bob', plant: 'P2', seq: 1, savedAt: 1, json: '{"rows":[{},{},{}]}' }));
+  assert.equal(Session.expiredEditCount(), 3);
+  Session.clearExpired();
+  assert.equal(Session.expiredEditCount(), 0, 'nothing left after the wipe (and no session)');
+});
+
+test('m1 clearLocalPlannerData removes every record key before the marker', () => {
+  seedCache();
+  const order = []; const real = lsf.ls.removeItem;
+  lsf.ls.removeItem = k => { order.push(k); return real(k); };
+  Session.clearLocalPlannerData();
+  const m = order.indexOf(MARKER_KEY);
+  assert.ok(m >= 0);
+  for (const k of order.filter(x => x.startsWith(LS_RECORD_PREFIX))) assert.ok(order.indexOf(k) < m, `${k} before the marker`);
 });

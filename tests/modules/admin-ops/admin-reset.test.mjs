@@ -1,11 +1,13 @@
 // T6: admin "Reset client state" halts cache writes, confirms with the pending unsaved-edit count and offers Save first,
-// then wipes (bounded) and reloads; the autosave-off fix is Save, dispatched as 'client.save'.
+// then wipes and reloads; the autosave-off fix is Save, dispatched as 'client.save'.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AdminCockpit } from '../../../frontend/admin-ops/admin-ui.mjs';
 import { Modal, Toast, Util } from '../../../frontend/platform/foundation.mjs';
 import { Session } from '../../../frontend/security/session.mjs';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
+import { CacheStore, LS_RECORD_PREFIX } from '../../../frontend/platform/cache-store.mjs';
+import { resetCacheEnv } from '../helpers/cache-env.mjs';
 
 globalThis.window = globalThis.window || {};
 
@@ -78,14 +80,50 @@ test('reset with nothing pending keeps the plain confirm, then halts, wipes and 
   });
 });
 
-test('reset waits for the wipe but never longer than about a second (a stuck IndexedDB cannot trap the reload)', async () => {
+test('reset does not wait on the wipe promise (the wipe is synchronous), so it always reloads', async () => {
   await withReset({ dirty: 0, wipe: () => new Promise(() => {}) }, async (calls) => {
-    const t0 = Date.now();
     await AdminCockpit._resetClientState();
-    assert.ok(Date.now() - t0 < 2500);
     await settle();
     assert.ok(names(calls).includes('reload'));
   });
+});
+
+test('A3 M2 reset counts and names edits kept in the cache for OTHER plants, which the wipe would also remove', async () => {
+  const lsf = resetCacheEnv({ user: 'planner' });
+  const recFor = (plant, rows) => lsf.ls.setItem(LS_RECORD_PREFIX + `planner|${plant}`, JSON.stringify({ key: `planner|${plant}`, user: 'planner', plant, seq: 1, savedAt: 1,
+    json: JSON.stringify({ rows: Array.from({ length: rows }, (_, i) => ({ id: 'R' + i })) }) }));
+  recFor('Q', 4); recFor('Z', 2);
+  const savedPlant = Persistence._currentLoadedPlant; Persistence._currentLoadedPlant = 'P';
+  try {
+    await withReset({ dirty: 3, choose: null }, async (calls) => {
+      assert.equal(Persistence.unsavedCount(), 9, '3 in memory + 4 + 2 stored for other plants');
+      await AdminCockpit._resetClientState();
+      const ch = calls.find(c => c[0] === 'choose')[1];
+      assert.match(ch.message, /modal\.reset_client_pending_msg\|\{"count":9\}/);
+      assert.match(ch.message, /modal\.reset_client_pending_plants\|\{"plants":"Q, Z"\}/, 'the other plants are named');
+    });
+    // nothing in memory, rows only stored (an offline boot): the plain confirm must not be used
+    await withReset({ dirty: 0, choose: null }, async (calls) => {
+      await AdminCockpit._resetClientState();
+      assert.equal(names(calls)[0], 'choose', 'stored-only edits get the Save/discard choice, not the plain confirm');
+    });
+  } finally { Persistence._currentLoadedPlant = savedPlant; delete globalThis.localStorage; CacheStore._setBackendForTests(); }
+});
+
+test('A3 m6 a discarding reset forgets the in-memory unsaved sets, so the reload cannot raise a "Leave site?" prompt', async () => {
+  resetCacheEnv({ user: 'planner' });
+  const sets = ['_dirtyIds', '_forceIds', '_firmDirtyIds', '_conflictedIds'];
+  const saved = Object.fromEntries(sets.map(k => [k, new Set(Persistence[k])]));
+  try {
+    await withReset({ dirty: 3, choose: 'discard' }, async () => {
+      Persistence._forceIds.add('o0'); Persistence._firmDirtyIds.add('o1'); Persistence._conflictedIds.add('o2');
+      assert.equal(Persistence.hasPendingWork(false), true);
+      await AdminCockpit._resetClientState();
+      await settle();
+      assert.equal(Persistence.hasPendingWork(false), false, 'dirty, force, firm and conflict sets are empty');
+      assert.equal(Persistence.unsavedCount(), 0);
+    });
+  } finally { for (const k of sets) { Persistence[k].clear(); saved[k].forEach(x => Persistence[k].add(x)); } delete globalThis.localStorage; CacheStore._setBackendForTests(); }
 });
 
 test('the signal dispatcher routes client.save to Persistence.saveAll', async () => {

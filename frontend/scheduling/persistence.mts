@@ -32,7 +32,7 @@
 import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
 import { CacheStore } from '../platform/cache-store.mjs';
-import { buildCacheRecord, serializeCacheRecord, parseCacheRecord, fingerprintText, applyContextChanged, convertLegacyState, legacyDirtyCount } from './cache-record.mjs';
+import { buildCacheRecord, serializeCacheRecord, parseCacheRecord, fingerprintText, applyContextChanged, convertLegacyStatePlants, legacyDirtyCount } from './cache-record.mjs';
 import type { CacheRecord, CacheApplyContext } from './cache-record.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
 import { CalendarSync } from '../calendar/calendar-sync.mjs';
@@ -421,16 +421,46 @@ export const Persistence = {
   },
   /** Orders with unsaved edits (dirty, batched, firm-changed or held from the cache), counted once each. Admin Reset names it. */
   unsavedCount(): number {
+    const memory = Persistence._unsavedInMemory();
+    const loaded = Persistence._currentLoadedPlant;
+    let n = memory;
+    for (const { plant, rows } of Persistence._storedDirty()) {
+      // The loaded plant is counted from memory (the freshest view); a stored record for it that memory does not cover
+      // (not restored, offline boot) still counts, as the larger of the two.
+      if (plant === loaded) n = Math.max(n, rows); else n += rows;
+    }
+    return n;
+  },
+  /** Admin Reset's deliberate discard: empties every in-memory unsaved set so nothing prompts or rewrites the cleared cache. */
+  forgetUnsavedForReset(): void {
+    Persistence._dirtyIds.clear(); Persistence._forceIds.clear(); Persistence._firmDirtyIds.clear(); Persistence._conflictedIds.clear(); Persistence._dirtySource.clear();
+    Persistence._clearHeld();
+    Persistence._syncUnsaved();
+  },
+  /** Orders with unsaved edits in memory (the loaded plant's), counted once each. */
+  _unsavedInMemory(): number {
     const ids = new Set<string>([...Persistence._dirtyIds, ...Persistence._forceIds, ...Persistence._firmDirtyIds].map(String));
     for (const r of Persistence._heldRows) ids.add(String(r.id));
     return ids.size;
   },
+  /** Unsaved rows kept in the cache for this user, per plant (every stored record; the wipe in Reset and sign-out removes them all). */
+  _storedDirty(): Array<{ plant: string; rows: number }> {
+    try { const u = Persistence._cacheUser(); return u === 'system' ? [] : CacheStore.dirtyFromStorage(u); } catch { return []; }
+  },
+  /** Plants whose stored record holds unsaved rows the memory does not cover: kept edits a wipe would discard. Named in Reset. */
+  unsavedOtherPlants(): string[] {
+    const loaded = Persistence._currentLoadedPlant;
+    return Persistence._storedDirty().filter(d => d.plant !== loaded || d.rows > Persistence._unsavedInMemory()).map(d => d.plant);
+  },
   // Unsaved work a sign-out would discard. Deliberately includes What-If and queued calendar
   // deletes; unsaved admin-form edits (setup, master data) are not detectable here.
-  hasPendingWork(): boolean {
+  // `includeStored` (default true) also counts edits kept in the cache for other plants / not in memory: a sign-out wipes them.
+  // The page-leave prompt passes false: a reload keeps those edits, so it must not nag about them.
+  hasPendingWork(includeStored = true): boolean {
     if (Persistence._dirtyIds.size || Persistence._forceIds.size
         || Persistence._conflictedIds.size || Persistence._firmDirtyIds.size || Persistence._hasHeldRows()) return true;
     if (Sandbox.active) return true;
+    if (includeStored && Persistence._storedDirty().length > 0) return true;
     try {
       const raw = localStorage.getItem('nimbus.calendar.pendingDeletes');
       const parsed = raw ? JSON.parse(raw) : null;
@@ -1409,7 +1439,7 @@ export const Persistence = {
       else if (n === 'corrupt_record') Toast.show(Util.t('toast.cache_corrupt_record'), 'warn', 15000);
       else if (n === 'other_dirty_plants') {
         const u = Persistence._cacheUser() === 'system' ? undefined : Persistence._cacheUser();
-        const here = CacheStore.rememberedPlant(u);
+        const here = Persistence._lastAttemptedPlant ?? Persistence._currentLoadedPlant ?? CacheStore.rememberedPlant(u);
         const kept = CacheStore.dirtyPlants(u).filter(p => p !== here);
         if (kept.length) Toast.show(Util.t('toast.cache_other_plants', { plants: kept.join(', ') }), 'warn', 15000);
       }
@@ -1424,7 +1454,7 @@ export const Persistence = {
     try {
       const user = Persistence._cacheUser();
       await CacheStore.ready(user);
-      if (user !== 'system') await Persistence._migrateLegacyCache(user);
+      if (user !== 'system') await Persistence._migrateLegacyCache(user, plant);
       if (plant) await CacheStore.read(plant);
     } catch (e) { ErrorLog.warn('persistence', `Cache open failed: ${(e as Error)?.message}`); }
   },
@@ -1432,28 +1462,31 @@ export const Persistence = {
   /** The old blob held the whole board; only its unsaved rows matter. Dirty rows become this user's compact record for the
    *  plant it was saved for (marker dirty=true), then the blob is ALWAYS removed (clean, unparseable, converted or not): it
    *  is megabytes of localStorage the new records would otherwise hit the quota against. */
-  async _migrateLegacyCache(user: string): Promise<void> {
+  async _migrateLegacyCache(user: string, loadedPlant?: string | null): Promise<void> {
     const raw = CacheStore.legacyBlob();
     if (raw === null) return;
     let lost = 0;
+    let keep = false;
     try {
-      const conv = convertLegacyState(raw, user, Config.SCHEMA_VERSION, Config.BUILD_ID);
-      if (conv?.dirty) {
-        const n = conv.record.rows.length;
-        const json = serializeCacheRecord(conv.record);
-        // Its content is in memory now: free the multi-MB blob BEFORE the put so the new record has the quota it needs.
-        CacheStore.dropLegacy();
-        // Also when a marker exists (an old-build tab across the deploy): importLegacy refuses only when THIS plant has a record.
-        const r = await CacheStore.importLegacy(json, conv.plant, user, { converted: true, dirty: true });
-        if (!r.imported) lost += n;
-        lost += conv.dropped;
-        ErrorLog.info('persistence', `Legacy cache converted for ${conv.plant}: ${n} unsaved rows (${r.imported ? 'imported' : r.reason})`);
+      const conv = convertLegacyStatePlants(raw, user, Config.SCHEMA_VERSION, Config.BUILD_ID);
+      if (conv && conv.plants.length) {
+        // One record per plant that holds unsaved rows. The blob stays until every plant is settled: importLegacy frees it
+        // itself (and retries) when the put hits the quota, so nothing is dropped early.
+        for (const { plant, record } of conv.plants) {
+          const n = record.rows.length;
+          const r = await CacheStore.importLegacy(serializeCacheRecord(record), plant, user, { converted: true, dirty: true, keepLegacy: true, loadedPlant });
+          // A failure that is not about this data (store not ready, halted, an unread record) keeps the blob for the next boot.
+          if (!r.imported && (r.reason === 'read-failed' || r.reason === 'halted' || r.reason === 'not-ready')) keep = true;
+          else if (!r.imported) lost += n;
+          ErrorLog.info('persistence', `Legacy cache converted for ${plant}: ${n} unsaved rows (${r.imported ? 'imported' : r.reason})`);
+        }
       } else if (!conv) {
         // Unusable (other schema, no plant to file it under): say how many unsaved orders went with it.
         lost = legacyDirtyCount(raw);
       }
     } catch (e) { ErrorLog.warn('persistence', `Legacy cache conversion failed: ${(e as Error)?.message}`); lost = lost || legacyDirtyCount(raw); }
-    CacheStore.dropLegacy();
+    if (keep) { ErrorLog.warn('persistence', 'Legacy cache kept for the next boot (the cache store could not take it now)'); }
+    else CacheStore.dropLegacy();
     if (lost > 0) Toast.show(Util.t('toast.cache_changes_lost', { count: lost }), 'warn', 15000);
   },
 
@@ -2578,7 +2611,7 @@ export const Persistence = {
       totalChars:       total,
       count,
       items,
-      degraded:         st.failed > 0 || st.mode === 'none',
+      degraded:         st.failed > 0 || st.mode === 'none' || st.halted,
       lastChars:        st.lastChars || 0,
       lastSavedAt:      rec?.savedAt || 0,
       autosaveDisabled: false,
@@ -2593,6 +2626,10 @@ export const Persistence = {
     Persistence._saveCache();
   }, 1200)
 };
+
+// A boot only opens or announces a cached dirty plant the user can still open (removed from role scope, never revisited).
+// Unknown scope (no session yet) filters nothing; the records themselves are never deleted for this.
+CacheStore.setPlantScope(() => Store.allowedPlantsScope());
 
 // Track edits even when a value changes and is subsequently changed back. A
 // failed save's refresh must only reconcile the rejected edit, never newer work.
@@ -2624,7 +2661,7 @@ ErrorLog.registerStateProvider('persistence', () => ({
 // way out so the debounced autosave cannot lose the last edit. Guarded: headless/test realms have no real window.
 if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
   window.addEventListener('beforeunload', (e: BeforeUnloadEvent) => {
-    if (!Persistence.hasPendingWork()) return;
+    if (!Persistence.hasPendingWork(false)) return;
     e.preventDefault();
     e.returnValue = '';
   });

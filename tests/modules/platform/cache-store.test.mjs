@@ -3,7 +3,7 @@
 // The only double is the Map-backed localStorage in tests/modules/helpers/cache-backend-fake.mjs.
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { CacheStore, MARKER_KEY, LS_RECORD_PREFIX, QUARANTINE_KEY, QUARANTINE_CAP_CHARS } from '../../../frontend/platform/cache-store.mjs';
+import { CacheStore, MARKER_KEY, LS_RECORD_PREFIX, QUARANTINE_KEY } from '../../../frontend/platform/cache-store.mjs';
 import { Config } from '../../../frontend/platform/foundation.mjs';
 import { installFakeLocalStorage } from '../helpers/cache-backend-fake.mjs';
 
@@ -251,18 +251,18 @@ test('M4 a boot read ERROR is not "no record": marker kept, no dirty_no_record, 
 
 /* ------------------------------------------------ F4: a corrupt record is quarantined, not a session-long hold */
 
-test('F4 an unparseable record is quarantined (capped), noticed once and reads as no record', async () => {
+test('F4 an unparseable record is quarantined (whole, per user+plant), noticed once and reads as no record', async () => {
   lsf.ls.setItem(MARKER_KEY, JSON.stringify({ v: 1, plant: 'P1', seq: 4, user: U, dirty: true, dirtyPlants: ['P1'] }));
-  const garbage = '{"key":"alice|P1","json":' + 'z'.repeat(300 * 1024);
+  const garbage = '{"key":"alice|P1","json":' + 'z'.repeat(150 * 1024);
   lsf.ls.setItem(LS_RECORD_PREFIX + 'alice|P1', garbage);
   const boot = await CacheStore.ready(U);
   assert.equal(boot.record, null);
   assert.equal(boot.notices.includes('corrupt_record'), true);
   assert.equal(boot.notices.includes('read_failed'), false, 'corrupt is not a read error');
   assert.equal(lsf.ls.getItem(LS_RECORD_PREFIX + 'alice|P1'), null, 'removed from the record keys');
-  const q = JSON.parse(lsf.ls.getItem(QUARANTINE_KEY));
+  const q = JSON.parse(lsf.ls.getItem(`${QUARANTINE_KEY}.alice|P1`));
   assert.equal(q.key, 'alice|P1');
-  assert.equal(q.raw.length, QUARANTINE_CAP_CHARS, 'the copy is capped at 200 KB');
+  assert.equal(q.raw, garbage, 'the copy is the whole record, never a truncation (A3 m4: oversize records are left in place instead)');
   assert.equal(q.chars, garbage.length);
   // The plant is NOT held for the session: the very next write lands.
   const w = CacheStore.write(meta('P1'), rec(2));
@@ -277,7 +277,7 @@ test('F4 read(plant) quarantines a corrupt record too, and a wrapper without jso
   const r = await CacheStore.read('P2');
   assert.deepEqual(r, { ok: true, record: null });
   assert.deepEqual(CacheStore.takeNotices(), ['corrupt_record']);
-  assert.ok(lsf.ls.getItem(QUARANTINE_KEY));
+  assert.ok(lsf.ls.getItem(`${QUARANTINE_KEY}.alice|P2`));
   assert.equal(CacheStore.write(meta('P2'), rec(1)).ok, true);
 });
 
@@ -470,11 +470,11 @@ test('F3 importLegacy beside an existing marker adds its plant to the dirty list
   assert.equal((await CacheStore.importLegacy(rec(2), 'A', U, { converted: true, dirty: true })).reason, 'record-exists');
 });
 
-test('the orphan sweep leaves the quarantine copy alone and a storage-blocked page does not throw', async () => {
-  lsf.ls.setItem(QUARANTINE_KEY, '{"raw":"x"}');
+test('the orphan sweep leaves this user quarantine copy alone and a storage-blocked page does not throw', async () => {
+  lsf.ls.setItem(`${QUARANTINE_KEY}.alice|P`, '{"raw":"x"}');
   const res = await CacheStore.sweepOrphans(U);
   assert.deepEqual(res, { deleted: 0, kept: 0 });
-  assert.ok(lsf.ls.getItem(QUARANTINE_KEY));
+  assert.ok(lsf.ls.getItem(`${QUARANTINE_KEY}.alice|P`));
   delete globalThis.localStorage;
   assert.deepEqual(await CacheStore.sweepOrphans(U), { deleted: 0, kept: 0 });
 });

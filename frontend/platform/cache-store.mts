@@ -17,6 +17,8 @@ export const LS_RECORD_PREFIX = 'nimbus.cache.rec.';
 export const CACHE_KEY_PREFIX = 'nimbus.cache.';
 /** The last unparseable record, copied here (capped) before it is removed from the record keys. */
 export const QUARANTINE_KEY = 'nimbus.cache.quarantine';
+/** One quarantine copy per user+plant record lives at `${QUARANTINE_KEY}.${user}|${plant}`; the bare key is the pre-A3 single slot. */
+const quarantineKeyOf = (key: string): string => `${QUARANTINE_KEY}.${key}`;
 export const QUARANTINE_CAP_CHARS = 200 * 1024;
 
 export interface CacheRecord {
@@ -27,6 +29,8 @@ export interface CacheRecord {
   savedAt: number;
   json: string;
   legacy?: boolean;
+  /** Id of the tab (page load) that wrote this record. Absent on records written before cross-tab ownership existed. */
+  writer?: string;
 }
 export type PutResult = { ok: true } | { ok: false; error: string; quota?: boolean };
 
@@ -56,6 +60,8 @@ const lsOrNull = (): Storage | null => { try { return typeof localStorage !== 'u
 const logWarn = (msg: string, ctx?: unknown): void => { try { ErrorLog.warn('cache-store', msg, ctx); } catch { /* logging never throws */ } };
 const logInfo = (msg: string, ctx?: unknown): void => { try { ErrorLog.info('cache-store', msg, ctx); } catch { /* logging never throws */ } };
 const keyOf = (user: string, plant: string): string => `${user}|${plant}`;
+/** This page load's identity. A record is "mine" only when it carries it (seq numbers are per-tab and do not order tabs). */
+const TAB_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 /** Rows held by a stored record's JSON (0 when it is not parseable as a record). */
 const rowCount = (json: string): number => {
   try { const r = (JSON.parse(json) as { rows?: unknown } | null)?.rows; return Array.isArray(r) ? r.length : 0; } catch { return 0; }
@@ -101,6 +107,12 @@ const lastSeqWritten = new Map<string, number>();
 /** Keys whose stored record could not be read (storage threw): writes for them are held so an unread record is never
  *  overwritten. A later successful read() (every load does one) lifts the hold. */
 const readFailed = new Set<string>();
+/** Keys whose unparseable record was quarantined during this boot (their dirty claim is withdrawn without a second notice). */
+const quarantinedNow = new Set<string>();
+/** Plants the signed-in user may open (null = unknown or unrestricted). Set by the app; used only to decide which dirty
+ *  plant a boot opens or announces. Never used to delete a stored record or to leave one out of a count. */
+let plantScope: (() => string[] | null) | null = null;
+const allowedList = (): string[] | null => { try { const a = plantScope ? plantScope() : null; return Array.isArray(a) ? a : null; } catch { return null; } };
 let legacyCache: { raw: string; plant: string | null; dirty: boolean } | null | undefined;
 let notices: CacheNotice[] = [];
 let boot: BootInfo = { mode: 'none', plant: null, record: null, notices: [] };
@@ -130,9 +142,16 @@ function dirtyOf(m: CacheMarker): string[] {
   return m.dirty ? [m.plant] : [];
 }
 /** The plant a boot should open: the marker's plant, unless that one is clean and another plant holds unsaved rows. */
-function rememberedOf(m: CacheMarker): string {
-  const d = dirtyOf(m);
-  return !d.length || d.includes(m.plant) ? m.plant : d[0];
+function rememberedOf(m: CacheMarker): string | null {
+  const allowed = allowedList();
+  const d = allowed ? dirtyOf(m).filter(p => allowed.includes(p)) : dirtyOf(m);
+  if (!d.length) return !allowed || allowed.includes(m.plant) ? m.plant : null;
+  return d.includes(m.plant) ? m.plant : d[0];
+}
+/** The marker's dirty plants the user can still open (all of them when the scope is unknown). */
+function openableDirty(m: CacheMarker): string[] {
+  const allowed = allowedList();
+  return allowed ? dirtyOf(m).filter(p => allowed.includes(p)) : dirtyOf(m);
 }
 /** A marker only speaks for the user who wrote it; with no user known the caller cannot compare, so it is trusted. */
 function markerBelongsTo(m: CacheMarker, user?: string): boolean {
@@ -159,14 +178,30 @@ function withdrawFromMarker(user: string, plant: string, clearIfEmptyAndPointed:
 }
 
 /** Plants of `user` whose stored record holds rows, read from storage (the marker's list is only a claim). */
-function dirtyFromStorage(user: string): { plants: string[]; seq: number } {
-  const plants: string[] = []; let seq = 0;
+function scanDirty(user: string): { plants: string[]; seq: number; rows: Map<string, number> } {
+  const plants: string[] = []; let seq = 0; const rows = new Map<string, number>();
   for (const k of keysWithPrefix(LS_RECORD_PREFIX + user + '|')) {
     let rec: CacheRecord | null = null;
     try { const raw = lsOrNull()?.getItem(k); rec = raw ? parseStored(raw) : null; } catch { rec = null; }
-    if (rec && (rowsOf(rec.json) ?? 0) > 0) { plants.push(rec.plant); if (rec.seq > seq) seq = rec.seq; }
+    const n = rec ? (rowsOf(rec.json) ?? 0) : 0;
+    if (rec && n > 0) { plants.push(rec.plant); rows.set(rec.plant, n); if (rec.seq > seq) seq = rec.seq; }
   }
-  return { plants, seq };
+  return { plants, seq, rows };
+}
+/** Highest seq in the marker and in the stored record for `key`, read cheaply (the wrapper's own `"seq"` precedes the payload). */
+function storedSeqFloor(key: string): number {
+  let top = readMarker()?.seq ?? 0;
+  try {
+    const raw = lsOrNull()?.getItem(LS_RECORD_PREFIX + key);
+    const m = raw ? /"seq":(\d+)/.exec(raw.slice(0, 400)) : null;
+    if (m) top = Math.max(top, Number(m[1]));
+  } catch { /* an unreadable record is handled by the callers' own reads */ }
+  return top;
+}
+/** True when this tab wrote the stored record itself (its writer id and a seq not newer than the last this tab wrote). */
+function isMine(rec: CacheRecord, key: string): boolean {
+  const last = lastSeqWritten.get(key);
+  return rec.writer === TAB_ID && last !== undefined && rec.seq <= last;
 }
 
 /* ----------------------------------------------------------------- storage */
@@ -181,13 +216,17 @@ function putRecord(rec: CacheRecord): PutResult {
 }
 function removeRecord(key: string): void { try { lsOrNull()?.removeItem(LS_RECORD_PREFIX + key); } catch { /* ignore */ } }
 
-/** Copies an unusable record (capped) to the quarantine key and removes it from the record keys. */
-function quarantine(key: string, raw: string): void {
-  try { lsOrNull()?.setItem(QUARANTINE_KEY, JSON.stringify({ key, at: Date.now(), chars: raw.length, raw: raw.slice(0, QUARANTINE_CAP_CHARS) })); }
-  catch (e) { logWarn('cache quarantine copy failed', { error: errName(e) }); }
+/** Copies an unusable record WHOLE to its own per-user quarantine key, then removes it from the record keys. Returns false
+ *  (record left in place) when the copy is too big or cannot be stored: a record is never removed without a copy. */
+function quarantine(key: string, raw: string): boolean {
+  if (raw.length > QUARANTINE_CAP_CHARS) { logWarn('cache record unparseable and too large to set aside, left in place', { key, chars: raw.length }); return false; }
+  try { lsOrNull()?.setItem(quarantineKeyOf(key), JSON.stringify({ key, at: Date.now(), chars: raw.length, raw })); }
+  catch (e) { logWarn('cache quarantine copy failed, record left in place', { error: errName(e), key }); return false; }
   removeRecord(key);
+  quarantinedNow.add(key);
   pushNotice('corrupt_record');
   logWarn('cache record unparseable, quarantined', { key, chars: raw.length });
+  return true;
 }
 
 /** Reads one stored record. A storage error is never "no record" (status 'error'); a record that cannot be parsed is
@@ -198,7 +237,7 @@ function readStored(key: string): { status: 'ok'; record: CacheRecord | null } |
   catch (e) { logWarn('cache get failed', { error: errName(e) }); return { status: 'error' }; }
   if (!raw) return { status: 'ok', record: null };
   const rec = parseStored(raw);
-  if (!rec) { quarantine(key, raw); return { status: 'ok', record: null }; }
+  if (!rec) return quarantine(key, raw) ? { status: 'ok', record: null } : { status: 'error' };
   return { status: 'ok', record: rec };
 }
 
@@ -219,7 +258,7 @@ function recordPutResult(rec: CacheRecord, r: PutResult): void {
 
 function initStore(user: string): BootInfo {
   notices = [];
-  peekMap.clear(); peekRows.clear(); lastSeqWritten.clear(); readFailed.clear(); failedKeys.clear();
+  peekMap.clear(); peekRows.clear(); lastSeqWritten.clear(); readFailed.clear(); failedKeys.clear(); quarantinedNow.clear();
   failedCount = 0; notifiedFail = false; lastChars = 0;
   const marker = readMarker();
   if (marker && marker.seq > seqCounter) seqCounter = marker.seq;
@@ -230,9 +269,9 @@ function initStore(user: string): BootInfo {
 
 /** Reads the record of the plant the marker points at (the dirty one when the marker's own plant is clean), reconciles seq. */
 function loadBoot(user: string, marker: CacheMarker | null): BootInfo {
-  const info: BootInfo = { mode, plant: marker ? rememberedOf(marker) : null, record: null, notices: [] };
-  if (marker && marker.user === user) {
-    const plant = rememberedOf(marker);
+  const plant = marker ? rememberedOf(marker) : null;
+  const info: BootInfo = { mode, plant, record: null, notices: [] };
+  if (marker && marker.user === user && plant) {
     const key = keyOf(user, plant);
     // A read that ERRORS is never "no record": the marker stays, writes for the plant are held and the planner is told
     // (a zero-row write over an unread record would be silent loss). The next load's read() retries.
@@ -246,11 +285,12 @@ function loadBoot(user: string, marker: CacheMarker | null): BootInfo {
       if (rec.seq > seqCounter) seqCounter = rec.seq;
       info.record = rec;
     } else if (dirtyOf(marker).includes(plant)) {
-      // The marker keeps pointing at the plant (rememberedPlant); only its dirty claim for it is withdrawn.
-      pushNotice('dirty_no_record');
+      // The marker keeps pointing at the plant (rememberedPlant); only its dirty claim for it is withdrawn. A record that was
+      // just quarantined already told the planner (corrupt_record): no second toast for the same key.
+      if (!quarantinedNow.has(key)) pushNotice('dirty_no_record');
       withdrawFromMarker(user, plant, false);
     }
-    if (dirtyOf(marker).some(p => p !== plant)) pushNotice('other_dirty_plants');
+    if (openableDirty(marker).some(p => p !== plant)) pushNotice('other_dirty_plants');
   }
   info.notices = notices.slice();
   boot = info;
@@ -261,6 +301,8 @@ function loadBoot(user: string, marker: CacheMarker | null): BootInfo {
  *  (so the next autosave rewrites it and an empty write can no longer delete it); a vanished or clobbered marker has its dirty
  *  list recomputed from the stored records; only a full clear() drops everything this tab remembers. */
 function onStorage(e: { key?: string | null; newValue?: string | null }): void {
+  // A halted tab (signed out, reset) must never rebuild a marker from records that are about to be removed.
+  if (halted) return;
   if (e.key == null) { peekMap.clear(); peekRows.clear(); return; }
   if (e.key.startsWith(LS_RECORD_PREFIX)) {
     const k = e.key.slice(LS_RECORD_PREFIX.length);
@@ -276,7 +318,7 @@ function onStorage(e: { key?: string | null; newValue?: string | null }): void {
     let heldHere = false;
     for (const [k, n] of peekRows) if (n > 0 && k.startsWith(curUser + '|') && !claimed.has(k.slice(curUser.length + 1))) { heldHere = true; break; }
     if (m && !heldHere) return;
-    const real = dirtyFromStorage(curUser);
+    const real = scanDirty(curUser);
     if (!real.plants.length && !m) return;
     const keep = m && real.plants.includes(m.plant) ? m.plant : (real.plants[0] ?? m?.plant ?? '');
     if (!keep) return;
@@ -291,7 +333,7 @@ try {
 /** Another user's peek copies are dropped on purpose (and logged), never silently. */
 function dropOtherUserState(from: string, to: string): void {
   const p = peekMap.size;
-  peekMap.clear(); peekRows.clear(); lastSeqWritten.clear(); readFailed.clear(); failedKeys.clear();
+  peekMap.clear(); peekRows.clear(); lastSeqWritten.clear(); readFailed.clear(); failedKeys.clear(); quarantinedNow.clear();
   if (p) logWarn('cache state of the previous user dropped', { from, to, peeked: p });
 }
 
@@ -361,11 +403,22 @@ export const CacheStore = {
     return legacyInfo()?.plant ?? null;
   },
 
-  /** Plants of this user that hold unsaved rows, per the marker. */
+  /** Plants of this user that hold unsaved rows, per the marker, limited to plants the user can still open (when known). */
   dirtyPlants(user?: string): string[] {
     const m = readMarker();
-    return m && markerBelongsTo(m, user) ? dirtyOf(m) : [];
+    return m && markerBelongsTo(m, user) ? openableDirty(m) : [];
   },
+
+  /** Unsaved rows per plant stored for `user`, read from storage (every record, whatever the marker or the plant scope says).
+   *  Reset and sign-out use it: they wipe every stored record, so every stored row must be counted. */
+  dirtyFromStorage(user: string): Array<{ plant: string; rows: number }> {
+    if (!user || user === 'system') return [];
+    const s = scanDirty(user);
+    return s.plants.map(plant => ({ plant, rows: s.rows.get(plant) ?? 0 }));
+  },
+
+  /** Tells the store which plants the signed-in user may open (null = unknown or unrestricted); see plantScope. */
+  setPlantScope(fn: (() => string[] | null) | null): void { plantScope = fn; },
 
   /** True when a marker exists (the new cache has been in use). */
   hasMarker(): boolean { return readMarker() !== null; },
@@ -373,7 +426,7 @@ export const CacheStore = {
   /** True when the marker says some plant holds unsaved edits (a boot-time guard for plant auto-switches). */
   rememberedDirty(user?: string): boolean {
     const m = readMarker();
-    if (m) return markerBelongsTo(m, user) && dirtyOf(m).length > 0;
+    if (m) return markerBelongsTo(m, user) && openableDirty(m).length > 0;
     return !!legacyInfo()?.dirty;
   },
 
@@ -421,8 +474,7 @@ export const CacheStore = {
         if (!had) {
           const r = readStored(key);
           if (r.status === 'ok' && r.record) {
-            const mine = lastSeqWritten.get(key);
-            if (mine !== undefined && r.record.seq <= mine) had = true;
+            if (isMine(r.record, key)) had = true;
             else foreign = (rowsOf(r.record.json) ?? 0) > 0;
           }
         }
@@ -434,7 +486,10 @@ export const CacheStore = {
         touchMarker(meta.user, meta.plant, dirty, prev.seq);
         return { ok: true, skipped: true };
       }
-      const rec: CacheRecord = { key, user: meta.user, plant: meta.plant, seq: ++seqCounter, savedAt: Date.now(), json };
+      // Seq numbers are per tab: lift ours above what any tab has stored (marker, this key's record) so a newer write always
+      // carries the higher number.
+      seqCounter = Math.max(seqCounter, storedSeqFloor(key));
+      const rec: CacheRecord = { key, user: meta.user, plant: meta.plant, seq: ++seqCounter, savedAt: Date.now(), json, writer: TAB_ID };
       peekMap.set(key, rec);
       peekRows.set(key, meta.rows ?? rowCount(json));
       lastSeqWritten.set(key, rec.seq);
@@ -454,15 +509,17 @@ export const CacheStore = {
     if (halted || !curUser) return;
     const key = keyOf(curUser, plant);
     peekMap.delete(key); peekRows.delete(key); failedKeys.delete(key); readFailed.delete(key);
-    withdrawFromMarker(curUser, plant, true);
+    // Record first, marker second: a halted-or-racing tab can never rebuild the marker from a record that is still there.
     removeRecord(key);
+    withdrawFromMarker(curUser, plant, true);
   },
 
   /** Clears the marker, every record, the quarantine copy and the legacy blob, synchronously. Works with no prior ready(). */
   wipe(): Promise<void> {
-    peekMap.clear(); peekRows.clear(); lastSeqWritten.clear(); readFailed.clear(); failedKeys.clear();
+    peekMap.clear(); peekRows.clear(); lastSeqWritten.clear(); readFailed.clear(); failedKeys.clear(); quarantinedNow.clear();
+    // Records (and every other cache key) first, the marker last (see discard()).
+    for (const k of keysWithPrefix(CACHE_KEY_PREFIX)) { if (k !== MARKER_KEY) try { lsOrNull()?.removeItem(k); } catch { /* ignore */ } }
     clearMarker();
-    for (const k of keysWithPrefix(CACHE_KEY_PREFIX)) { try { lsOrNull()?.removeItem(k); } catch { /* ignore */ } }
     dropLegacyBlob();
     return Promise.resolve();
   },
@@ -489,6 +546,14 @@ export const CacheStore = {
       if (!own || (rows === 0 && !pointedAt)) { removeRecord(key); out.deleted++; }
       else out.kept++;
     }
+    // A quarantine copy belongs to the user whose record it came from; another user's copy is not ours to keep or see.
+    for (const qk of keysWithPrefix(QUARANTINE_KEY)) {
+      let owner: string | null = null;
+      if (qk === QUARANTINE_KEY) {
+        try { const q = JSON.parse(lsOrNull()?.getItem(qk) ?? 'null') as { key?: unknown } | null; owner = typeof q?.key === 'string' ? q.key.split('|')[0] : null; } catch { owner = null; }
+      } else owner = qk.slice(QUARANTINE_KEY.length + 1).split('|')[0];
+      if (owner !== user) { try { lsOrNull()?.removeItem(qk); out.deleted++; } catch { /* ignore */ } }
+    }
     if (out.deleted) logInfo('cache orphan sweep', out);
     return out;
   },
@@ -505,9 +570,10 @@ export const CacheStore = {
 
   /**
    * Imports the old `nimbus.state.v3` blob as this user+plant's record when none exists yet, then removes the legacy key.
-   * The caller drops the blob first (its content is in memory) so the put has the quota it needs.
+   * A put that hits the quota frees the blob (its content is in memory) and retries once; `keepLegacy` leaves the blob for the
+   * caller to drop once every plant is settled.
    */
-  async importLegacy(rawJson: string, plant: string, user: string, opts: { converted?: boolean; dirty?: boolean } = {}): Promise<{ imported: boolean; reason?: string }> {
+  async importLegacy(rawJson: string, plant: string, user: string, opts: { converted?: boolean; dirty?: boolean; keepLegacy?: boolean; loadedPlant?: string | null } = {}): Promise<{ imported: boolean; reason?: string }> {
     if (halted) return { imported: false, reason: 'halted' };
     if (!rawJson || !plant || !user || user === 'system') return { imported: false, reason: 'bad-args' };
     if (mode === 'none') return { imported: false, reason: 'not-ready' };
@@ -521,17 +587,20 @@ export const CacheStore = {
     if (existing.status === 'error') return { imported: false, reason: 'read-failed' };
     if (existing.record) return { imported: false, reason: 'record-exists' };
     // `converted` = the caller already built the compact record shape from the legacy blob; the record is then a normal one.
-    const rec: CacheRecord = { key, user, plant, seq: ++seqCounter, savedAt: Date.now(), json: rawJson, ...(opts.converted ? {} : { legacy: true }) };
+    seqCounter = Math.max(seqCounter, storedSeqFloor(key));
+    const rec: CacheRecord = { key, user, plant, seq: ++seqCounter, savedAt: Date.now(), json: rawJson, writer: TAB_ID, ...(opts.converted ? {} : { legacy: true }) };
     let r = putRecord(rec);
     // The multi-MB legacy blob itself can be what fills localStorage: its content is in memory now, so free it and retry once.
     if (!r.ok && r.quota) { dropLegacyBlob(); r = putRecord(rec); }
     recordPutResult(rec, r);
-    if (!r.ok) return { imported: false, reason: r.error };
+    if (!r.ok) return { imported: false, reason: r.quota ? 'quota' : r.error };
     peekMap.set(key, rec);
     peekRows.set(key, rowCount(rawJson));
     lastSeqWritten.set(key, rec.seq);
     touchMarker(user, plant, !!opts.dirty, rec.seq);
-    dropLegacyBlob();
+    // Kept edits for a plant other than the one being loaded are announced like the boot's other dirty plants.
+    if (opts.dirty && opts.loadedPlant && opts.loadedPlant !== plant) pushNotice('other_dirty_plants');
+    if (!opts.keepLegacy) dropLegacyBlob();
     return { imported: true };
   },
 
@@ -539,10 +608,13 @@ export const CacheStore = {
   _setBackendForTests(): void {
     mode = 'none'; curUser = null; readyPromise = null; halted = false;
     seqCounter = 0; failedCount = 0; lastChars = 0; notifiedFail = false;
-    failedKeys.clear(); peekMap.clear(); peekRows.clear(); lastSeqWritten.clear(); readFailed.clear(); legacyCache = undefined;
+    failedKeys.clear(); peekMap.clear(); peekRows.clear(); lastSeqWritten.clear(); readFailed.clear(); quarantinedNow.clear(); legacyCache = undefined;
     notices = [];
     boot = { mode: 'none', plant: null, record: null, notices: [] };
   },
+
+  /** This page load's writer id (tests stamp foreign records with another one). */
+  _tabIdForTests(): string { return TAB_ID; },
 
   /** Test hook: deliver a `storage` event as another tab would. */
   _storageEventForTests(e: { key?: string | null; newValue?: string | null }): void { onStorage(e); },

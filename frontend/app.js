@@ -464,7 +464,7 @@ const NIMBUS = (function () {
     // The 12h local cache lifetime is checked ONLY here, at boot — not via a
     // live in-tab timer — so a session older than Config.SESSION_MAX_AGE_MS
     // is cleared and treated exactly like "not logged in" on the next reload.
-    if (Session.isExpired()) { Session.clearExpired(); showLoginScreen({ expired: true }); return; }
+    if (Session.isExpired()) { const lost = Session.expiredEditCount(); Session.clearExpired(); showLoginScreen({ expired: true, lost }); return; }
     if (!Session.currentUser()) { showLoginScreen(); return; }
     void Session.sweepOrphanCache();   // other users' / empty cache records, before the boot load reads its own
     _bootMain();

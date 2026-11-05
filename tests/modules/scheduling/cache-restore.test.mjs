@@ -691,15 +691,30 @@ test('F3a the plant that already has a record refuses the blob and the planner i
   assert.equal(lostToasts(f).length, 1, 'one toast');
 });
 
-test('F3b a legacy blob with no selected plant files its unsaved rows under the plant they belong to', async t => {
+test('F3b a legacy blob with no selected plant files its unsaved rows under the plant each belongs to (A3 m3: one record per plant)', async t => {
   const f = fixture(t, 3);
   f.lsf.map.clear();
   f.lsf.ls.setItem(Config.LS_KEY, legacyBlob(null, [legacyTask('L1', 'Q'), legacyTask('L2', 'Q'), legacyTask('L3', 'Z')]));
   await simulateReload();
   await Persistence._migrateLegacyCache(CACHE_USER);
   assert.equal(JSON.parse(CacheStore.peek('Q').json).rows.length, 2, 'the plant most rows belong to');
-  assert.deepEqual(CacheStore.dirtyPlants(), ['Q']);
-  assert.equal(lostToasts(f).length, 1, 'the row that belongs to another plant is reported as lost');
+  assert.equal(JSON.parse(CacheStore.peek('Z').json).rows.length, 1, 'the minority plant keeps its row too');
+  assert.deepEqual([...CacheStore.dirtyPlants()].sort(), ['Q', 'Z']);
+  assert.equal(CacheStore.rememberedPlant(), 'Q', 'the marker ends on the main plant');
+  assert.equal(lostToasts(f).length, 0, 'nothing is dropped any more');
+});
+
+test('A3 m3 a legacy plant other than the one being loaded is announced like any other kept plant', async t => {
+  const f = fixture(t, 3);
+  f.lsf.map.clear();
+  f.lsf.ls.setItem(Config.LS_KEY, legacyBlob('Q', [legacyTask('L1', 'Q')]));
+  await simulateReload();
+  await Persistence._migrateLegacyCache(CACHE_USER, 'P');            // the boot is loading P
+  assert.deepEqual(CacheStore.takeNotices(), ['other_dirty_plants']);
+  await simulateReload();
+  f.lsf.ls.setItem(Config.LS_KEY, legacyBlob('P', [legacyTask('L9', 'P')]));
+  await Persistence._migrateLegacyCache(CACHE_USER, 'P');            // same plant: nothing to announce
+  assert.deepEqual(CacheStore.takeNotices().filter(n => n === 'other_dirty_plants'), []);
 });
 
 test('F3 an unusable blob that held unsaved orders (no plant anywhere, or another schema) says how many were dropped', async t => {
@@ -722,7 +737,7 @@ test('F3 an unusable blob that held unsaved orders (no plant anywhere, or anothe
   assert.equal(lostToasts(f).length, 0);
 });
 
-test('F3c the legacy blob is dropped BEFORE the first put, so its megabytes are free for the new record', async t => {
+test('F3c the legacy blob is freed when the first put hits the quota (not before), and the retry lands', async t => {
   const f = fixture(t, 3);
   f.lsf.map.clear();
   f.lsf.ls.setItem(Config.LS_KEY, legacyBlob('P', [legacyTask('L1', 'P')]));
@@ -730,10 +745,66 @@ test('F3c the legacy blob is dropped BEFORE the first put, so its megabytes are 
   const realSet = f.lsf.ls.setItem;
   const blobPresentAtPut = [];
   f.lsf.ls.setItem = (k, v) => { if (k.startsWith(LS_RECORD_PREFIX)) blobPresentAtPut.push(f.lsf.ls.getItem(Config.LS_KEY) !== null); return realSet(k, v); };
+  f.lsf.ctl.failNext = 1;                                            // the first put is refused for quota
   await Persistence._migrateLegacyCache(CACHE_USER);
   f.lsf.ls.setItem = realSet;
-  assert.deepEqual(blobPresentAtPut, [false], 'one put, and the blob was already gone');
+  assert.deepEqual(blobPresentAtPut, [true, false], 'first put with the blob still there, retry after it was freed');
   assert.ok(CacheStore.peek('P'));
+  assert.equal(f.lsf.map.has(Config.LS_KEY), false);
+  assert.equal(lostToasts(f).length, 0);
+});
+
+test('A3 m2 a legacy import that fails for a reason that is not about the data keeps the blob for the next boot (no early drop)', async t => {
+  const f = fixture(t, 3);
+  f.lsf.map.clear();
+  const blob = legacyBlob('P', [legacyTask('L1', 'P'), legacyTask('L2', 'P')]);
+  f.lsf.ls.setItem(Config.LS_KEY, blob);
+  await simulateReload();
+  f.lsf.ctl.failGet = k => k === LS_RECORD_PREFIX + `${CACHE_USER}|P`;      // the stored record cannot be read right now
+  await Persistence._migrateLegacyCache(CACHE_USER);
+  assert.equal(f.lsf.map.get(Config.LS_KEY), blob, 'the blob is still there');
+  assert.equal(lostToasts(f).length, 0, 'nothing is declared lost');
+  f.lsf.ctl.failGet = null;
+  await simulateReload();
+  await Persistence._migrateLegacyCache(CACHE_USER);                         // the next boot converts it
+  assert.equal(JSON.parse(CacheStore.peek('P').json).rows.length, 2);
+  assert.equal(f.lsf.map.has(Config.LS_KEY), false);
+});
+
+test('A3 M2 unsavedCount and hasPendingWork count the stored rows of other plants; the page-leave check does not', async t => {
+  fixture(t, 3); await CacheStore.ready(CACHE_USER);
+  assert.equal(Persistence.unsavedCount(), 0);
+  assert.equal(Persistence.hasPendingWork(), false);
+  CacheStore.write({ user: CACHE_USER, plant: 'Q', dirty: true, rows: 3 }, JSON.stringify({ rows: [{ id: 'a' }, { id: 'b' }, { id: 'c' }] }));
+  assert.equal(Persistence.unsavedCount(), 3, 'stored-only edits for another plant are counted');
+  assert.deepEqual(Persistence.unsavedOtherPlants(), ['Q']);
+  assert.equal(Persistence.hasPendingWork(), true, 'sign-out must confirm: the wipe removes them');
+  assert.equal(Persistence.hasPendingWork(false), false, 'a reload keeps them, so it does not prompt');
+  Store.updateMany([shiftDay('R0', 2)], 'table');
+  assert.equal(Persistence.unsavedCount(), 4, 'loaded plant from memory (1) + Q stored (3)');
+  Persistence._saveCache();                                                  // the loaded plant is now stored as well: not counted twice
+  assert.equal(Persistence.unsavedCount(), 4);
+});
+
+test('A3 M2 an offline-boot plant (nothing loaded in memory) still counts its stored rows', async t => {
+  const f = fixture(t, 3);
+  Store.updateMany([shiftDay('R0', 2)], 'table'); Persistence._saveCache();
+  Persistence._dirtyIds.clear(); Persistence._currentLoadedPlant = null;     // reload with the server unreachable
+  assert.equal(Persistence.unsavedCount(), 1);
+  assert.equal(Persistence.hasPendingWork(), true);
+});
+
+test('A3 m5 a cached dirty plant the user can no longer open neither boots nor blocks the default plant', async t => {
+  const f = fixture(t, 3); await CacheStore.ready(CACHE_USER);
+  CacheStore.write({ user: CACHE_USER, plant: 'GONE', dirty: true, rows: 1 }, JSON.stringify({ rows: [{ id: 'a' }] }));
+  assert.equal(Persistence._rememberedPlant(), 'GONE');
+  assert.equal(Persistence.blocksBootPlantSwitch(), true);
+  Store.setAllowedPlantsResolver(() => ['P']);
+  try {
+    assert.equal(Persistence._rememberedPlant(), null, 'not booted straight into a plant the user cannot open');
+    assert.equal(Persistence.blocksBootPlantSwitch(), false);
+    assert.ok(f.lsf.map.has(recKey('GONE')), 'the record is never deleted for this');
+  } finally { Store.setAllowedPlantsResolver(() => null); }
 });
 
 test('F3 when even the freed storage cannot hold the converted record the planner is told', async t => {

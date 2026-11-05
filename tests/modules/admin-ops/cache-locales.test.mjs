@@ -23,7 +23,9 @@ const KEYS = ['toast.cache_put_failed', 'toast.cache_older_record', 'toast.cache
   'toast.reset_saving', 'modal.reset_client_msg', 'tip.inspect_storage', 'ui.diag_kv_storage', 'ui.diag_kv_cache', 'ui.diag_kv_autosave',
   'ui.diag_client_help', 'tip.diag_clear_cache', 'ui.ls_healthy', 'ui.ls_degraded', 'ui.ls_blocked', 'ui.diag_cache_val', 'ui.diag_storage_val',
   'modal.ls_inventory_title', 'modal.ls_inventory_msg', 'modal.ls_inv_total', 'modal.ls_inv_snapshot', 'modal.ls_inventory_top_keys',
-  'sig.browser_backup_failed', 'sig.browser_backup_blocked', 'attn.autosave', 'diag.line_client'];
+  'sig.browser_backup_failed', 'sig.browser_backup_blocked', 'attn.autosave', 'diag.line_client',
+  // review A3: halt from another tab, other plants named in Reset, edits lost to an expired session
+  'toast.cache_halted_other_tab', 'modal.reset_client_pending_plants', 'sec.session_expired_lost'];
 
 const DEAD = ['sig.data_cached', 'toast.cache_cleared', 'btn.clear_cache', 'toast.loaded_cache', 'toast.backend_unreachable_cache',
   'modal.storage_inventory_title', 'modal.storage_inventory_msg', 'modal.storage_inventory_confirm', 'ui.ls_quota_disabled',
@@ -63,4 +65,17 @@ test('admin wording is storage/backup, not localStorage or trimmed tiers; sizes 
   }
   assert.match(D.en['ui.diag_client_help'], /Save/);
   assert.doesNotMatch(D.en['ui.diag_client_help'], /click Reset client state to clear/);
+});
+
+test('A3 new keys: the expiry line carries a count, the Reset line names plants, vocabulary stays formal and on-glossary', () => {
+  for (const l of LOCALES) {
+    assert.deepEqual(ph(D[l]['sec.session_expired_lost']), 'count', l);
+    assert.deepEqual(ph(D[l]['modal.reset_client_pending_plants']), 'plants', l);
+    assert.equal(ph(D[l]['toast.cache_halted_other_tab']), '', l);
+  }
+  assert.match(D.de['modal.reset_client_pending_plants'], /Werke/);
+  assert.match(D.pt['modal.reset_client_pending_plants'], /plantas/);
+  assert.match(D.fr['sec.session_expired_lost'], /modifications/);
+  assert.match(D.es['sec.session_expired_lost'], /cambios/);
+  assert.doesNotMatch(D.de['toast.cache_halted_other_tab'], /\bdu\b|\bdeine/i, 'formal address');
 });

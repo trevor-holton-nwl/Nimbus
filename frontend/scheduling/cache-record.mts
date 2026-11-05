@@ -225,3 +225,54 @@ export function convertLegacyState(raw: unknown, user: string, schemaVersion: nu
     return null;
   }
 }
+
+/** Like convertLegacyState, but one record per plant that holds unsaved rows (a legacy blob may have loaded several plants).
+ *  A row filed under its own `PLANT`; a row with none goes to the blob's selected plant, else the plant most rows belong to.
+ *  `plants` is ordered so the selected (or largest) plant comes LAST: it is the one the marker should end up pointing at.
+ *  Null when the blob is unusable (unparseable, other schema, no user, or unsaved rows but no plant anywhere). Never throws. */
+export function convertLegacyStatePlants(raw: unknown, user: string, schemaVersion: number | string, buildId: string | null):
+  { main: string; plants: Array<{ plant: string; record: CacheRecord }> } | null {
+  try {
+    const st = (typeof raw === 'string' ? JSON.parse(raw) : raw) as Record<string, unknown> | null;
+    if (!st || typeof st !== 'object' || Array.isArray(st)) return null;
+    if (!user) return null;
+    if (st._schemaVersion !== undefined && st._schemaVersion !== schemaVersion) return null;
+    const dirtyIds = new Set<string>((Array.isArray(st._dirtyIds) ? st._dirtyIds : []).map(String));
+    const tasks = Array.isArray(st.tasks) ? st.tasks as Row[] : [];
+    const rows = tasks.filter(t => t && dirtyIds.has(String(t.id)));
+    const selected = typeof st.selectedPlant === 'string' ? st.selectedPlant : '';
+    const groups = new Map<string, Row[]>();
+    for (const t of rows) {
+      const p = String(t.PLANT ?? '') || selected;
+      if (!p) continue;
+      const g = groups.get(p); if (g) g.push(t); else groups.set(p, [t]);
+    }
+    const unplaced = rows.filter(t => !String(t.PLANT ?? '') && !selected);
+    if (unplaced.length) {
+      // No plant on the row and none selected: the plant most placed rows belong to takes them (none placed anywhere: unusable).
+      let best = '', n = 0;
+      for (const [p, g] of groups) if (g.length > n) { best = p; n = g.length; }
+      if (!best) return null;
+      groups.get(best)!.push(...unplaced);
+    }
+    let main = selected && groups.has(selected) ? selected : '';
+    if (!main) { let n = 0; for (const [p, g] of groups) if (g.length > n) { main = p; n = g.length; } }
+    const optimizer = (Array.isArray(st._optimizerDirtyIds) ? st._optimizerDirtyIds : []).map(String);
+    const plants: Array<{ plant: string; record: CacheRecord }> = [];
+    const order = [...groups.keys()].filter(p => p !== main); if (main) order.push(main);
+    for (const plant of order) {
+      const g = groups.get(plant)!;
+      const ids = g.map(t => String(t.id));
+      const record = buildCacheRecord({
+        user, plant, schemaVersion, buildId, savedAt: Date.now(), seq: 0, rows: g,
+        dirtyIds: ids, forceIds: optimizer.filter(id => ids.includes(id)), dirtySource: {},
+        context: { lineSettings: st.lineSettings, calendars: st.calendars, blocks: st.blocks, plants: st.plants,
+          plantBlocks: st.plantBlocks, userSettings: st.userSettings },
+      });
+      plants.push({ plant, record });
+    }
+    return { main, plants };
+  } catch {
+    return null;
+  }
+}

@@ -3148,10 +3148,13 @@ export const AdminCockpit = {
   async _resetClientState(): Promise<void> {
     // Reset wipes the autosave cache, so edits still unsaved are named and Save is offered first.
     const pending = Persistence.unsavedCount();
+    // Edits kept in the cache for other plants (or not in memory) go with the wipe too: name those plants.
+    const others = Persistence.unsavedOtherPlants();
     if (pending > 0) {
       const pick = await Modal.choose({
         title:        Util.t('modal.reset_client_title'),
-        message:      Util.t('modal.reset_client_pending_msg', { count: pending }),
+        message:      Util.t('modal.reset_client_pending_msg', { count: pending })
+                      + (others.length ? ' ' + Util.t('modal.reset_client_pending_plants', { plants: others.join(', ') }) : ''),
         options: [
           { value: 'save',    label: Util.t('modal.reset_client_pending_save') },
           { value: 'discard', label: Util.t('modal.reset_client_pending_discard', { count: pending }) },
@@ -3174,10 +3177,13 @@ export const AdminCockpit = {
       });
       if (!ok) return;
     }
-    // Halt first so no late autosave rewrites what is about to be cleared; the wipe is synchronous, the race is a safety net.
+    // Halt first so no late autosave rewrites what is about to be cleared; the wipe is synchronous.
     Persistence.haltCacheWrites();
-    const wiped = Session.clearLocalPlannerData({ keepQueuedWork: true });
-    await Promise.race([wiped, new Promise<void>((res) => setTimeout(res, 1000))]);
+    // The edits are discarded on purpose: forget them in memory too, or the reload would ask "Leave site?" and a Stay would
+    // leave a wiped, halted tab holding unsaved edits.
+    Persistence.forgetUnsavedForReset();
+    // The wipe is synchronous (it has landed when this returns), so its promise is not awaited.
+    void Session.clearLocalPlannerData({ keepQueuedWork: true });
     ErrorLog.info('admin', 'Client state reset by user — reloading');
     // Give the log a frame to render in case of debounce, then hard-reload bypassing HTTP cache.
     setTimeout(() => location.reload(), 50);
