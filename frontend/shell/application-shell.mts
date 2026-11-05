@@ -250,6 +250,15 @@ const Settings = (() => {
                                        too.
    ========================================================================== */
 const SessionUIAdapter = {
+  /** What Sign out hands to Session.signOut: the shell owns the Persistence knowledge (no import cycle). beforeClear marks the
+   *  page as leaving, so no late autosave or beforeunload write can file edits after the wipe. */
+  _signOutOptions(): { hasPendingWork: () => boolean; beforeClear: () => void } {
+    return {
+      hasPendingWork: () => Persistence.hasPendingWork(),
+      beforeClear:    () => Persistence.haltCacheWrites(),
+    };
+  },
+
   init(): void {
     Store.subscribe(evt => {
       if (evt.type === 'settings:change' && evt.source === 'settings-pref-revert') SessionUIAdapter._onPrefRevert();
@@ -375,10 +384,7 @@ const SessionUIAdapter = {
         if (signingOut) return;
         signingOut = true;
         // Shell owns the Persistence knowledge; Session takes it as callbacks (no import cycle).
-        void Session.signOut({
-          hasPendingWork: () => Persistence.hasPendingWork(),
-          beforeClear:    () => Persistence.haltCacheWrites(),
-        }).finally(() => { signingOut = false; });
+        void Session.signOut(SessionUIAdapter._signOutOptions()).finally(() => { signingOut = false; });
       });
     }
     const saveBtn = document.getElementById('us-save-btn') as WiredElement | null;
@@ -1161,7 +1167,7 @@ const SessionUIAdapter = {
    the left, a fixed-dark-chrome sign-in panel on the right. The panel is
    --chrome-* tokens in both light and dark mode by design (not themed).
    ========================================================================== */
-function showLoginScreen(opts?: { expired?: boolean }): void {
+function showLoginScreen(opts?: { expired?: boolean; lost?: number }): void {
   const root = document.createElement('div');
   root.className = 'login-screen';
   root.setAttribute('role', 'dialog');
@@ -1231,7 +1237,11 @@ function showLoginScreen(opts?: { expired?: boolean }): void {
   // Reuses the same error element/styling the invalid-credentials path uses
   // below — no separate "session expired" UI state, per the boot gate's
   // one-shot opts.expired flag (nothing persisted, consumed once here).
-  if (opts?.expired) _showError(Util.t('sec.session_expired'));
+  // An expired session also discards the unsaved edits kept in this browser: say how many (the boot gate counts them first).
+  if (opts?.expired) {
+    const lost = Number(opts.lost) || 0;
+    _showError(lost > 0 ? `${Util.t('sec.session_expired')} ${Util.t('sec.session_expired_lost', { count: lost })}` : Util.t('sec.session_expired'));
+  }
 
   async function _submit(): Promise<void> {
     const username = userInp.value.trim().toLowerCase();

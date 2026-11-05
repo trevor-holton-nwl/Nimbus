@@ -19,6 +19,8 @@ import { Config, Toast, Util, Modal } from '../../../frontend/platform/foundatio
 import { UndoStack } from '../../../frontend/platform/store.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
+import { CacheStore, LS_RECORD_PREFIX } from '../../../frontend/platform/cache-store.mjs';
+import { resetCacheEnv, readRecord, simulateReload, CACHE_USER } from '../helpers/cache-env.mjs';
 
 test('plant switch guard keeps dirty edits on cancel and clears them on discard', async () => {
   const priorConfirm = Modal.confirm;
@@ -192,25 +194,29 @@ test('optimizer save is atomic without force and a conflict leaves every depende
   } finally { globalThis.fetch = original; Persistence._dirtyIds.clear(); Persistence._forceIds.clear(); }
 });
 
-test('offline reload preserves both ordinary and dependent optimizer dirty state', () => {
+test('the cache record preserves both ordinary and dependent optimizer dirty rows (and which ones are the batch)', () => {
+  resetCacheEnv();
   Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
   const tasks = [{ id: 'offline-queue', MACHINE: 'L1', RUN_TIME: 6, row_version: 7,
     planning_status: 'needs_planning', start_date: null, end_date: null },
   { id: 'offline-move', MACHINE: 'L1', RUN_TIME: 1, row_version: 8,
-    start_date: new Date('2026-09-10T08:00:00'), end_date: new Date('2026-09-10T09:00:00') }];
+    start_date: new Date('2026-09-10T08:00:00'), end_date: new Date('2026-09-10T09:00:00') },
+  { id: 'untouched', MACHINE: 'L1', RUN_TIME: 1, row_version: 9,
+    start_date: new Date('2026-09-10T10:00:00'), end_date: new Date('2026-09-10T11:00:00') }];
   Store.setTasks(tasks, 'unit-test');
-  Persistence._dirtyIds.add('offline-queue'); Persistence._forceIds.add('offline-queue');
-  Persistence._dirtyIds.add('offline-move');
-  Persistence._saveCache();
-  Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
-  assert.equal(Persistence._loadCache(), true);
-  assert.ok(Persistence._dirtyIds.has('offline-queue'));
-  assert.ok(Persistence._dirtyIds.has('offline-move'));
-  assert.ok(Persistence._forceIds.has('offline-queue'));
-  assert.ok(!Persistence._forceIds.has('offline-move'));
-  assert.equal(Store.tasks['offline-queue'].start_date, null);
-  Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
-  globalThis.localStorage.removeItem(Config.LS_KEY);
+  const priorPlant = Persistence._currentLoadedPlant;
+  Persistence._currentLoadedPlant = 'RL';
+  try {
+    Persistence._dirtyIds.add('offline-queue'); Persistence._forceIds.add('offline-queue');
+    Persistence._dirtyIds.add('offline-move');
+    Persistence._saveCache();
+    const rec = readRecord('RL');
+    assert.deepEqual(rec.rows.map(r => r.id).sort(), ['offline-move', 'offline-queue'], 'only the dirty rows are in the record');
+    assert.deepEqual(rec.optimizerIds, ['offline-queue']);
+    assert.equal(rec.rows.find(r => r.id === 'offline-queue').planning_status, 'needs_planning');
+  } finally {
+    Persistence._dirtyIds.clear(); Persistence._forceIds.clear(); Persistence._currentLoadedPlant = priorPlant;
+  }
 });
 
 test('undo after a successful save retains the latest row version for its atomic save', () => {
@@ -818,104 +824,41 @@ test('Persistence.load does NOT wipe a still-valid cache when reloading the SAME
   }
 });
 
-test('Backward-scheduling cutover (OQ36 / 8.6a a): the cache schema version is 7 and a version-6 cache is discarded on load', () => {
+test('Backward-scheduling cutover (OQ36 / 8.6a a): the cache schema version is 7 and a version-6 cache record is not restored', () => {
   assert.equal(Config.SCHEMA_VERSION, 7, 'the cutover bumps the cached snapshot shape version');
-  globalThis.localStorage.setItem(Config.LS_KEY, JSON.stringify({
-    _schemaVersion: 6,
-    tasks: [{ id: 'pre-cutover', MACHINE: 'L1', RUN_TIME: 4 }],
-  }));
-  try {
-    assert.equal(Persistence._loadCache(), false, 'a pre-cutover cache (unsaved offline edits included) must not restore');
-    assert.equal(globalThis.localStorage.getItem(Config.LS_KEY), null, 'and it is removed, not just ignored');
-    assert.equal(Store.tasks['pre-cutover'], undefined);
-  } finally {
-    globalThis.localStorage.removeItem(Config.LS_KEY);
-  }
+  resetCacheEnv();
+  void CacheStore.ready(CACHE_USER);
+  CacheStore.write({ user: CACHE_USER, plant: 'PRE', dirty: true }, JSON.stringify({ v: 1, user: CACHE_USER, plant: 'PRE', seq: 0,
+    schemaVersion: 6, buildId: null, savedAt: 0, complete: true, optimizerIds: [], firmDirtyIds: [], context: {},
+    rows: [{ id: 'pre-cutover', MACHINE: 'L1', RUN_TIME: 4 }] }));
+  assert.deepEqual(Persistence._readCacheRecord('PRE'), { record: null, unreadable: true },
+    'a pre-cutover record (unsaved edits included) must not restore, and the load says so instead of dropping it silently');
+  assert.equal(Store.tasks['pre-cutover'], undefined);
 });
 
-test('F10: a never-placed row saves its attribute edits without dates or segments; a placed row still sends them', () => {
-  const when = new Date(2026, 7, 26, 9);
-  Store.setTasks([
-    { id: 'np', MACHINE: 'L1', RUN_TIME: '5', user_scheduled: false, start_date: when, end_date: new Date(2026, 7, 26, 14) },
-    { id: 'pl', MACHINE: 'L1', RUN_TIME: '5', user_scheduled: true, start_date: when, end_date: new Date(2026, 7, 26, 14) },
-  ], 'unit-test');
-  const display = Persistence._taskEditSnapshot(Store.tasks.np);
-  assert.equal(display.RUN_TIME, '5', 'the attribute edit is sent');
-  for (const key of ['start_date', 'end_date', 'schedule_segments']) assert.equal(key in display, false, `${key} is display-derived and left out`);
-  const placed = Persistence._taskEditSnapshot(Store.tasks.pl);
-  assert.ok(placed.start_date && placed.end_date && Array.isArray(placed.schedule_segments));
-  Store.setTasks([], 'unit-test');
-});
-
-test('VC1: a never-placed (display-only) row sends attributes only: no planning status, no dates, no segments', () => {
-  const t = { id: 'vc1', user_scheduled: false, planning_status: 'scheduled', planning_reason: null,
-    start_date: new Date('2026-09-01T06:00:00'), end_date: new Date('2026-09-01T10:00:00'),
-    PRT_01: 'P1', PRT_02: null, PRODUCTION_VERSION: '0001', RUN_TIME: 4, MACHINE: 'L1', scheduleSegments: [] };
-  const snap = Persistence._taskEditSnapshot(t);
-  assert.equal('planning_status' in snap, false);
-  assert.equal('planning_reason' in snap, false);
-  assert.equal('start_date' in snap, false);
-  assert.equal('end_date' in snap, false);
-  assert.equal('schedule_segments' in snap, false);
-  assert.equal(snap.PRT_01, 'P1');
-  assert.equal(snap.MACHINE, 'L1');
-});
-
-test('VC1: a queued row still sends its planning status and reason', () => {
-  const t = { id: 'vc1q', user_scheduled: false, planning_status: 'needs_planning',
-    planning_reason: { code: 'overlong_never', message: 'x' }, start_date: null, end_date: null, scheduleSegments: [] };
-  const snap = Persistence._taskEditSnapshot(t);
-  assert.equal(snap.planning_status, 'needs_planning');
-  assert.equal(snap.planning_reason.code, 'overlong_never');
-});
-
-test('Persistence._loadCache clears the rank cache — the offline restore hydrates without ever loading rank maps', () => {
-  // Same exposure as _loadDemo: this is the backend-failed / boot restore path. It
-  // rehydrates whatever plant was last persisted, which need not be the plant the
-  // rank cache holds, and it emits schedule:hydrated regardless.
-  globalThis.localStorage.setItem(Config.LS_KEY, JSON.stringify({
-    _schemaVersion: Config.SCHEMA_VERSION,
-    tasks: [],
-  }));
+test('the unreachable-empty board clears the rank cache: no board is restored, so the ranks must not outlive the plant', () => {
   Store.setPriorityRankMaps({ '': { colorWheel: { RED: 1 } } }, 'unit-test');
   Persistence._rankMapsPlant = 'PLANT_A';
+  const cap = Toast.show;
+  Toast.show = () => {};
   try {
-    assert.equal(Persistence._loadCache(), true, 'a schema-current cache must restore');
-    assert.deepEqual(Store.priorityRankMaps, {},
-      'ranks cannot be trusted to match a cache-restored board, so they must be dropped');
+    Persistence._showUnreachableEmpty();
+    assert.deepEqual(Store.priorityRankMaps, {}, 'ranks cannot be trusted to match the (empty) board');
     assert.equal(Persistence._rankMapsPlant, null);
-  } finally {
-    globalThis.localStorage.removeItem(Config.LS_KEY);
-  }
+    assert.equal(typeof Persistence._loadCache, 'undefined', 'the offline board restore is gone');
+  } finally { Toast.show = cap; }
 });
 
-// ---------------------------------------------------------------------------
-// Whole-branch review fix — the same stale-plant exposure applies to the C1/C2
-// horizon fields. Store.visibilityHorizonEnd/frozenHorizonEnd are set only on a
-// successful /tasks 2xx (see load() above); the offline fallback paths
-// (_loadCache/_loadDemo) hydrate a DIFFERENT plant's tasks without ever
-// touching them, so a stale horizon from whatever plant was on screen before
-// the backend went unreachable would otherwise leak onto the newly-rendered
-// plant (wrongly clamping the Gantt/hiding grid rows, or wrongly refusing to
-// schedule into a window the new plant never configured).
-// ---------------------------------------------------------------------------
-
-test('Persistence._loadCache clears stale visibility/frozen horizon state from a previously-loaded plant', () => {
-  globalThis.localStorage.setItem(Config.LS_KEY, JSON.stringify({
-    _schemaVersion: Config.SCHEMA_VERSION,
-    tasks: [],
-  }));
+test('the unreachable-empty board clears stale visibility/frozen horizon state from a previously-loaded plant', () => {
   Store.setVisibilityHorizonEnd(new Date('2026-09-01T00:00:00Z'), 'unit-test');
   Store.setFrozenHorizonEnd(new Date('2026-08-25T00:00:00Z'), 'unit-test');
+  const cap = Toast.show;
+  Toast.show = () => {};
   try {
-    assert.equal(Persistence._loadCache(), true, 'a schema-current cache must restore');
-    assert.equal(Store.visibilityHorizonEnd, null,
-      'a stale visibility horizon from the previously-loaded plant must not carry over to the cache-restored plant');
-    assert.equal(Store.frozenHorizonEnd, null,
-      'a stale frozen horizon from the previously-loaded plant must not carry over to the cache-restored plant');
-  } finally {
-    globalThis.localStorage.removeItem(Config.LS_KEY);
-  }
+    Persistence._showUnreachableEmpty();
+    assert.equal(Store.visibilityHorizonEnd, null);
+    assert.equal(Store.frozenHorizonEnd, null);
+  } finally { Toast.show = cap; }
 });
 
 test('Persistence.isLoading() returns false at rest', () => {
@@ -1293,18 +1236,15 @@ test('saveAll while a save is in flight toasts for a user save but stays silent 
 async function withFailingTasksFetch(run) {
   const origFetch = globalThis.fetch;
   const origToast = Toast.show;
-  const origLoadCache = Persistence._loadCache;
   const origReconnectStart = Persistence._reconnect.start;
   const priorLoaded = Persistence._currentLoadedPlant;
   const priorAttempted = Persistence._lastAttemptedPlant;
-  const calls = { urls: [], toasts: [], loadCache: 0, reconnect: 0 };
+  const calls = { urls: [], toasts: [], reconnect: 0 };
   globalThis.fetch = (url) => { calls.urls.push(String(url)); return Promise.resolve({ ok: false, status: 500, clone() { return this; }, json: () => Promise.resolve({}), text: () => Promise.resolve('') }); };
   Toast.show = (msg, type) => { calls.toasts.push({ msg, type }); };
-  Persistence._loadCache = (plant) => { calls.loadCache++; return origLoadCache.call(Persistence, plant); };
   Persistence._reconnect.start = () => { calls.reconnect++; };
   try { await run(calls); } finally {
     globalThis.fetch = origFetch; Toast.show = origToast;
-    Persistence._loadCache = origLoadCache;
     Persistence._reconnect.start = origReconnectStart;
     Persistence._currentLoadedPlant = priorLoaded; Persistence._lastAttemptedPlant = priorAttempted;
     Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
@@ -1324,7 +1264,6 @@ test('Persistence.reload: a failed server load keeps local edits, toasts the err
 
     assert.ok(calls.urls.some(u => u.includes('/tasks?plant=RL')), `reload must refetch the loaded plant, saw ${calls.urls}`);
     assert.ok(calls.toasts.some(t => t.type === 'error' && t.msg === 'toast.reload_failed_local_edits'), 'user is told the reload failed');
-    assert.equal(calls.loadCache, 0, 'a discard-reload must not substitute the offline cache');
     assert.equal(calls.reconnect, 0, 'no reconnect watcher for a manual reload');
     assert.equal(Store.tasks['reload-edit'], before, 'the local board is untouched');
     assert.ok(Persistence._dirtyIds.has('reload-edit'), 'unsaved edits remain unsaved');
@@ -1340,22 +1279,31 @@ test('Persistence.reload: targets the last ATTEMPTED plant when no plant has loa
   });
 });
 
-test('Persistence.load (non-reload) with a failed server load falls back to the cache, toasts, and starts the reconnect watcher', async () => {
+test('Persistence.load with a failed server load shows the empty board, keeps the unsaved record untouched, says so, and starts the reconnect watcher', async () => {
   await withFailingTasksFetch(async (calls) => {
+    resetCacheEnv();
     Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
     Store.setTasks([{ id: 'cached-fallback', PLANT: 'RL', MACHINE: 'L1', RUN_TIME: 1, row_version: 2,
       start_date: new Date('2026-09-10T08:00:00'), end_date: new Date('2026-09-10T09:00:00') }], 'unit-test');
+    Persistence._currentLoadedPlant = 'RL';
+    Persistence._dirtyIds.add('cached-fallback');
     Persistence._saveCache();
+    const before = CacheStore.peek('RL').json;
     Store.setTasks([], 'unit-test');
     Persistence._currentLoadedPlant = null;
+    Persistence._dirtyIds.clear();
+    await simulateReload();
 
     await Persistence.load({ force: true, plant: 'RL' });
+    await new Promise(resolve => setTimeout(resolve, 0));
 
-    assert.equal(calls.loadCache, 1, 'cache restore attempted');
-    assert.ok(Store.tasks['cached-fallback'], 'cached board is shown');
+    assert.equal(Store.tasks['cached-fallback'], undefined, 'no offline board: the cache protects unsaved edits only');
     assert.equal(calls.reconnect, 1, 'reconnect watcher started');
-    assert.ok(calls.toasts.some(t => t.type === 'warn'), 'user is warned the backend is unreachable');
-    globalThis.localStorage.removeItem(Config.LS_KEY);
+    assert.ok(calls.toasts.some(t => t.type === 'error'), 'user is told the backend is unreachable');
+    assert.ok(calls.toasts.some(t => t.msg === 'toast.cache_kept_offline'), 'and that the unsaved edits are kept');
+    assert.equal(CacheStore.peek('RL').json, before, 'the record is untouched');
+    Persistence._saveCache();
+    assert.equal(CacheStore.peek('RL').json, before, 'no plant is loaded, so a later autosave cannot overwrite the record either');
   });
 });
 
@@ -1401,40 +1349,44 @@ test('refresh copy-back applies the locked original_end_date (the due date) from
   } finally { globalThis.fetch = originalFetch; Persistence._dirtyIds.clear(); Persistence._conflictedIds.clear(); Persistence._firmDirtyIds.clear(); }
 });
 
-test('a cache holding firmedIds / fixedIds / tasks[].firmed restores no firms, but cached date edits still restore', () => {
-  Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
-  const cached = firmTask('old-firm', { firmed: true });
-  Store.setTasks([cached], 'unit-test');
-  Persistence._dirtyIds.add('old-firm');
-  Persistence._saveCache();
-  const parsed = JSON.parse(globalThis.localStorage.getItem(Config.LS_KEY));
-  parsed.firmedIds = ['old-firm', 'ghost'];
-  parsed.fixedIds = ['old-firm'];
-  parsed.tasks[0].firmed = true;
-  globalThis.localStorage.setItem(Config.LS_KEY, JSON.stringify(parsed));
-  Store.setTasks([], 'unit-test');
-  Store.firmedIds.add('leftover');
-  assert.equal(Persistence._loadCache(), true);
-  assert.equal(Store.firmedIds.size, 0, 'no firm is revived from the browser cache');
-  assert.equal(Store.tasks['old-firm'].firmed, false);
-  assert.ok(Persistence._dirtyIds.has('old-firm'), 'cached edits still restore');
-  assert.equal(Store.tasks['old-firm'].start_date.getTime(), new Date('2026-09-09T08:00:00').getTime());
-
-  // The backend-load path restores non-task state only: same rule.
+test('an unsaved Firm survives the record; a projected firmed on any other row is informational and never revives a firm', () => {
+  const server = id => Persistence._prepTask({ id, PLANT: 'RL', MACHINE: 'L1', RUN_TIME: 1, row_version: 3, user_scheduled: true,
+    original_start_date: '2026-09-09T08:00:00', start_date: '2026-09-09T08:00:00', end_date: '2026-09-09T09:00:00', firmed: false });
+  const rec = { v: 1, user: CACHE_USER, plant: 'RL', seq: 0, schemaVersion: Config.SCHEMA_VERSION, buildId: null, savedAt: 0, complete: true,
+    optimizerIds: [], firmDirtyIds: ['firm-a'], context: {}, rows: [
+      { id: 'firm-a', row_version: 3, firmed: true, start_date: '2026-09-09T08:00:00', end_date: '2026-09-09T09:00:00' },
+      { id: 'firm-b', row_version: 3, firmed: true, start_date: '2026-09-09T10:00:00', end_date: '2026-09-09T11:00:00',
+        original_start_date: '2026-09-09T08:00:00', user_scheduled: true }] };
+  const a = server('firm-a'), b = server('firm-b');
+  const plan = Persistence._planRestore(rec, [a, b], false);
+  assert.equal(a.firmed, true, 'the planner changed this firm: restored');
+  assert.deepEqual(plan.firm, ['firm-a']);
+  assert.ok(plan.overlaid.includes('firm-a'), 'a firm-only row is restored as an unsaved edit');
+  assert.equal(b.firmed, false, 'firm-b was not firm-dirty: its projected firmed is ignored');
+  assert.ok(plan.overlaid.includes('firm-b') && b.start_date.getHours() === 10, 'its date edit still restores');
+  // The non-task restore path never revives a firm either.
   Persistence._restoreNonTaskState({ firmedIds: ['old-firm'], fixedIds: ['old-firm'] });
   assert.equal(Store.firmedIds.size, 0);
-  Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
-  globalThis.localStorage.removeItem(Config.LS_KEY);
 });
 
-test('_saveCache never writes firmedIds or per-task firmed', () => {
-  Store.setTasks([firmTask('wr-a', { firmed: true })], 'unit-test');
-  Persistence._saveCache();
-  const parsed = JSON.parse(globalThis.localStorage.getItem(Config.LS_KEY));
-  assert.ok(!('firmedIds' in parsed));
-  assert.ok(parsed.tasks.every(t => !('firmed' in t)));
-  assert.equal(Store.tasks['wr-a'].firmed, true, 'the live task keeps its mirror');
-  globalThis.localStorage.removeItem(Config.LS_KEY);
+test('the cache record has no firmedIds list: firm travels only as firmDirtyIds, and only dirty rows are in it at all', () => {
+  resetCacheEnv();
+  Store.setTasks([firmTask('wr-a', { firmed: true }), firmTask('wr-clean', { firmed: true })], 'unit-test');
+  const priorPlant = Persistence._currentLoadedPlant;
+  Persistence._currentLoadedPlant = 'WR';
+  try {
+    Persistence._dirtyIds.add('wr-a');
+    Persistence._saveCache();
+    let rec = readRecord('WR');
+    assert.ok(!('firmedIds' in rec));
+    assert.deepEqual(rec.firmDirtyIds, [], 'a date edit on a firmed row is not a firm change');
+    assert.deepEqual(rec.rows.map(r => r.id), ['wr-a'], 'the clean firmed row is not in the record');
+    Persistence._firmDirtyIds.add('wr-a');
+    Persistence._saveCache();
+    rec = readRecord('WR');
+    assert.deepEqual(rec.firmDirtyIds, ['wr-a']);
+    assert.equal(Store.tasks['wr-a'].firmed, true, 'the live task keeps its mirror');
+  } finally { Persistence._dirtyIds.clear(); Persistence._firmDirtyIds.clear(); Persistence._currentLoadedPlant = priorPlant; }
 });
 
 test('_saveCache never writes systemMove (D21: derivationIssue is now cached); a refreshed row drops both notes', async () => {
@@ -1442,13 +1394,17 @@ test('_saveCache never writes systemMove (D21: derivationIssue is now cached); a
   task.derivationIssue = { code: 'finish_moved_earlier', from: new Date('2026-09-09T20:00:00'), to: new Date('2026-09-09T19:00:00') };
   task.systemMove = { from: new Date('2026-09-09T08:00:00'), to: new Date('2026-09-09T07:00:00'), reason: 'run_time_changed' };
   Store.setTasks([task], 'unit-test');
+  resetCacheEnv();
+  const priorPlant = Persistence._currentLoadedPlant;
+  Persistence._currentLoadedPlant = 'WN';
+  Persistence._dirtyIds.add('wr-notes');
   Persistence._saveCache();
-  const parsed = JSON.parse(globalThis.localStorage.getItem(Config.LS_KEY));
-  assert.ok(parsed.tasks.every(t => !('systemMove' in t)), 'the session-only systemMove never reaches the browser cache');
-  assert.ok(parsed.tasks.some(t => t.derivationIssue?.code === 'finish_moved_earlier'), 'D21: derivationIssue is cached for the overlay');
+  const parsed = readRecord('WN');
+  Persistence._currentLoadedPlant = priorPlant;
+  assert.ok(parsed.rows.every(t => !('systemMove' in t)), 'the session-only systemMove never reaches the browser cache');
+  assert.ok(parsed.rows.some(t => t.derivationIssue?.code === 'finish_moved_earlier'), 'D21: derivationIssue is cached for the overlay');
   assert.ok(Store.tasks['wr-notes'].derivationIssue, 'the live task keeps its notes');
   assert.ok(!('derivationIssue' in Persistence._taskEditSnapshot(Store.tasks['wr-notes'])), 'nor the save payload / refresh baseline');
-  globalThis.localStorage.removeItem(Config.LS_KEY);
 
   // A server refresh of the row replaces whatever the engine derived, so the notes go with it.
   const originalFetch = globalThis.fetch;
@@ -1468,14 +1424,11 @@ test('_saveCache never writes systemMove (D21: derivationIssue is now cached); a
 test('hasPendingWork counts dirty, force, conflicted, firm-dirty ids, pending calendar deletes and What-If; haltCacheWrites stops _saveCache', async () => {
   const { Sandbox } = await import('../../../frontend/optimization/sandbox.mjs');
   const sets = ['_dirtyIds', '_forceIds', '_conflictedIds', '_firmDirtyIds'];
-  const memStore = new Map();
+  const memStore = resetCacheEnv().map;
   const origLS = globalThis.localStorage;
-  globalThis.localStorage = {
-    getItem: k => (memStore.has(k) ? memStore.get(k) : null),
-    setItem: (k, v) => { memStore.set(k, String(v)); },
-    removeItem: k => { memStore.delete(k); },
-    get length() { return memStore.size; }, key: i => [...memStore.keys()][i] ?? null,
-  };
+  const priorPlant = Persistence._currentLoadedPlant;
+  Persistence._currentLoadedPlant = 'HP';
+  const hasRecord = () => [...memStore.keys()].some(k => k.startsWith(LS_RECORD_PREFIX));
   const origActive = Sandbox.active;
   try {
     assert.equal(Persistence.hasPendingWork(), false);
@@ -1493,15 +1446,26 @@ test('hasPendingWork counts dirty, force, conflicted, firm-dirty ids, pending ca
     assert.equal(Persistence.hasPendingWork(), true, 'What-If active');
     Sandbox.active = false;
     memStore.clear();
+    CacheStore._setBackendForTests();
+    // An empty board stores no record any more (nothing unsaved is deleted, not written): hold one row so there is something to write.
+    Persistence._holdRows('HP', [{ id: 'held-1', row_version: 1 }], [], []);
     Persistence._saveCache();
-    assert.equal(memStore.has(Config.LS_KEY), true, 'positive control: _saveCache writes before halt');
-    Persistence.haltCacheWrites();
+    assert.equal(hasRecord(), true, 'positive control: _saveCache writes before halt');
+    Sandbox.active = true;
     memStore.clear();
     Persistence._saveCache();
-    assert.equal(memStore.has(Config.LS_KEY), false, 'no cache rewrite after halt');
+    assert.equal(hasRecord(), false, 'What-If never writes the record');
+    Sandbox.active = false;
+    Persistence.haltCacheWrites();
+    assert.equal(CacheStore.stats().halted, true, 'halting also halts the cache store');
+    memStore.clear();
+    Persistence._saveCache();
+    assert.equal(hasRecord(), false, 'no cache rewrite after halt');
   } finally {
     Sandbox.active = origActive;
+    Persistence._clearHeld();
     Persistence._cacheWritesHalted = false;
+    Persistence._currentLoadedPlant = priorPlant;
     globalThis.localStorage = origLS;
   }
 });

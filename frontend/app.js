@@ -401,6 +401,9 @@ const NIMBUS = (function () {
       _offDefaultPlant();
       try {
         if (Store.selectedPlant) return;                 // already selected — never override
+        // Unsaved work (or a cache marker that says there is some, before the boot restore has run) outranks the default plant:
+        // switching now would drop the restored edits without the discard confirm.
+        if (Persistence.blocksBootPlantSwitch()) return;
         const known = Store.knownPlants();               // already allowedPlants()-scoped
         // An explicit default plant wins over the per-browser "last-used" plant so a
         // returning user lands on their configured default rather than picking manually.
@@ -461,8 +464,9 @@ const NIMBUS = (function () {
     // The 12h local cache lifetime is checked ONLY here, at boot — not via a
     // live in-tab timer — so a session older than Config.SESSION_MAX_AGE_MS
     // is cleared and treated exactly like "not logged in" on the next reload.
-    if (Session.isExpired()) { Session.clearExpired(); showLoginScreen({ expired: true }); return; }
+    if (Session.isExpired()) { const lost = Session.expiredEditCount(); Session.clearExpired(); showLoginScreen({ expired: true, lost }); return; }
     if (!Session.currentUser()) { showLoginScreen(); return; }
+    void Session.sweepOrphanCache();   // other users' / empty cache records, before the boot load reads its own
     _bootMain();
   }
 

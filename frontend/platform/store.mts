@@ -218,6 +218,8 @@ export const Store = {
   // Last emitted event, for the ErrorLog 'platform' state provider (tail of this module).
   _lastEvent: null as { type: string; source?: string; revision: number; ts: number } | null,
 
+  /** The plants the signed-in user may open (null = unknown or unrestricted), via the resolver the app registered. */
+  allowedPlantsScope(): string[] | null { try { const a = _allowedPlantsResolver(); return Array.isArray(a) ? a : null; } catch { return null; } },
   setAllowedPlantsResolver(fn: AllowedPlantsResolver): void { _allowedPlantsResolver = typeof fn === 'function' ? fn : () => null; },
   setSettingsDefaultsResolver(fn: SettingsDefaultsResolver): void { _settingsDefaultsResolver = typeof fn === 'function' ? fn : () => ({}); },
   rev(): number { return this._rev || 0; },

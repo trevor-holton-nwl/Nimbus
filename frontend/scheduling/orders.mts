@@ -3135,6 +3135,8 @@ export const Inspector = {
           local.row_version = version;
           // The note is not part of the saved-state key: the baseline moves with the version it was taken at.
           Persistence.adoptBaselineVersion(id, baseVersion, version);
+          // The cached row carries row_version; without this write a reload would see it as moved on (stale) or equal by luck.
+          Persistence._autosave();
         }
         Inspector.invalidateHistory([id]);
         return true;

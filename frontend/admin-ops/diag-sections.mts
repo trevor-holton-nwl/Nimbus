@@ -26,9 +26,10 @@ export interface DiagSection {
   shortKey: string; shortArgs: Record<string, unknown>; // the rail's mono figure
 }
 
-/** This browser's counters. `autosave` is the already-translated autosave state shown in the line. */
+/** This browser's counters. `autosave` is the already-translated backup state shown in the line; `degraded` = the last
+ *  backup write failed or browser storage is blocked (the only backup state that is not ok). */
 export interface ClientStats {
-  build: string; autosave: string; autosaveDisabled?: boolean; degraded?: boolean;
+  build: string; autosave: string; degraded?: boolean; paused?: boolean;
   heapUsed?: number; heapLimit?: number;
   /** Browser errors per minute. */
   errRate: number;
@@ -68,6 +69,18 @@ export interface DiagInputs {
 type Thresholds = typeof THRESHOLDS;
 
 const PAGE_ORDER: DiagSectionId[] = ['client', 'pipe', 'bwarn', 'db', 'db-pool', 'db-server', 'db-tables', 'db-conn', 'db-locks', 'db-idx', 'db-slow', 'db-seq', 'thread'];
+
+/** Storage sizes are counted in UTF-16 code units ("chars", key plus value) everywhere in the admin UI; shown as thousands. */
+export function fmtKChars(chars: number): string { return (Math.max(0, chars || 0) / 1000).toFixed(1); }
+
+/** The backup state the admin UI reads off `Persistence.storageInventory()`: ok, failing (a record's last write failed), paused
+ *  (this tab's autosave was halted by another tab) or blocked (browser storage unavailable). Blocked wins, then paused.
+ *  A store that was simply never opened (no plant loaded yet) is neither: it reads as ok. */
+export function backupState(inv: { degraded?: boolean; blocked?: boolean; paused?: boolean }): 'ok' | 'failed' | 'paused' | 'blocked' {
+  if (inv.blocked) return 'blocked';
+  if (inv.paused) return 'paused';
+  return inv.degraded ? 'failed' : 'ok';
+}
 
 export const ANCHOR_IDS: Record<DiagSectionId, string> = Object.fromEntries(PAGE_ORDER.map(id => [id, `diag-${id}`])) as Record<DiagSectionId, string>;
 
@@ -123,8 +136,8 @@ function _client(c: ClientStats | null, t: Thresholds): DiagSection {
   if (!c) return _unavailable('client');
   const heapPct = c.heapUsed !== undefined && c.heapLimit ? Math.round((c.heapUsed / c.heapLimit) * 100) : null;
   let sev: Severity = 'ok';
-  if (c.autosaveDisabled || c.errRate > t.errRateErrPerMin) sev = 'err';
-  else if ((heapPct !== null && heapPct >= t.heapWarnPct) || c.errRate > 0) sev = 'warn';
+  if (c.errRate > t.errRateErrPerMin) sev = 'err';
+  else if (c.degraded || c.paused || (heapPct !== null && heapPct >= t.heapWarnPct) || c.errRate > 0) sev = 'warn';
   const heap = heapPct ?? NA;
   return _sec('client', sev, 'diag.line_client', { build: c.build, heap, autosave: c.autosave, errs: _round1(c.errRate) }, { heap });
 }

@@ -113,7 +113,6 @@ test('data load ladder', () => {
   // the detail rows are labelled: all plants vs the loaded plant's sent/loaded counts
   assert.deepEqual(dl({}).detail.rows.map(r => r[0]), ['pipe.in_db', 'pipe.sent', 'pipe.loaded']);
   assert.equal(dl({}).detail.rows[0][1], 100);
-  assert.equal(dl({ client: { ...b.client, stats: { source: 'cache', raw_received: 1, rendered: 1 } } }).reasonKey, 'sig.data_cached');
   assert.equal(dl({}).reasonKey, 'sig.data_ok');
   assert.equal(dl({}).reasonArgs.ago, Date.parse('2026-10-30T11:00:00Z'));
 });
@@ -151,9 +150,15 @@ test('browser ladder', () => {
   const br = patch => { const b = base(); b.client = { ...b.client, ...patch }; return sig(buildSignals(b), 'browser'); };
   assert.equal(br({}).reasonKey, 'sig.browser_ok');
   assert.equal(br({}).reasonArgs.heap, '50 MB');
-  assert.equal(br({ inv: { autosaveDisabled: true } }).severity, 'err');
+  const blocked = br({ inv: { degraded: true, blocked: true } });
+  assert.equal(blocked.severity, 'warn');
+  assert.equal(blocked.reasonKey, 'sig.browser_backup_blocked');
+  assert.deepEqual(blocked.fixes.map(f => f.id), ['client.save']);
   assert.equal(br({ errRate: 11, errors: 20 }).severity, 'err');
-  assert.equal(br({ inv: { degraded: true } }).reasonKey, 'sig.browser_degraded');
+  const failing = br({ inv: { degraded: true } });
+  assert.equal(failing.severity, 'warn');
+  assert.equal(failing.reasonKey, 'sig.browser_backup_failed');
+  assert.equal(br({ inv: { degraded: false, blocked: false } }).severity, 'ok');
   assert.equal(br({ heapUsed: 900, heapLimit: 1000 }).reasonKey, 'sig.browser_heap');
   const e = br({ errors: 2 }); assert.equal(e.severity, 'warn'); assert.equal(e.reasonKey, 'sig.browser_errors');
   assert.equal(br({ heapUsed: undefined }).reasonArgs.heap, '–');
@@ -161,10 +166,10 @@ test('browser ladder', () => {
 
 test('ordering: worst first, stable on ties; threshold override', () => {
   const b = base();
-  b.client = { ...b.client, inv: { autosaveDisabled: true }, stats: { source: 'cache', raw_received: 1, rendered: 1 } };   // browser err + data_load warn
+  b.client = { ...b.client, inv: { degraded: true } };   // browser warn
   b.jobs = { ...b.jobs, summary: { ...b.jobs.summary, failed24h: 1 } };           // jobs err
   const s = buildSignals(b);
-  assert.deepEqual(s.map(x => x.id).slice(0, 3), ['jobs', 'browser', 'data_load']);
+  assert.deepEqual(s.map(x => x.id).slice(0, 2), ['jobs', 'browser']);
   const b2 = base(); b2.health = { ...b2.health, db: { ...b2.health.db, ping_ms: 100 } };
   assert.equal(sig(buildSignals(b2), 'database').severity, 'ok');
   assert.equal(sig(buildSignals(b2, { dbPingWarnMs: 50 }), 'database').severity, 'warn');
@@ -176,7 +181,7 @@ function noisy() {
   b.jobs = { summary: { failed24h: 1, missed24h: 0, warning24h: 0, longerThanUsual: [], nextFire: null, scheduler: { ok: false } }, lastFailed: [{ id: 4, job_name: 'Opt', plant: '1008', status: 'failed', started_at: '2026-10-30T11:00:00Z', scheduled_for: null, duration_ms: 1, error: 'e' }], recent: [] };
   b.backendErrors = { total: 6, entries: [] };
   b.dbDeep = { ...b.dbDeep, tables: [table({ needs_vacuum: true, dead_pct: 30 })], locks: [{ blocked_pid: 1 }] };
-  b.client = { ...b.client, stats: { source: 'backend', raw_received: 10, rendered: 5 }, inv: { autosaveDisabled: true } };
+  b.client = { ...b.client, stats: { source: 'backend', raw_received: 10, rendered: 5 }, inv: { degraded: true } };
   b.sap = { ...b.sap, status: { ...b.sap.status, error: 3 }, batches: [{ batch_id: 'h', status: 'held' }] };
   b.uploadWarnings = { distribution: 2, batchId: 'bb' };
   return b;
@@ -279,7 +284,6 @@ test('anchors: Data load carries a secondary nav.diagnostics fix to diag-pipe, p
   const cases = [
     withClient({ stats: { source: 'backend', raw_received: 100, rendered: 90 } }),
     withClient({ tasks: 0 }),
-    withClient({ stats: { source: 'cache', raw_received: 100, rendered: 100 } }),
   ];
   for (const c of cases) {
     const s = at(c);
@@ -327,7 +331,7 @@ test('anchors: every nav.* fix and every linkSub in a worst-case input carries a
     ...withHealth({ db: { connected: true, ping_ms: 3000 } }, { pool_size: 10, pool_available: 0, requests_waiting: 4 }),
     ...withDeep({ locks: [{ blocked_pid: 1 }], tables: [table({ needs_vacuum: true })], connections: { total: 9, long_running: [{ duration_s: 99 }] }, slow_queries: { available: true, queries: [{ mean_ms: 900 }] } }),
     ...withJobs({ failed24h: 2, missed24h: 1, warning24h: 1, longerThanUsual: [{}], scheduler: { ok: false }, maintenance: { enabled: true } }),
-    ...withClient({ tasks: 0, stats: { source: 'cache', raw_received: 100, rendered: 80 } }),
+    ...withClient({ tasks: 0, stats: { source: 'backend', raw_received: 100, rendered: 80 } }),
     sap: { ...sap, status: { ...sap.status, error: 3 }, batches: [{ status: 'held' }] },
     backendErrors: { total: 12, entries: [] }, backendWarns: { total: 40, entries: [] },
     uploadWarnings: { distribution: 1, batchId: 'b' },
@@ -341,4 +345,20 @@ test('anchors: every nav.* fix and every linkSub in a worst-case input carries a
   const logs = fixes.filter((f) => f.id === 'logs.open');
   assert.ok(logs.length >= 2);
   for (const f of logs) { assert.ok(['error', 'warn'].includes(f.args.level)); assert.equal(f.args.source, 'backend'); }
+});
+
+test('T6/T7: a failing or blocked backup is a warning whose fix is Save (client.save), not Reset client state, in the signal and the attention list', () => {
+  const b = base();
+  b.client = { ...b.client, inv: { degraded: true } };
+  const sigs = buildSignals(b);
+  const browser = sig(sigs, 'browser');
+  assert.equal(browser.severity, 'warn');
+  assert.equal(browser.reasonKey, 'sig.browser_backup_failed');
+  assert.deepEqual(browser.fixes.map(f => [f.id, f.labelKey]), [['client.save', 'btn.save']]);
+  const attn = buildAttention(sigs, b).find(a => a.id === 'autosave');
+  assert.deepEqual([attn.fix.id, attn.fix.labelKey], ['client.save', 'btn.save']);
+  assert.equal(attn.severity, 'warn');
+  // a healthy backup raises nothing
+  const ok = base();
+  assert.equal(buildAttention(buildSignals(ok), ok).find(a => a.id === 'autosave'), undefined);
 });

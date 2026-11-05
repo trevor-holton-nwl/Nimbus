@@ -23,7 +23,7 @@ import { JobsClient } from './jobs-client.mjs';
 import { UnifiedLogPane } from './unified-log-pane.mjs';
 import type { JobRun } from './jobs-client.mjs';
 import { buildSignals, buildAttention, FORBIDDEN, NOT_FOUND, THRESHOLDS } from './signals.mjs';
-import { buildDiagSections, defaultOpen, ANCHOR_IDS } from './diag-sections.mjs';
+import { buildDiagSections, defaultOpen, ANCHOR_IDS, fmtKChars, backupState } from './diag-sections.mjs';
 import { buildPipelineSteps } from './pipeline-model.mjs';
 import type { PipelineModel, PipelineStepKey } from './pipeline-model.mjs';
 import type { ClientStats, DbDeep, DeepData, DiagInputs, DiagSection, DiagSectionId, PerfSample } from './diag-sections.mjs';
@@ -703,8 +703,9 @@ export const AdminCockpit = {
       const mem = (performance as Performance & { memory?: ChromePerformanceMemory }).memory;
       const c: ClientStats = {
         build: Config.BUILD_ID,
-        autosave: inv.autosaveDisabled ? Util.t('ui.ls_quota_disabled') : inv.degraded ? Util.t('ui.ls_degraded') : Util.t('ui.ls_healthy'),
-        autosaveDisabled: !!inv.autosaveDisabled, degraded: !!inv.degraded,
+        autosave: AdminCockpit._backupLabel(inv),
+        degraded: !!inv.degraded,
+        paused: !!inv.paused,
         errRate: ErrorLog.errorRatePerMin(),
       };
       if (mem) { c.heapUsed = mem.usedJSHeapSize; c.heapLimit = mem.jsHeapSizeLimit; }
@@ -1257,8 +1258,8 @@ export const AdminCockpit = {
     const s = A._ovSlow;
     let st: ReturnType<typeof Persistence.stats> | null = null;
     try { st = Persistence.stats ? Persistence.stats() : null; } catch { st = null; }
-    let inv: { autosaveDisabled?: boolean; degraded?: boolean } = {};
-    try { inv = Persistence.storageInventory(); } catch { inv = {}; }
+    let inv: { degraded?: boolean; blocked?: boolean; paused?: boolean } = {};
+    try { const si = Persistence.storageInventory(); inv = { degraded: si.degraded, blocked: si.blocked, paused: si.paused }; } catch { inv = {}; }
     const mem = (typeof performance !== 'undefined'
       ? (performance as Performance & { memory?: ChromePerformanceMemory }).memory : undefined);
     const newestUpload = s.uploadAudit[0];
@@ -1591,6 +1592,7 @@ export const AdminCockpit = {
       }
       case 'data.reload': void Persistence.reload(); return;
       case 'client.reset': void A._resetClientState(); return;
+      case 'client.save': Persistence.saveAll(); return;
       default: console.warn(`AdminCockpit: unknown fix id '${fix.id}'`); return;
     }
   },
@@ -3089,8 +3091,8 @@ export const AdminCockpit = {
     if (!host) return;
 
     const inv  = Persistence.storageInventory();
-    const totK = (inv.totalBytes / 1024).toFixed(1);
-    const lastK = (inv.lastBytes / 1024).toFixed(1);
+    const totK = fmtKChars(inv.totalChars);
+    const lastK = fmtKChars(inv.lastChars);
     const lastWhen = inv.lastSavedAt ? Util._fmtTimePref(new Date(inv.lastSavedAt)) : '—';
     const errCount  = ErrorLog.countBy('error');
     const warnCount = ErrorLog.countBy('warn');
@@ -3102,11 +3104,9 @@ export const AdminCockpit = {
       : 'n/a';
     const stats: AdminPersistenceStats | Record<string, never> = (Persistence.stats && Persistence.stats()) || {};
 
-    const autosaveTxt = inv.autosaveDisabled
-      ? `<span class="admin-bad">${Util.t('ui.ls_quota_disabled')}</span>`
-      : inv.degraded
-        ? `<span>${Util.t('ui.ls_degraded')}</span>`
-        : `<span class="admin-good">${Util.t('ui.ls_healthy')}</span>`;
+    const autosaveTxt = backupState(inv) === 'ok'
+      ? `<span class="admin-good">${AdminCockpit._backupLabel(inv)}</span>`
+      : `<span class="admin-warn">${AdminCockpit._backupLabel(inv)}</span>`;
     const errTxt = errRate > THRESHOLDS.errRateErrPerMin
       ? `<span class="admin-bad">${Util.t('ui.diag_err_rate_spike', { count: errCount, rate: errRate })}</span>`
       : errRate > 0
@@ -3140,16 +3140,51 @@ export const AdminCockpit = {
     AdminCockpit._repaintHeads();
   },
 
+  /** The translated backup state: backed up, last write failed, or browser storage blocked. */
+  _backupLabel(inv: { degraded?: boolean; blocked?: boolean; paused?: boolean }): string {
+    const st = backupState(inv);
+    return Util.t(st === 'blocked' ? 'ui.ls_blocked' : st === 'paused' ? 'ui.ls_paused' : st === 'failed' ? 'ui.ls_degraded' : 'ui.ls_healthy');
+  },
+
   async _resetClientState(): Promise<void> {
-    const ok = await Modal.confirm({
-      title:        Util.t('modal.reset_client_title'),
-      message:      Util.t('modal.reset_client_msg'),
-      detail:       Util.t('modal.reset_client_detail'),
-      confirmLabel: Util.t('modal.reset_client_confirm'),
-      tone:         'warn',
-    });
-    if (!ok) return;
-    Session.clearLocalPlannerData({ keepQueuedWork: true });
+    // Reset wipes the autosave cache, so edits still unsaved are named and Save is offered first.
+    const pending = Persistence.unsavedCount();
+    // Edits kept in the cache for other plants (or not in memory) go with the wipe too: name those plants.
+    const others = Persistence.unsavedOtherPlants();
+    if (pending > 0) {
+      const pick = await Modal.choose({
+        title:        Util.t('modal.reset_client_title'),
+        message:      Util.t('modal.reset_client_pending_msg', { count: pending })
+                      + (others.length ? ' ' + Util.t('modal.reset_client_pending_plants', { plants: others.join(', ') }) : ''),
+        options: [
+          { value: 'save',    label: Util.t('modal.reset_client_pending_save') },
+          { value: 'discard', label: Util.t('modal.reset_client_pending_discard', { count: pending }) },
+        ],
+        confirmLabel: Util.t('modal.reset_client_pending_go'),
+      });
+      if (pick == null) return;
+      if (pick === 'save') {
+        Persistence.saveAll();
+        Toast.show(Util.t('toast.reset_saving'), 'info', 6000);
+        return;
+      }
+    } else {
+      const ok = await Modal.confirm({
+        title:        Util.t('modal.reset_client_title'),
+        message:      Util.t('modal.reset_client_msg'),
+        detail:       Util.t('modal.reset_client_detail'),
+        confirmLabel: Util.t('modal.reset_client_confirm'),
+        tone:         'warn',
+      });
+      if (!ok) return;
+    }
+    // Halt first so no late autosave rewrites what is about to be cleared; the wipe is synchronous.
+    Persistence.haltCacheWrites();
+    // The edits are discarded on purpose: forget them in memory too, or the reload would ask "Leave site?" and a Stay would
+    // leave a wiped, halted tab holding unsaved edits.
+    Persistence.forgetUnsavedForReset();
+    // The wipe is synchronous (it has landed when this returns), so its promise is not awaited.
+    void Session.clearLocalPlannerData({ keepQueuedWork: true });
     ErrorLog.info('admin', 'Client state reset by user — reloading');
     // Give the log a frame to render in case of debounce, then hard-reload bypassing HTTP cache.
     setTimeout(() => location.reload(), 50);
@@ -3158,13 +3193,13 @@ export const AdminCockpit = {
   _showStorageInventory(inv?: AdminStorageInventory): void {
     if (!inv) inv = Persistence.storageInventory();
     const top = inv.items.slice(0, 12)
-      .map((i) => `${(i.bytes / 1024).toFixed(1).padStart(7)} KB  ${i.key}`)
+      .map((i) => `${fmtKChars(i.chars).padStart(7)}  ${i.key}`)
       .join('\n') || Util.t('ui.ls_empty');
-    const lsStatus = inv.autosaveDisabled ? Util.t('ui.ls_autosave_disabled') : inv.degraded ? Util.t('ui.ls_evicted_tier') : Util.t('ui.ls_healthy');
+    const lsStatus = AdminCockpit._backupLabel(inv);
     const detail =
       `<pre style="margin:0;font:11px ui-monospace,monospace;white-space:pre;">` +
-      Util.t('modal.ls_inv_total', { size: (inv.totalBytes / 1024).toFixed(1), count: inv.count }) + '\n' +
-      Util.t('modal.ls_inv_snapshot', { size: (inv.lastBytes / 1024).toFixed(1), status: lsStatus }) + '\n\n' +
+      Util.t('modal.ls_inv_total', { size: fmtKChars(inv.totalChars), count: inv.count }) + '\n' +
+      Util.t('modal.ls_inv_snapshot', { size: fmtKChars(inv.lastChars), status: lsStatus }) + '\n\n' +
       Util.t('modal.ls_inventory_top_keys') + `\n${top}` +
       `</pre>`;
     Modal.confirm({

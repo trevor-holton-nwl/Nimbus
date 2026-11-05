@@ -74,7 +74,7 @@ export function startVersionWatch(opts: VersionWatchOptions): () => void {
 
 interface PresenterDeps {
   Util: { t(key: string): string };
-  Persistence: { hasPendingWork(): boolean };
+  Persistence: { hasPendingWork(includeStored?: boolean): boolean };
   Modal: { confirm(opts: { title?: string; message?: string; confirmLabel?: string }): Promise<boolean> };
   reload?: () => void;
   doc?: Document;                // test seam, defaults to `document`
@@ -99,7 +99,7 @@ export function makeUpdatePresenter(deps: PresenterDeps): (remoteId: string) => 
     if (refreshBusy) return;
     refreshBusy = true;
     try {
-      if (Persistence.hasPendingWork()) {
+      if (Persistence.hasPendingWork(false)) {
         const ok = await Modal.confirm({
           title: Util.t('toast.update_available'),
           message: Util.t('confirm.update_unsaved'),

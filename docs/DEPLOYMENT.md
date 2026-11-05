@@ -139,6 +139,10 @@ The Jobs scheduler (`backend/jobs/`) runs the optimizer in a Node child process,
 - **Option**: if contention shows up, move the runs to a Container Apps Job built from this same image (`node` and the CLI are already in it); the runner would then gather the bundle, start the job and collect its stdout. Not built.
 - Verify after the roll (cache-bust): `GET /jobs/types` lists `optimizer.plant`; Run now on a Propose job against a test plant finishes `succeeded` with `steps` in its summary.
 
+## Compact autosave cache release (2026-11-04, branch `feat/cache-indexeddb`, not deployed)
+
+Frontend only: no migration, no environment variable. The first boot after the roll converts the old `nimbus.state.v3` browser cache into compact per-plant records and removes that key. A planner sees "unsaved changes were discarded" (`toast.cache_changes_lost`) only when edits in the old cache could not be imported. Verify by signing in, reloading and confirming no `nimbus.state.v3` key remains in localStorage. Design: `frontend/scheduling/CLAUDE.md`, "Compact cache record".
+
 ## Backward-scheduling cutover
 
 > **This runbook was written, not executed.** The 2026-10 backward-scheduling work was built and reviewed without touching the pilot (owner decision "deploy nothing", 2026-10-13): no `az` command, no `psql` against Azure and no `/promote-azure` run was made while writing it. Every command below is a plan for the operator, to be rehearsed on a copy first (step 3). Where a platform fact could not be checked from the repository it is marked **[unverified]**. The design evidence and every decision behind it are in `BACKWARD_SCHEDULING_MIGRATION.md` (section 8.13 is the long form of this runbook; section 8.8 is the rollback matrix).

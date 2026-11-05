@@ -1342,15 +1342,25 @@ export const ToolInventory = {
   confirmRemovals(plant: string, ids: string[]): Promise<boolean> { return _confirmRemovals(plant, ids); },
 
   /** Deep link: show `plant`'s inventory filtered to one tool id. */
-  openForTool(plant: string, toolId: string): void {
-    if (plant && Store.selectedPlant !== plant) Store.setSelectedPlant(plant, 'tool-inventory-link');
-    // A stale "Out of service" filter must not hide the tool the alert points at.
-    _st.filter = 'all';
-    const sel = _el<HTMLSelectElement>('ti-filter');
-    if (sel) sel.value = 'all';
-    _call(_gridApi, 'onFilterChanged');
-    _updateChrome();
-    ToolInventory.setQuickFilter(String(toolId ?? ''));
+  openForTool(plant: string, toolId: string): void | Promise<void> {
+    const show = (): void => {
+      // A stale "Out of service" filter must not hide the tool the alert points at.
+      _st.filter = 'all';
+      const sel = _el<HTMLSelectElement>('ti-filter');
+      if (sel) sel.value = 'all';
+      _call(_gridApi, 'onFilterChanged');
+      _updateChrome();
+      ToolInventory.setQuickFilter(String(toolId ?? ''));
+    };
+    if (plant && Store.selectedPlant !== plant) {
+      // Switching plant drops the outgoing plant's unsaved edits: ask first (no prompt when nothing is unsaved).
+      return Persistence.confirmPlantSwitch(plant).then(ok => {
+        if (!ok) return;
+        Store.setSelectedPlant(plant, 'tool-inventory-link');
+        show();
+      });
+    }
+    show();
   },
 
   // -- test / wiring hooks (not part of the documented surface) --
