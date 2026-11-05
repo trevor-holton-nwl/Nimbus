@@ -15,6 +15,7 @@ node_modules/
 frontend/nimbus-worker.js
 frontend/platform/types.mjs
 frontend/platform/foundation.mjs
+frontend/platform/cache-store.mjs
 frontend/platform/overflow-menu.mjs
 frontend/platform/store.mjs
 frontend/scheduling/selection.mjs
