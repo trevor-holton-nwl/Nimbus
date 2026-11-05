@@ -50,6 +50,10 @@
   EXACTLY the named file(s), in name order, and nothing else; the only way to run
   a `manual-only` file. Still subject to the destructive check and the ledger.
 
+.PARAMETER ShowApplied
+  The summary prints only a count of already-applied (ledger-skipped) files by
+  default; this switch lists every filename instead.
+
 .PARAMETER DryRun
   Touches NO database. Lists every migrations/*.sql file in order and flags
   destructive verbs. Use to preview before a real apply.
@@ -71,7 +75,8 @@ param(
   [string] $PsqlPath      = "C:\Program Files\PostgreSQL\18\bin\psql.exe",
   [string[]] $Only        = @(),
   [switch] $AllowDestructive,
-  [switch] $DryRun
+  [switch] $DryRun,
+  [switch] $ShowApplied
 )
 
 $ErrorActionPreference = "Stop"
@@ -173,7 +178,11 @@ foreach ($f in $files) {
 }
 
 if ($didApply) { $applStr = $didApply -join ', ' } else { $applStr = '(none)' }
-if ($skipped)  { $skipStr = $skipped  -join ', ' } else { $skipStr = '(none)' }
+if ($ShowApplied) {
+  if ($skipped) { $skipStr = $skipped -join ', ' } else { $skipStr = '(none)' }
+} else {
+  $skipStr = "$(@($skipped).Count) files (in ledger, skipped)"
+}
 if ($blocked)  { $blockStr = $blocked -join ', ' } else { $blockStr = '(none)' }
 
 Write-Host ""
