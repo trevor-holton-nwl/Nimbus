@@ -370,13 +370,13 @@ def build_material_plant_rows(stage_rows: list[dict], field_map: list[dict] | No
 
 
 # Material-level columns carried on every Material Plant row; they belong to `materials`, not
-# `material_plants`, and are limited to the `materials` column sizes (schema.sql: VARCHAR(60) / VARCHAR(4)).
-MATERIAL_MASTER_COLS: dict[str, int] = {"material_description": 60, "material_type": 4}
+# `material_plants`, and are limited to the `materials` column sizes (schema.sql: VARCHAR(60) / VARCHAR(4) / VARCHAR(3)).
+MATERIAL_MASTER_COLS: dict[str, int] = {"material_description": 60, "material_type": 4, "base_uom": 3}
 
 
 def build_material_master_rows(stage_rows: list[dict], field_map: list[dict] | None = None,
                                warnings: list | None = None) -> dict[str, dict]:
-    """Valid material-plant staging rows -> {material_id: {material_description?, material_type?}} for the
+    """Valid material-plant staging rows -> {material_id: {material_description?, material_type?, base_uom?}} for the
     `materials` table, through the ACTIVE field map (an inactive map row disables that column). The same
     material repeats across plants, so the first non-blank value in the batch wins. Values are trimmed and
     truncated to the `materials` column sizes (never a rejection); one `value_truncated` warning counts them.
@@ -404,7 +404,7 @@ def build_material_master_rows(stage_rows: list[dict], field_map: list[dict] | N
             entry[col] = val
     if truncated and warnings is not None:
         warnings.append({"level": "warn", "code": "value_truncated", "count": truncated,
-                         "msg": f"{truncated} material description / type value(s) were longer than the allowed "
+                         "msg": f"{truncated} material description / type / unit value(s) were longer than the allowed "
                                 "length and were shortened."})
     return {m: e for m, e in out.items() if e}
 
@@ -1527,22 +1527,26 @@ def _apply_material_plants(conn, hdr, actor: str, step) -> dict:
     created = materials_updated = 0
     with conn.cursor() as cur:
         if present:
-            # New materials get description / type; an existing one is overwritten only by a non-blank,
+            # New materials get description / type / base unit; an existing one is overwritten only by a non-blank,
             # different incoming value (blank never erases; an unchanged repeat snapshot writes nothing).
             descs = [master.get(m, {}).get("material_description", "") for m in present]
             types = [master.get(m, {}).get("material_type", "") for m in present]
+            uoms = [master.get(m, {}).get("base_uom", "") for m in present]
             cur.execute(
-                "INSERT INTO materials (material_id, material_description, material_type)"
-                " SELECT a.m, a.d, a.t FROM unnest(%s::text[], %s::text[], %s::text[]) AS a(m, d, t)"
+                "INSERT INTO materials (material_id, material_description, material_type, base_uom)"
+                " SELECT a.m, a.d, a.t, a.u FROM unnest(%s::text[], %s::text[], %s::text[], %s::text[]) AS a(m, d, t, u)"
                 " ON CONFLICT (material_id) DO UPDATE SET"
                 " material_description = CASE WHEN EXCLUDED.material_description <> ''"
                 "   THEN EXCLUDED.material_description ELSE materials.material_description END,"
                 " material_type = CASE WHEN EXCLUDED.material_type <> ''"
-                "   THEN EXCLUDED.material_type ELSE materials.material_type END"
+                "   THEN EXCLUDED.material_type ELSE materials.material_type END,"
+                " base_uom = CASE WHEN EXCLUDED.base_uom <> ''"
+                "   THEN EXCLUDED.base_uom ELSE materials.base_uom END"
                 " WHERE (EXCLUDED.material_description <> ''"
                 "        AND materials.material_description IS DISTINCT FROM EXCLUDED.material_description)"
                 "    OR (EXCLUDED.material_type <> '' AND materials.material_type IS DISTINCT FROM EXCLUDED.material_type)"
-                " RETURNING (xmax = 0)", (present, descs, types))
+                "    OR (EXCLUDED.base_uom <> '' AND materials.base_uom IS DISTINCT FROM EXCLUDED.base_uom)"
+                " RETURNING (xmax = 0)", (present, descs, types, uoms))
             flags = [r[0] for r in cur.fetchall()]
             created = sum(1 for f in flags if f)
             materials_updated = len(flags) - created

@@ -168,6 +168,7 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
         "2026-10-30-1-upload-audit-rid.sql",
         "2026-10-31-1-job-targets.sql",
         "2026-11-01-1-job-step-run.sql",
+        "2026-11-04-1-sap-stage-material-base-uom.sql",
         "2026-11-01-2-job-template.sql",
         "2026-07-07-color-wheel-table.sql",
         "2026-07-07-security-tables.sql",
@@ -729,6 +730,20 @@ def test_sap_stage_material_desc_type_in_schema_and_migration():
     for row in ("('stage_material_plants', 'MAKTX', 'material_description', 'none', 7)",
                 "('stage_material_plants', 'MTART', 'material_type', 'none', 8)"):
         assert row in schema and row in mig, row
+
+
+def test_sap_stage_material_base_uom_in_schema_and_migration():
+    """The Material Plant staging table carries `meins` and both the schema and the migration seed the
+    field-map row mapping it to `materials.base_uom`."""
+    with open(os.path.join(ROOT, "migrations", "2026-11-04-1-sap-stage-material-base-uom.sql"),
+              encoding="utf-8") as f:
+        mig = f.read()
+    schema = _schema_text()
+    assert "ADD COLUMN IF NOT EXISTS meins TEXT" in mig
+    block = schema.split("CREATE TABLE IF NOT EXISTS sap_stage_material_plant (", 1)[1].split(");", 1)[0]
+    assert "meins" in block
+    row = "('stage_material_plants', 'MEINS', 'base_uom', 'none', 9)"
+    assert row in schema and row in mig, row
 
 
 # --- Structural parity of the two SAP staging migrations (applied)-----------------------------------------
