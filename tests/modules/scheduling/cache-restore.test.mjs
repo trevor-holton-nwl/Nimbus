@@ -295,7 +295,7 @@ test('a marker that says dirty with no record toasts once and clears the marker'
 test('flush path: flushCache starts the queued put in its own transaction while an earlier put is still in flight', async t => {
   const fake = makeFakeBackend({ name: 'idb' });
   const f = fixture(t, 4);
-  resetCacheEnv({ backend: { idb: fake.backend } });
+  resetCacheEnv({ backend: { defaultBackend: 'idb', idb: fake.backend } });
   await CacheStore.ready(CACHE_USER);
   fake.ctl.hold = 1;                                  // the first put stays in flight
   Store.updateMany([shiftDay('R0', 2)], 'table');

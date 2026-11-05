@@ -198,7 +198,7 @@ test('S7-9: a failed cache put latches nothing: one toast, the next write retrie
   const cap = capture();
   const priorPlant = Persistence._currentLoadedPlant;
   try {
-    resetCacheEnv({ backend: { idb: fake.backend } });
+    resetCacheEnv({ backend: { defaultBackend: 'idb', idb: fake.backend } });
     await CacheStore.ready(CACHE_USER);
     seedBoard(50);
     Persistence._saveCache();

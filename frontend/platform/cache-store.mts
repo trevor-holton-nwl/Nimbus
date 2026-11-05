@@ -2,8 +2,9 @@
 //
 // One record per user+plant (`${user}|${plant}`), held by one of two interchangeable backends behind a
 // single interface: IndexedDB (`nimbus-cache` v1) or localStorage (its OWN key prefix, never the legacy
-// `nimbus.state.v3`). DEFAULT_BACKEND is the single switch for which one is tried first; the other is
-// the automatic fallback when the first is missing, blocked or times out.
+// `nimbus.state.v3`). DEFAULT_BACKEND is the single switch for which one is tried first (localStorage:
+// dirty-rows-only records fit and its writes are synchronous, so nothing is lost on page unload); the other
+// is the automatic fallback when the first is missing, blocked, full or times out.
 //
 // Imports only the foundation layer so session.mts can import it; it must never import scheduling/.
 // Nothing here is wired into persistence yet (T3). The marker in localStorage (`nimbus.cache.marker`)
@@ -14,7 +15,7 @@ import { Config, ErrorLog } from './foundation.mjs';
 
 export type BackendName = 'idb' | 'localstorage';
 /** Which backend is tried first. The only place that decides this; both backends stay fully working. */
-export const DEFAULT_BACKEND: BackendName = 'idb';
+export const DEFAULT_BACKEND: BackendName = 'localstorage';
 
 export const MARKER_KEY = 'nimbus.cache.marker';
 export const LS_RECORD_PREFIX = 'nimbus.cache.rec.';
@@ -250,11 +251,33 @@ function recordPutResult(rec: CacheRecord, r: PutResult): void {
   logWarn('cache put failed', { error: r.error, quota: !!r.quota, chars: rec.json.length, backend: backend?.name });
 }
 
+/** localStorage refused a write (full/blocked): move the store to IndexedDB and redo the put there. */
+function putViaIdbFallback(rec: CacheRecord, lsFailure: PutResult): Promise<PutResult> {
+  if (!idbAvailable()) return Promise.resolve(lsFailure);
+  const idb = makeBackend('idb');
+  return withTimeout(idb.open(), openTimeoutMs, 'cache open')
+    .then(() => Promise.resolve(idb.put(rec)))
+    .then(r => {
+      if (!r.ok) return lsFailure;
+      backend = idb; mode = 'fallback';
+      pushNotice('idb_fallback');
+      logWarn('localStorage write failed, switched to IndexedDB', { error: lsFailure.ok ? '' : lsFailure.error });
+      askPersist();
+      const m = readMarker();
+      if (m && m.user === rec.user && m.plant === rec.plant) writeMarker({ ...m, backend: 'idb' });
+      return r;
+    }, () => lsFailure);
+}
+
 function putOnce(rec: CacheRecord): PutResult | Promise<PutResult> {
   if (!backend) return fail(new Error('no backend'));
+  const used = backend;
   try {
-    const r = backend.put(rec);
-    if (!isThenable(r)) return r;
+    const r = used.put(rec);
+    if (!isThenable(r)) {
+      if (r.ok || used.name !== 'localstorage' || !idbAvailable()) return r;
+      return withTimeout(putViaIdbFallback(rec, r), putTimeoutMs, 'cache put').then(x => x, (e: unknown) => fail(e));
+    }
     return withTimeout(r, putTimeoutMs, 'cache put').then(x => x, (e: unknown) => fail(e));
   } catch (e) { return fail(e); }
 }
@@ -294,20 +317,27 @@ function initBackend(user: string): Promise<BootInfo> {
     return loadBoot(user, marker).then(info => { boot = info; return info; });
   };
 
+  const noBackend = (): BootInfo => { backend = null; mode = 'none'; return { backend: null, mode: 'none' as CacheMode, plant: marker?.plant ?? null, record: null, notices: notices.slice() }; };
+  const openIdb = (m: CacheMode): Promise<BootInfo> => {
+    const idb = makeBackend('idb');
+    return withTimeout(idb.open(), openTimeoutMs, 'cache open').then(() => { askPersist(); return finish(idb, m); });
+  };
+
   if (first.sync) {
     // Synchronous backend: installed before returning so Node/localStorage callers can write right after ready().
-    if (!lsOrNull()) { backend = null; mode = 'none'; return Promise.resolve({ backend: null, mode: 'none' as CacheMode, plant: marker?.plant ?? null, record: null, notices: [] }); }
-    return finish(first, defaultBackend === 'idb' ? 'fallback' : 'localstorage');
+    if (lsOrNull()) return finish(first, defaultBackend === 'idb' ? 'fallback' : 'localstorage');
+    // localStorage is blocked: try IndexedDB before giving up.
+    if (!idbAvailable()) return Promise.resolve(noBackend());
+    logWarn('localStorage unavailable, using IndexedDB');
+    pushNotice('idb_fallback');
+    return openIdb('fallback').catch(() => noBackend());
   }
-  return withTimeout(first.open(), openTimeoutMs, 'cache open').then(
-    () => { askPersist(); return finish(first, 'idb'); },
-    (e: unknown) => {
-      logWarn('IndexedDB unavailable, using localStorage', { error: errName(e) });
-      pushNotice('idb_fallback');
-      const ls = makeBackend('localstorage');
-      return ls.open().then(() => finish(ls, 'fallback'),
-        () => { backend = null; mode = 'none'; return { backend: null, mode: 'none' as CacheMode, plant: marker?.plant ?? null, record: null, notices: notices.slice() }; });
-    });
+  return openIdb('idb').catch((e: unknown) => {
+    logWarn('IndexedDB unavailable, using localStorage', { error: errName(e) });
+    pushNotice('idb_fallback');
+    const ls = makeBackend('localstorage');
+    return ls.open().then(() => finish(ls, 'fallback'), () => noBackend());
+  });
 }
 
 function askPersist(): void {
@@ -363,7 +393,7 @@ async function loadBoot(user: string, marker: CacheMarker | null): Promise<BootI
 export const CacheStore = {
   /**
    * Opens the backend for `user` and resolves with the boot picture (record the marker points at, notices).
-   * With no `indexedDB` (Node) or DEFAULT_BACKEND 'localstorage' the localStorage backend is chosen
+   * With no `indexedDB` (Node) or with DEFAULT_BACKEND 'localstorage' (the default) the localStorage backend is chosen
    * synchronously inside this call. Calling again with the same user only lifts a previous halt().
    */
   ready(user: string): Promise<BootInfo> {

@@ -19,12 +19,12 @@ const marker = () => JSON.parse(lsf.ls.getItem(MARKER_KEY));
 
 // Backend matrix: both must behave identically from the caller's side.
 const flavours = {
-  idb: () => { const f = makeFakeBackend(); return { opts: { idb: f.backend }, fake: f }; },
+  idb: () => { const f = makeFakeBackend(); return { opts: { defaultBackend: 'idb', idb: f.backend }, fake: f }; },
   localstorage: () => ({ opts: { defaultBackend: 'localstorage' }, fake: null }),
 };
 
-test('DEFAULT_BACKEND is the single switch and is idb for now', () => {
-  assert.equal(DEFAULT_BACKEND, 'idb');
+test('DEFAULT_BACKEND is the single switch and is localstorage', () => {
+  assert.equal(DEFAULT_BACKEND, 'localstorage');
 });
 
 test('Node path: no indexedDB resolves at once on localStorage and writes land synchronously', async () => {
@@ -37,7 +37,7 @@ test('Node path: no indexedDB resolves at once on localStorage and writes land s
   assert.equal(JSON.parse(raw).json, '{"a":1}');
   assert.deepEqual({ plant: marker().plant, backend: marker().backend, user: marker().user, dirty: marker().dirty }, { plant: 'P1', backend: 'localstorage', user: U, dirty: true });
   await p;
-  assert.equal(CacheStore.stats().mode, 'fallback');
+  assert.equal(CacheStore.stats().mode, 'localstorage');
   assert.equal(CacheStore.stats().backend, 'localstorage');
   assert.equal(LS_RECORD_PREFIX === Config.LS_KEY, false);
   assert.equal(lsf.ls.getItem(Config.LS_KEY), null, 'never touches the legacy key');
@@ -189,7 +189,7 @@ for (const [name, mk] of Object.entries(flavours)) {
 
 test('flush while a put is in flight uses its own transaction and does not wait', async () => {
   const f = makeFakeBackend();
-  CacheStore._setBackendForTests({ idb: f.backend });
+  CacheStore._setBackendForTests({ defaultBackend: 'idb', idb: f.backend });
   await CacheStore.ready(U);
   f.ctl.hold = 1;                                 // first put stays pending
   CacheStore.write(meta('P1'), '{"v":1}');        // in flight, held
@@ -208,7 +208,7 @@ test('flush while a put is in flight uses its own transaction and does not wait'
 
 test('rapid writes coalesce behind an in-flight put into the latest value only', async () => {
   const f = makeFakeBackend();
-  CacheStore._setBackendForTests({ idb: f.backend });
+  CacheStore._setBackendForTests({ defaultBackend: 'idb', idb: f.backend });
   await CacheStore.ready(U);
   f.ctl.hold = 1;
   for (let i = 1; i <= 5; i++) CacheStore.write(meta('P1'), `{"v":${i}}`);
@@ -222,7 +222,7 @@ test('rapid writes coalesce behind an in-flight put into the latest value only',
 test('IDB open failing falls back to localStorage automatically and says so', async () => {
   const f = makeFakeBackend();
   f.ctl.failOpen = true;
-  CacheStore._setBackendForTests({ idb: f.backend });
+  CacheStore._setBackendForTests({ defaultBackend: 'idb', idb: f.backend });
   const boot = await CacheStore.ready(U);
   assert.equal(CacheStore.stats().mode, 'fallback');
   assert.equal(CacheStore.stats().backend, 'localstorage');
@@ -235,7 +235,7 @@ test('IDB open failing falls back to localStorage automatically and says so', as
 test('IDB open that never settles times out (3 s in production, shortened here) and falls back', async () => {
   const f = makeFakeBackend();
   f.ctl.blockOpen = true;
-  CacheStore._setBackendForTests({ idb: f.backend, openTimeoutMs: 30 });
+  CacheStore._setBackendForTests({ defaultBackend: 'idb', idb: f.backend, openTimeoutMs: 30 });
   const t0 = Date.now();
   await CacheStore.ready(U);
   assert.ok(Date.now() - t0 >= 25, 'waited for the timeout');
@@ -247,13 +247,13 @@ test('IDB open that never settles times out (3 s in production, shortened here) 
 test('marker naming localStorage wins when IDB opens late: record moves to IDB and the stale copy is deleted', async () => {
   // Boot 1: IDB was down, edits went to localStorage.
   const down = makeFakeBackend(); down.ctl.failOpen = true;
-  CacheStore._setBackendForTests({ idb: down.backend });
+  CacheStore._setBackendForTests({ defaultBackend: 'idb', idb: down.backend });
   await CacheStore.ready(U);
   CacheStore.write(meta('P1'), '{"v":"ls"}');
   // Boot 2: IDB is back, and holds an OLDER record for the same key.
   const up = makeFakeBackend();
   up.data.set('alice|P1', { key: 'alice|P1', user: U, plant: 'P1', seq: 0, savedAt: 1, json: '{"v":"old-idb"}' });
-  CacheStore._setBackendForTests({ idb: up.backend });
+  CacheStore._setBackendForTests({ defaultBackend: 'idb', idb: up.backend });
   const boot = await CacheStore.ready(U);
   assert.equal(boot.backend, 'idb');
   assert.equal(boot.record.json, '{"v":"ls"}');
@@ -263,7 +263,7 @@ test('marker naming localStorage wins when IDB opens late: record moves to IDB a
 
 test('a failing get at boot does not throw and yields no record', async () => {
   const f = makeFakeBackend();
-  CacheStore._setBackendForTests({ idb: f.backend });
+  CacheStore._setBackendForTests({ defaultBackend: 'idb', idb: f.backend });
   lsf.ls.setItem(MARKER_KEY, JSON.stringify({ v: 1, plant: 'P1', seq: 1, backend: 'idb', user: U, dirty: false }));
   f.ctl.failGet = true;
   const boot = await CacheStore.ready(U);
@@ -273,7 +273,7 @@ test('a failing get at boot does not throw and yields no record', async () => {
 test('IDB put abort counts as failed, raises one notice, no latch: the next write retries and succeeds', async () => {
   const f = makeFakeBackend();
   f.ctl.quotaOnPut = 1;
-  CacheStore._setBackendForTests({ idb: f.backend });
+  CacheStore._setBackendForTests({ defaultBackend: 'idb', idb: f.backend });
   await CacheStore.ready(U);
   CacheStore.write(meta('P1'), '{"v":1}');
   await CacheStore.settled();
@@ -319,7 +319,7 @@ test('localStorage backend over a real character quota fails cleanly then recove
 test('a put that never commits is abandoned by the watchdog, so later writes still go through', async () => {
   const f = makeFakeBackend();
   f.ctl.hangPuts = true;
-  CacheStore._setBackendForTests({ idb: f.backend, putTimeoutMs: 30 });
+  CacheStore._setBackendForTests({ defaultBackend: 'idb', idb: f.backend, putTimeoutMs: 30 });
   await CacheStore.ready(U);
   CacheStore.write(meta('P1'), '{"v":1}');
   await CacheStore.settled();
@@ -333,7 +333,7 @@ test('a put that never commits is abandoned by the watchdog, so later writes sti
 test('both backends missing yields mode none and writes report not-ready instead of throwing', async () => {
   delete globalThis.localStorage;
   const f = makeFakeBackend(); f.ctl.failOpen = true;
-  CacheStore._setBackendForTests({ idb: f.backend });
+  CacheStore._setBackendForTests({ defaultBackend: 'idb', idb: f.backend });
   await CacheStore.ready(U);
   assert.equal(CacheStore.stats().mode, 'none');
   assert.equal(CacheStore.write(meta('P1'), '{}').ok, false);
@@ -343,14 +343,14 @@ test('both backends missing yields mode none and writes report not-ready instead
 
 test('real IDB backend: round trip, wipe is store.clear on the open connection', async () => {
   const idb = installFakeIndexedDB();
-  CacheStore._setBackendForTests();
+  CacheStore._setBackendForTests({ defaultBackend: 'idb' });
   await CacheStore.ready(U);
   assert.equal(CacheStore.stats().mode, 'idb');
   CacheStore.write(meta('P1'), '{"v":1}');
   await CacheStore.settled();
   assert.equal(JSON.parse(idb.records.get('alice|P1').json).v, 1);
   assert.equal(lsf.ls.getItem(LS_RECORD_PREFIX + 'alice|P1'), null, 'idb mode does not touch the localStorage store');
-  CacheStore._setBackendForTests();
+  CacheStore._setBackendForTests({ defaultBackend: 'idb' });
   const boot = await CacheStore.ready(U);
   assert.equal(boot.record.json, '{"v":1}');
   const opens = idb.ctl.opens;
@@ -361,7 +361,7 @@ test('real IDB backend: round trip, wipe is store.clear on the open connection',
 
 test('real IDB backend: tx abort is a failed put (quota), not a latch', async () => {
   const idb = installFakeIndexedDB();
-  CacheStore._setBackendForTests();
+  CacheStore._setBackendForTests({ defaultBackend: 'idb' });
   await CacheStore.ready(U);
   idb.ctl.abortPuts = true;
   CacheStore.write(meta('P1'), '{"v":1}');
@@ -375,7 +375,7 @@ test('real IDB backend: tx abort is a failed put (quota), not a latch', async ()
 
 test('real IDB backend: versionchange and close do not null the handle forever (lazy reopen)', async () => {
   const idb = installFakeIndexedDB();
-  CacheStore._setBackendForTests();
+  CacheStore._setBackendForTests({ defaultBackend: 'idb' });
   await CacheStore.ready(U);
   idb.versionChange();
   CacheStore.write(meta('P1'), '{"v":1}');
@@ -393,7 +393,7 @@ test('real IDB backend: blocked, error and hung opens all fall back to localStor
   for (const m of ['blocked', 'error', 'hang']) {
     const idb = installFakeIndexedDB();
     idb.ctl.mode = m;
-    CacheStore._setBackendForTests({ openTimeoutMs: 40 });
+    CacheStore._setBackendForTests({ defaultBackend: 'idb', openTimeoutMs: 40 });
     await CacheStore.ready(U);
     assert.equal(CacheStore.stats().backend, 'localstorage', m);
     assert.equal(CacheStore.stats().mode, 'fallback', m);
@@ -409,4 +409,79 @@ test('localStorage backend exposes the shared interface directly', async () => {
   assert.equal((await b.get('k')).json, '{}');
   await b.del('k');
   assert.equal(await b.get('k'), null);
+});
+
+/* ---------- localStorage default, IndexedDB as the automatic fallback ---------- */
+
+test('localStorage is the default: no options, an IDB present but untouched, mode localstorage, record in localStorage', async () => {
+  const f = makeFakeBackend();
+  CacheStore._setBackendForTests({ idb: f.backend });
+  await CacheStore.ready(U);
+  assert.equal(CacheStore.stats().mode, 'localstorage');
+  assert.equal(CacheStore.stats().backend, 'localstorage');
+  assert.equal(CacheStore.write(meta('P1'), '{"v":1}').ok, true);
+  assert.ok(lsf.ls.getItem(LS_RECORD_PREFIX + 'alice|P1'), 'written synchronously');
+  assert.equal(marker().backend, 'localstorage');
+  assert.equal(f.ctl.putCount, 0, 'IndexedDB is not touched while localStorage works');
+  CacheStore._setBackendForTests({ idb: f.backend }); // reload
+  const boot = await CacheStore.ready(U);
+  assert.equal(boot.record.json, '{"v":1}');
+  assert.equal(boot.backend, 'localstorage');
+});
+
+test('localStorage quota failure falls back to IndexedDB without losing the write, and later writes stay there', async () => {
+  const f = makeFakeBackend();
+  CacheStore._setBackendForTests({ idb: f.backend });
+  await CacheStore.ready(U);
+  lsf.ctl.failNext = 2; // marker write and record put both hit quota
+  const r = CacheStore.write(meta('P1'), '{"v":1}');
+  assert.equal(r.ok, true);
+  await CacheStore.settled();
+  assert.equal(JSON.parse(f.data.get('alice|P1').json).v, 1, 'the write landed in IDB');
+  assert.equal(CacheStore.stats().mode, 'fallback');
+  assert.equal(CacheStore.stats().backend, 'idb');
+  assert.equal(CacheStore.stats().failed, 0);
+  assert.deepEqual(CacheStore.takeNotices(), ['idb_fallback']);
+  CacheStore.write(meta('P1'), '{"v":2}');
+  await CacheStore.settled();
+  assert.equal(JSON.parse(f.data.get('alice|P1').json).v, 2);
+  assert.equal(marker().backend, 'idb', 'marker names the store that holds the record');
+  // Reload: boot reads the record from IDB through the marker.
+  CacheStore._setBackendForTests({ idb: f.backend });
+  const boot = await CacheStore.ready(U);
+  assert.equal(boot.record.json, '{"v":2}');
+});
+
+test('localStorage quota failure with IDB also failing reports a failed put, no latch', async () => {
+  const f = makeFakeBackend(); f.ctl.quotaOnPut = 1;
+  CacheStore._setBackendForTests({ idb: f.backend });
+  await CacheStore.ready(U);
+  lsf.ctl.quotaChars = 100;
+  assert.equal(CacheStore.write(meta('P1'), JSON.stringify({ big: 'x'.repeat(500) })).ok, true);
+  await CacheStore.settled();
+  assert.equal(CacheStore.stats().failed, 1);
+  assert.equal(CacheStore.stats().backend, 'localstorage');
+  assert.equal(CacheStore.write(meta('P1'), '{"s":1}').ok, true);
+  await CacheStore.settled();
+  assert.equal(CacheStore.stats().failed, 1);
+});
+
+test('localStorage blocked at open falls back to IndexedDB; both blocked leaves mode none with no latch', async () => {
+  delete globalThis.localStorage;
+  const f = makeFakeBackend();
+  CacheStore._setBackendForTests({ idb: f.backend });
+  await CacheStore.ready(U);
+  assert.equal(CacheStore.stats().mode, 'fallback');
+  assert.equal(CacheStore.stats().backend, 'idb');
+  assert.equal(CacheStore.write(meta('P1'), '{"v":1}').ok, true);
+  await CacheStore.settled();
+  assert.equal(JSON.parse(f.data.get('alice|P1').json).v, 1);
+
+  const down = makeFakeBackend(); down.ctl.failOpen = true;
+  CacheStore._setBackendForTests({ idb: down.backend });
+  await CacheStore.ready(U);
+  assert.equal(CacheStore.stats().mode, 'none');
+  assert.equal(CacheStore.stats().halted, false);
+  assert.equal(CacheStore.write(meta('P1'), '{}').ok, false);
+  assert.equal(CacheStore.stats().failed, 0);
 });
