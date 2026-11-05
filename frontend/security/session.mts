@@ -22,6 +22,7 @@
 // only needs Store, for role/plant-scoping resolvers wired at boot.
 import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
+import { CacheStore, MARKER_KEY, LS_RECORD_PREFIX } from '../platform/cache-store.mjs';
 import type { TopLevelTab } from '../platform/types.mjs';
 
 /** The subset of GET/POST /security/* fields this file reads/writes
@@ -175,6 +176,10 @@ export const Session = (() => {
       settings, role_settings: roleSettings,
       loggedInAt: Date.now(),
     }));
+    // Sign-in is the only path that lifts a cache halt (sign-out, another tab's sign-out, admin reset). The orphan sweep runs
+    // here, at the gate, never inside a load: other users' records and empty unreferenced ones go; a record holding this
+    // user's rows is never touched.
+    try { CacheStore.resume(data.username); void CacheStore.sweepOrphans(data.username).catch(() => undefined); } catch { /* cache is best effort */ }
     Store.setUserSettings(settings, 'session-signin');
     Store.setRoleDefaults(roleSettings, 'session-signin');
     Store.emit({ type: 'session:changed', kind: 'signin' });
@@ -185,26 +190,34 @@ export const Session = (() => {
   // history, queued calendar deletes, sessionStorage) so a shared PC leaves nothing behind.
   // Keeps display preferences (nimbus.theme / nimbus.locale) and does NOT touch the session
   // blob (signOut / clearExpired own that). Also used by admin "Reset client state".
-  function clearLocalPlannerData(opts: { keepQueuedWork?: boolean } = {}): void {
+  // The autosave cache (marker, every record key, the legacy blob) is removed synchronously; the returned promise settles when
+  // the cache store's own wipe has (IndexedDB clear on the open connection, or a fresh open before boot). It never rejects.
+  function clearLocalPlannerData(opts: { keepQueuedWork?: boolean } = {}): Promise<void> {
     const quarantinePrefix = `${Config.LS_KEY}.quarantine.`;
     try {
       // 'nimbus.recentCmds' is no longer written (the command palette's recent list was write-only and is gone); it
       // stays on this list so a value left behind by an earlier build is still wiped on a shared PC.
-      const toRemove: string[] = [Config.LS_KEY, 'nimbus.recentCmds', 'nimbus.patterns.v1'];
+      const toRemove: string[] = [Config.LS_KEY, MARKER_KEY, 'nimbus.recentCmds', 'nimbus.patterns.v1'];
       // Queued unsent calendar deletes are work, not history: admin Reset keeps them.
       if (!opts.keepQueuedWork) toRemove.push('nimbus.calendar.pendingDeletes');
       for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i);
-        if (k && k.startsWith(quarantinePrefix)) toRemove.push(k);
+        if (k && (k.startsWith(quarantinePrefix) || k.startsWith(LS_RECORD_PREFIX))) toRemove.push(k);
       }
       toRemove.forEach(k => { try { localStorage.removeItem(k); } catch { /* blocked */ } });
     } catch { /* storage unavailable */ }
     try { sessionStorage.clear(); } catch { /* storage unavailable */ }
+    try { return CacheStore.wipe().catch(() => undefined); } catch { return Promise.resolve(); }
   }
 
   // The shell supplies hasPendingWork/beforeClear so this file needs no import of
   // scheduling/persistence (which would add a security -> scheduling cycle).
   // Returns false when the planner cancels the unsaved-work confirm.
+  const SIGNOUT_WAIT_MS = 500;
+  function _bounded(p: Promise<unknown>, ms: number): Promise<void> {
+    return new Promise<void>(resolve => { const t = setTimeout(resolve, ms); (t as unknown as { unref?: () => void }).unref?.(); p.then(() => { clearTimeout(t); resolve(); }, () => { clearTimeout(t); resolve(); }); });
+  }
+
   async function signOut(opts: { hasPendingWork?: () => boolean; beforeClear?: () => void } = {}): Promise<boolean> {
     let pending = false;
     try { pending = !!opts.hasPendingWork?.(); } catch { pending = false; }
@@ -218,10 +231,15 @@ export const Session = (() => {
       if (!ok) return false;
     }
     try { opts.beforeClear?.(); } catch { /* best effort */ }
+    // Stop cache writes for good (also when the caller passed no beforeClear), let an in-flight put or flush land (max 500 ms),
+    // then clear. The reload waits for the wipe (max 500 ms) so it cannot cut the clear transaction short.
+    try { CacheStore.halt(); } catch { /* best effort */ }
+    await _bounded(CacheStore.settled(), SIGNOUT_WAIT_MS);
     localStorage.removeItem(KEY);
-    clearLocalPlannerData();
+    const wiped = clearLocalPlannerData();
     try {
       Store.emit({ type: 'session:changed', kind: 'signout' });
+      await _bounded(wiped, SIGNOUT_WAIT_MS);
     } finally {
       location.reload();
     }
@@ -249,9 +267,38 @@ export const Session = (() => {
   // An expired login also wipes the local planner data exactly like Sign out does, but WITHOUT
   // the unsaved-work confirm (owner ruling 2026-10-06: the expired session's unsaved work is
   // discarded). Theme/locale are kept. Runs pre-boot (app.js gate), so no autosave/cache writer exists yet to cancel.
-  function clearExpired(): void {
+  // The cache wipe works with no backend open (IndexedDB is opened just to clear it); the promise is returned for callers that
+  // want to wait, the boot gate does not.
+  function clearExpired(): Promise<void> {
     localStorage.removeItem(KEY);
-    clearLocalPlannerData();
+    return clearLocalPlannerData();
+  }
+
+  // Another tab signed out (the session key vanished) or signed in as someone else: this tab must stop writing its cache.
+  // Re-enabled only by this tab's own signIn(). `e.key == null` is localStorage.clear().
+  function _onStorage(e: { key?: string | null; newValue?: string | null }): void {
+    if (e.key != null && e.key !== KEY) return;
+    let halt = false;
+    if (e.key == null || !e.newValue) halt = true;
+    else {
+      try {
+        const next = (JSON.parse(e.newValue) as { username?: string } | null)?.username;
+        const mine = CacheStore.user();
+        halt = !next || (!!mine && next !== mine);
+      } catch { halt = true; }
+    }
+    if (halt) { try { CacheStore.halt(); } catch { /* best effort */ } }
+  }
+  try {
+    const g = globalThis as unknown as { addEventListener?: (t: string, f: (e: never) => void) => void };
+    if (typeof g.addEventListener === 'function') g.addEventListener('storage', _onStorage as (e: never) => void);
+  } catch { /* no window */ }
+
+  // Pre-boot orphan sweep for an already signed-in page (signIn() runs it for a fresh login). Fire-and-forget at the gate.
+  function sweepOrphanCache(): Promise<void> {
+    const u = currentUser();
+    if (!u) return Promise.resolve();
+    return CacheStore.sweepOrphans(u.username).then(() => undefined, () => undefined);
   }
 
   // Reconcile the role cached at login (which the admin UI gates on) against the
@@ -433,6 +480,8 @@ export const Session = (() => {
     currentUser, actor, isAdmin, allowedPlants, canAccessTab, DEFAULT_PAGE_ACCESS,
     signIn, signOut, clearLocalPlannerData, refresh, onAuthDenied,
     setPref, flushPrefs, pref, updateCachedUser,
-    isExpired, clearExpired,
+    isExpired, clearExpired, sweepOrphanCache,
+    /** Test hook: deliver a `storage` event as another tab would. */
+    _storageEventForTests: _onStorage,
   };
 })();

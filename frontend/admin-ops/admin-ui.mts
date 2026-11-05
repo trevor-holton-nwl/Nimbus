@@ -1591,6 +1591,7 @@ export const AdminCockpit = {
       }
       case 'data.reload': void Persistence.reload(); return;
       case 'client.reset': void A._resetClientState(); return;
+      case 'client.save': Persistence.saveAll(); return;
       default: console.warn(`AdminCockpit: unknown fix id '${fix.id}'`); return;
     }
   },
@@ -3141,15 +3142,39 @@ export const AdminCockpit = {
   },
 
   async _resetClientState(): Promise<void> {
-    const ok = await Modal.confirm({
-      title:        Util.t('modal.reset_client_title'),
-      message:      Util.t('modal.reset_client_msg'),
-      detail:       Util.t('modal.reset_client_detail'),
-      confirmLabel: Util.t('modal.reset_client_confirm'),
-      tone:         'warn',
-    });
-    if (!ok) return;
-    Session.clearLocalPlannerData({ keepQueuedWork: true });
+    // Reset wipes the autosave cache, so edits still unsaved are named and Save is offered first.
+    const pending = Persistence.unsavedCount();
+    if (pending > 0) {
+      const pick = await Modal.choose({
+        title:        Util.t('modal.reset_client_title'),
+        message:      Util.t('modal.reset_client_pending_msg', { count: pending }),
+        options: [
+          { value: 'save',    label: Util.t('modal.reset_client_pending_save') },
+          { value: 'discard', label: Util.t('modal.reset_client_pending_discard', { count: pending }) },
+        ],
+        confirmLabel: Util.t('modal.reset_client_pending_go'),
+      });
+      if (pick == null) return;
+      if (pick === 'save') {
+        Persistence.saveAll();
+        Toast.show(Util.t('toast.reset_saving'), 'info', 6000);
+        return;
+      }
+    } else {
+      const ok = await Modal.confirm({
+        title:        Util.t('modal.reset_client_title'),
+        message:      Util.t('modal.reset_client_msg'),
+        detail:       Util.t('modal.reset_client_detail'),
+        confirmLabel: Util.t('modal.reset_client_confirm'),
+        tone:         'warn',
+      });
+      if (!ok) return;
+    }
+    // Halt first so no late autosave rewrites what is about to be cleared; the wipe is bounded (the store's own 3 s cap,
+    // 1 s here) and fails open, so a stuck IndexedDB never traps the reload.
+    Persistence.haltCacheWrites();
+    const wiped = Session.clearLocalPlannerData({ keepQueuedWork: true });
+    await Promise.race([wiped, new Promise<void>((res) => setTimeout(res, 1000))]);
     ErrorLog.info('admin', 'Client state reset by user — reloading');
     // Give the log a frame to render in case of debounce, then hard-reload bypassing HTTP cache.
     setTimeout(() => location.reload(), 50);

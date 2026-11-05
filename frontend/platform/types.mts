@@ -658,19 +658,14 @@ export interface LiveState {
   userSettings: Record<string, unknown>;
 }
 
-/** The localStorage-serialized shape (Persistence._saveCache / Config.LS_KEY,
- *  gated by Config.SCHEMA_VERSION). JSON.stringify turns every Date into an
- *  ISO string and the firmedIds Set into a string[]. `tasks` is deliberately
- *  NOT NimbusTask[] — its date fields are strings on disk, not Dates (T-6);
- *  re-coerced back into NimbusTask via Persistence._prepTask on read. `tasks`
- *  may also be PARTIAL: _writeCacheWithQuotaGuard writes progressively
- *  smaller tiers (last 2000 / last 500 / none) on QuotaExceededError. See
- *  docs/archive/typescript_migration.md §G. */
+/** The LEGACY `nimbus.state.v3` blob shape (the pre-redesign whole-board cache, gated by Config.SCHEMA_VERSION). It is
+ *  no longer written: the autosave cache is one compact record per user+plant in `platform/cache-store.mts`. What still reads
+ *  this type is the one-time legacy conversion and the non-task context (`record.context`) restored on a load. JSON.stringify
+ *  turns every Date into an ISO string and the firmedIds Set into a string[]; `tasks` is deliberately NOT NimbusTask[] (its
+ *  date fields are strings, T-6). */
 export interface StoredState {
   /** Dependent optimizer edits must survive offline hydration as one atomic save. */
   _optimizerDirtyIds?: string[];
-  /** Set only on the last quota tier: how many optimizer-dirty orders were dropped from this copy. */
-  _optimizerLostCount?: number;
   /** All locally edited orders must remain visibly unsaved after a reload. */
   _dirtyIds?: string[];
   _schemaVersion: number;

@@ -42,6 +42,7 @@ export function makeFakeBackend({ name = 'idb', sync = false } = {}) {
     },
     del(key) { data.delete(key); return Promise.resolve(); },
     clear() { data.clear(); return Promise.resolve(); },
+    keys() { return Promise.resolve([...data.keys()]); },
   };
   return {
     backend, ctl, data,
@@ -100,6 +101,7 @@ export function installFakeIndexedDB() {
           get(key) { last = req(records.has(key) ? structuredClone(records.get(key)) : undefined); return last; },
           delete(key) { records.delete(key); last = req(undefined); return last; },
           clear() { records.clear(); last = req(undefined); return last; },
+          getAllKeys() { last = req([...records.keys()]); return last; },
         };
         tx.objectStore = () => store;
         queueMicrotask(() => queueMicrotask(() => { if (tx.aborted) tx.onabort?.(); else tx.oncomplete?.(); }));

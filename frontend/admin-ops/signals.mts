@@ -23,7 +23,7 @@ export type SignalId = 'jobs' | 'database' | 'backend' | 'data_load' | 'connecti
 export type AdminSub = 'overview' | 'logs' | 'diagnostics' | 'order-maintenance' | 'jobs' | 'manage' | 'interface' | 'security' | 'system-config' | 'table-browser';
 
 /** A one-click remedy. `id` is dispatched by the pane (jobs.rerun, jobs.open_run, db.vacuum_all,
- *  db.vacuum_table, logs.open, data.reload, client.reset, nav.diagnostics,
+ *  db.vacuum_table, logs.open, data.reload, client.reset, client.save, nav.diagnostics,
  *  nav.interface, nav.order_maintenance, nav.jobs); `args` carries what it needs (runId, table, ...). */
 export interface Fix { id: string; labelKey: string; args?: Record<string, unknown>; adminOnly?: boolean }
 
@@ -108,7 +108,7 @@ export interface SignalInputs {
   sap: { status: SapSendStatus; batches: SapBatchHeader[]; lastRun: SapRunLike | null; plant: string } | null;
   sapErr?: string;
   client: {
-    stats: { source: 'backend' | 'cache' | 'demo' | null; raw_received: number; rendered: number } | null;
+    stats: { source: 'backend' | null; raw_received: number; rendered: number } | null;
     inv: { autosaveDisabled?: boolean; degraded?: boolean };
     errors: number; warns: number;
     /** Browser errors per minute. */
@@ -293,7 +293,6 @@ function _dataLoad(i: SignalInputs): Signal {
   const pipe = _nav('nav.diagnostics', 'btn.open_diagnostics', 'diag-pipe');
   if (st && st.rendered < st.raw_received) conds.push({ sev: 'err', key: 'sig.data_gap', args: { n: st.raw_received - st.rendered }, fixes: [reload, pipe] });
   if (h.db.connected && i.client.tasks === 0) conds.push({ sev: 'err', key: 'sig.data_none', args: {}, fixes: [reload, pipe] });
-  if (st && (st.source === 'cache' || st.source === 'demo')) conds.push({ sev: 'warn', key: 'sig.data_cached', args: {}, fixes: [reload, pipe] });
   const ago = _ms(h.memory?.loaded_at) || i.now;
   return _pick('data_load', conds, { sev: 'ok', key: 'sig.data_ok', args: { orders: i.client.tasks, ago } }, {
     headKeys: ['sig.d_step', 'sig.d_count'],
@@ -351,8 +350,9 @@ function _sap(i: SignalInputs): Signal {
 function _browser(i: SignalInputs, t: Thresholds): Signal {
   const c = i.client;
   const reset = _fix('client.reset', 'btn.reset_client');
+  const save = _fix('client.save', 'btn.save');
   const conds: Cond[] = [];
-  if (c.inv.autosaveDisabled) conds.push({ sev: 'err', key: 'sig.browser_autosave_off', args: {}, fixes: [reset] });
+  if (c.inv.autosaveDisabled) conds.push({ sev: 'err', key: 'sig.browser_autosave_off', args: {}, fixes: [save] });
   if (c.errRate > t.errRateErrPerMin) conds.push({ sev: 'err', key: 'sig.browser_errors', args: { n: c.errors }, fixes: [reset] });
   if (c.inv.degraded) conds.push({ sev: 'info', key: 'sig.browser_degraded', args: {} });
   const heapPct = c.heapUsed !== undefined && c.heapLimit ? Math.round((c.heapUsed / c.heapLimit) * 100) : null;
@@ -409,7 +409,7 @@ export function buildAttention(signals: Signal[], i: SignalInputs): AttentionIte
     const held = i.sap.batches.filter(b => b.status === 'held').length;
     if (held > 0) add({ id: 'sap_held', severity: 'warn', textKey: 'attn.sap_held', args: { n: held }, fix: _nav('nav.interface', 'btn.open_interface', 'sap:staging') });
   }
-  if (i.client.inv.autosaveDisabled) add({ id: 'autosave', severity: 'err', textKey: 'attn.autosave', args: {}, fix: _fix('client.reset', 'btn.reset_client') });
+  if (i.client.inv.autosaveDisabled) add({ id: 'autosave', severity: 'err', textKey: 'attn.autosave', args: {}, fix: _fix('client.save', 'btn.save') });
   if (i.uploadWarnings && i.uploadWarnings.distribution > 0) {
     add({ id: 'distribution', severity: 'warn', textKey: i.uploadWarnings.distribution === 1 ? 'attn.distribution_one' : 'attn.distribution', args: { n: i.uploadWarnings.distribution, batchId: i.uploadWarnings.batchId }, fix: _nav('nav.order_maintenance', 'btn.open_history', 'admin-audit') });
   }

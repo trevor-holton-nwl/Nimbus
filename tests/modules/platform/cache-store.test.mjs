@@ -95,7 +95,7 @@ for (const [name, mk] of Object.entries(flavours)) {
     assert.equal(other.record, null);
   });
 
-  test(`[${name}] halt makes writes no-ops until ready() again`, async () => {
+  test(`[${name}] halt makes writes no-ops until resume(user); ready() does not lift it`, async () => {
     const { opts } = mk();
     CacheStore._setBackendForTests(opts);
     await CacheStore.ready(U);
@@ -104,7 +104,10 @@ for (const [name, mk] of Object.entries(flavours)) {
     assert.deepEqual({ ok: r.ok, reason: r.reason }, { ok: false, reason: 'halted' });
     assert.equal(CacheStore.stats().halted, true);
     assert.equal(CacheStore.peek('P1'), null);
-    await CacheStore.ready(U); // new sign-in lifts it
+    await CacheStore.ready(U); // a late load resolving after sign-out must NOT revive the store (intentional change, T6)
+    assert.equal(CacheStore.stats().halted, true);
+    assert.equal(CacheStore.write(meta('P1'), '{"x":1}').reason, 'halted');
+    CacheStore.resume(U); // the sign-in path
     assert.equal(CacheStore.write(meta('P1'), '{"x":1}').ok, true);
   });
 

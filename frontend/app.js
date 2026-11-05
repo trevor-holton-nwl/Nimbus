@@ -466,6 +466,7 @@ const NIMBUS = (function () {
     // is cleared and treated exactly like "not logged in" on the next reload.
     if (Session.isExpired()) { Session.clearExpired(); showLoginScreen({ expired: true }); return; }
     if (!Session.currentUser()) { showLoginScreen(); return; }
+    void Session.sweepOrphanCache();   // other users' / empty cache records, before the boot load reads its own
     _bootMain();
   }
 

@@ -125,7 +125,7 @@ interface SaveError extends Error {
  *  type, which itself depends on `Persistence`'s type (TS2307/TS7022). A
  *  named interface breaks the cycle without changing any runtime shape. */
 interface LoadStats {
-  source: 'backend' | 'cache' | null;
+  source: 'backend' | null;
   ts: string | null;
   plant: string | null;
   raw_received: number;
@@ -418,6 +418,12 @@ export const Persistence = {
     Persistence._heldOptimizerIds = [...new Set([...Persistence._heldOptimizerIds, ...optimizerIds])];
     Persistence._heldFirmIds = [...new Set([...Persistence._heldFirmIds, ...firmIds])];
   },
+  /** Orders with unsaved edits (dirty, batched, firm-changed or held from the cache), counted once each. Admin Reset names it. */
+  unsavedCount(): number {
+    const ids = new Set<string>([...Persistence._dirtyIds, ...Persistence._forceIds, ...Persistence._firmDirtyIds].map(String));
+    for (const r of Persistence._heldRows) ids.add(String(r.id));
+    return ids.size;
+  },
   // Unsaved work a sign-out would discard. Deliberately includes What-If and queued calendar
   // deletes; unsaved admin-form edits (setup, master data) are not detectable here.
   hasPendingWork(): boolean {
@@ -440,7 +446,7 @@ export const Persistence = {
   _saveInFlight: false,
   // Stats captured on every load, exposed via NIMBUS.Persistence.stats()
   _lastLoad: {
-    source: null,          // 'backend' | 'cache' (null = nothing loaded)
+    source: null,          // 'backend' (null = nothing loaded or the server was unreachable)
     ts: null,
     plant: null,           // plant filter applied to this load (null = all plants)
     raw_received: 0,       // rows as received from /tasks (after plant filter + color merge)
@@ -2439,11 +2445,11 @@ export const Persistence = {
   /** The plant the previous page load last wrote a cache record for (the cache marker), so the boot load can scope to it
    *  (the backend is stateless — unscoped means fetching every plant's orders, which doesn't scale). Synchronous. */
   _rememberedPlant(): string | null {
-    try { return CacheStore.rememberedPlant(); } catch { return null; }
+    try { const u = Persistence._cacheUser(); return CacheStore.rememberedPlant(u === 'system' ? undefined : u); } catch { return null; }
   },
   /** True when the cache marker says the remembered plant holds unsaved edits (the boot restore may not have run yet). */
   _rememberedDirty(): boolean {
-    try { return CacheStore.rememberedDirty(); } catch { return false; }
+    try { const u = Persistence._cacheUser(); return CacheStore.rememberedDirty(u === 'system' ? undefined : u); } catch { return false; }
   },
 
   /** Leaving the page (visibilitychange->hidden is the main path, pagehide best effort): write the record now, then ask the

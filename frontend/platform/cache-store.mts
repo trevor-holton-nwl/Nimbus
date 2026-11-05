@@ -44,6 +44,10 @@ export interface CacheBackend {
   put(rec: CacheRecord): PutResult | Promise<PutResult>;
   del(key: string): Promise<void>;
   clear(): Promise<void>;
+  /** Record keys currently stored (the orphan sweep lists, then reads and judges each). */
+  keys(): Promise<string[]>;
+  /** Releases a connection opened only to wipe or sweep (no-op for localStorage). */
+  close?(): void;
 }
 
 export interface CacheMarker { v: 1; plant: string; seq: number; backend: BackendName; user: string; dirty: boolean }
@@ -101,6 +105,14 @@ export function makeLocalStorageBackend(): CacheBackend {
     },
     del(key) { try { lsOrNull()?.removeItem(LS_RECORD_PREFIX + key); } catch { /* ignore */ } return Promise.resolve(); },
     clear() { clearLsRecords(); return Promise.resolve(); },
+    keys() {
+      const out: string[] = [];
+      try {
+        const ls = lsOrNull();
+        if (ls) for (let i = 0; i < ls.length; i++) { const k = ls.key(i); if (k && k.startsWith(LS_RECORD_PREFIX)) out.push(k.slice(LS_RECORD_PREFIX.length)); }
+      } catch { /* ignore */ }
+      return Promise.resolve(out);
+    },
   };
 }
 
@@ -184,6 +196,8 @@ export function makeIdbBackend(): CacheBackend {
     put: rec => run('readwrite', s => s.put(rec)).then((): PutResult => ({ ok: true }), (e: unknown) => fail(e)),
     del: key => run('readwrite', s => s.delete(key)).then(() => undefined),
     clear: () => run('readwrite', s => s.clear()).then(() => undefined),
+    keys: () => run<IDBValidKey[]>('readonly', s => s.getAllKeys()).then(r => (Array.isArray(r) ? r.map(String) : [])),
+    close() { const d = db; db = null; if (d) { try { d.close(); } catch { /* ignore */ } } },
   };
 }
 
@@ -215,6 +229,10 @@ const readFailed = new Map<string, 'primary' | 'alt'>();
 let legacyCache: { raw: string; plant: string | null; dirty: boolean } | null | undefined;
 const queued = new Map<string, CacheRecord>();
 let inflight = false;
+/** Puts started by flush() that have not settled yet (they bypass `inflight`, so settled() needs their own count). */
+let flushing = 0;
+/** A wipe still running; ready() waits for it so a fast sign-in is not wiped by the previous session's clear. */
+let wipeInFlight: Promise<void> | null = null;
 let idleWaiters: Array<() => void> = [];
 let lastPut: PutResult | null = null;
 let notices: CacheNotice[] = [];
@@ -243,6 +261,7 @@ function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   });
 }
 
+const isIdle = (): boolean => !inflight && flushing === 0 && queued.size === 0;
 function settleIdle(): void {
   const w = idleWaiters; idleWaiters = [];
   for (const f of w) f();
@@ -298,7 +317,7 @@ function pump(): void {
   if (inflight) return;
   for (;;) {
     const next = queued.entries().next();
-    if (next.done) { settleIdle(); return; }
+    if (next.done) { if (isIdle()) settleIdle(); return; }
     const [key, rec] = next.value;
     queued.delete(key);
     const r = putOnce(rec);
@@ -316,7 +335,7 @@ function pump(): void {
 function initBackend(user: string): Promise<BootInfo> {
   notices = [];
   peekMap.clear(); peekRows.clear(); readFailed.clear(); queued.clear(); failedKeys.clear();
-  failedCount = 0; notifiedFail = false; lastChars = 0; inflight = false; lastPut = null;
+  failedCount = 0; notifiedFail = false; lastChars = 0; inflight = false; flushing = 0; lastPut = null;
   const marker = readMarker();
   if (marker && marker.seq > seqCounter) seqCounter = marker.seq;
 
@@ -426,6 +445,45 @@ try {
   if (typeof g.addEventListener === 'function') g.addEventListener('storage', onStorage as (e: never) => void);
 } catch { /* no window */ }
 
+/** A marker only speaks for the user who wrote it; with no user known the caller cannot compare, so it is trusted. */
+function markerBelongsTo(m: CacheMarker, user?: string): boolean {
+  const u = user ?? curUser;
+  return !u || !m.user || m.user === u;
+}
+
+/** Rows in a record's JSON, or null when it cannot be parsed as a record (never judged empty). */
+function rowsOf(json: string): number | null {
+  try { const r = (JSON.parse(json) as { rows?: unknown } | null)?.rows; return Array.isArray(r) ? r.length : null; } catch { return null; }
+}
+
+/** Another user's queued puts and peek copies are dropped on purpose (and logged), never silently. */
+function dropOtherUserState(from: string, to: string): void {
+  const q = queued.size; const p = peekMap.size;
+  queued.clear(); peekMap.clear(); peekRows.clear(); readFailed.clear(); failedKeys.clear();
+  if (isIdle()) settleIdle();
+  if (q || p) logWarn('cache state of the previous user dropped', { from, to, queued: q, peeked: p });
+}
+
+/** False only when IndexedDB.databases() proves the cache database does not exist (so a wipe/sweep need not create it). */
+async function idbExists(): Promise<boolean> {
+  if (overrides.idb || typeof indexedDB === 'undefined') return true;
+  const f = (indexedDB as unknown as { databases?: () => Promise<Array<{ name?: string }>> }).databases;
+  if (typeof f !== 'function') return true;
+  try { const dbs = await withTimeout(f.call(indexedDB), openTimeoutMs, 'idb databases'); return dbs.some(d => d.name === IDB_NAME); }
+  catch { return true; }
+}
+
+/** Clears IndexedDB without a prior ready(): open, store.clear(), close. Never deleteDatabase; bounded; fails open. */
+async function wipeIdbStandalone(): Promise<void> {
+  if (!(await idbExists())) return;
+  const idb = makeBackend('idb');
+  try {
+    await withTimeout(idb.open(), openTimeoutMs, 'cache open');
+    await withTimeout(idb.clear(), openTimeoutMs, 'cache wipe');
+  } catch (e) { logWarn('cache wipe (IndexedDB) failed', { error: errName(e) }); }
+  finally { try { idb.close?.(); } catch { /* ignore */ } }
+}
+
 function dropLegacyBlob(): void {
   legacyCache = null;
   try { lsOrNull()?.removeItem(Config.LS_KEY); } catch { /* ignore */ }
@@ -460,12 +518,23 @@ export const CacheStore = {
    * synchronously inside this call. Calling again with the same user only lifts a previous halt().
    */
   ready(user: string): Promise<BootInfo> {
-    halted = false;
+    // Never lifts halt(): a load that resolves after sign-out must not revive the store. Only resume(user) does.
     if (readyPromise && curUser === user) return readyPromise;
+    if (curUser && curUser !== user) dropOtherUserState(curUser, user);
     curUser = user;
-    readyPromise = initBackend(user).catch(() => boot);
+    const start = (): Promise<BootInfo> => initBackend(user).catch(() => boot);
+    readyPromise = wipeInFlight ? wipeInFlight.then(start) : start();
     return readyPromise;
   },
+
+  /** Lifts halt() for a signed-in `user` (the sign-in path). A different user than the one this page was opened for starts clean. */
+  resume(user: string): void {
+    halted = false;
+    if (curUser && curUser !== user) { dropOtherUserState(curUser, user); curUser = null; readyPromise = null; }
+  },
+
+  /** The user this store was opened for (null before ready()). */
+  user(): string | null { return curUser; },
 
   /** Synchronous copy of what was last written (or restored) for `plant`; defaults to the marker's plant. */
   peek(plant?: string): CacheRecord | null {
@@ -475,15 +544,19 @@ export const CacheStore = {
   },
 
   /** Plant the previous page load last wrote (from the marker), or null. */
-  rememberedPlant(): string | null { return readMarker()?.plant ?? legacyInfo()?.plant ?? null; },
+  rememberedPlant(user?: string): string | null {
+    const m = readMarker();
+    if (m) return markerBelongsTo(m, user) ? m.plant : null;
+    return legacyInfo()?.plant ?? null;
+  },
 
   /** True when a marker exists (the new cache has been in use). */
   hasMarker(): boolean { return readMarker() !== null; },
 
   /** True when the marker says the remembered plant holds unsaved edits (a boot-time guard for plant auto-switches). */
-  rememberedDirty(): boolean {
+  rememberedDirty(user?: string): boolean {
     const m = readMarker();
-    if (m) return !!m.dirty;
+    if (m) return markerBelongsTo(m, user) && !!m.dirty;
     return !!legacyInfo()?.dirty;
   },
 
@@ -499,6 +572,7 @@ export const CacheStore = {
    * (`ok: false`, notice 'read_failed'); a later successful read lifts the hold.
    */
   async read(plant: string): Promise<{ ok: boolean; record: CacheRecord | null }> {
+    if (halted) return { ok: false, record: null };
     if (!curUser || !backend || !plant) return { ok: true, record: null };
     const key = keyOf(curUser, plant);
     const held = readFailed.get(key);
@@ -577,24 +651,27 @@ export const CacheStore = {
     queued.clear();
     if (!recs.length) return { ok: true, skipped: true };
     let allOk = true; let error: string | undefined;
-    await Promise.all(recs.map(async rec => {
-      const r = await putOnce(rec);
-      recordPutResult(rec, r);
-      if (!r.ok) { allOk = false; error = r.error; }
-    }));
+    flushing += recs.length;
+    try {
+      await Promise.all(recs.map(async rec => {
+        const r = await putOnce(rec);
+        recordPutResult(rec, r);
+        if (!r.ok) { allOk = false; error = r.error; }
+      }));
+    } finally { flushing -= recs.length; if (isIdle()) settleIdle(); }
     if (allOk) return { ok: true };
     return { ok: false, error };
   },
 
   /** Resolves when no put is in flight or queued (tests and the 500 ms sign-out race use it). */
   settled(): Promise<void> {
-    if (!inflight && queued.size === 0) return Promise.resolve();
+    if (isIdle()) return Promise.resolve();
     return new Promise<void>(res => { idleWaiters.push(res); });
   },
 
   /** Deliberate discard of one plant's record (and its marker when it is the marker's plant). */
   async discard(plant: string): Promise<void> {
-    if (!curUser) return;
+    if (halted || !curUser) return;
     const key = keyOf(curUser, plant);
     queued.delete(key); peekMap.delete(key); peekRows.delete(key); failedKeys.delete(key); readFailed.delete(key);
     const m = readMarker();
@@ -602,17 +679,65 @@ export const CacheStore = {
     try { await backend?.del(key); } catch (e) { logWarn('cache discard failed', { error: errName(e) }); }
   },
 
-  /** Clears every record on the open connection (never deletes the database) plus the marker. */
-  async wipe(): Promise<void> {
+  /**
+   * Clears every record plus the marker, bounded by the 3 s open timeout and failing open. Works with no prior ready():
+   * with no backend open it opens IndexedDB itself, clears the store and closes (never deleteDatabase). With a backend open
+   * the clear runs on that connection, so it queues behind an in-flight put. The other store is cleared too, so a copy left
+   * there by a fallback cannot survive.
+   */
+  wipe(): Promise<void> {
     queued.clear(); peekMap.clear(); peekRows.clear(); readFailed.clear(); failedKeys.clear();
-    if (!inflight) settleIdle();
+    if (isIdle()) settleIdle();
     clearMarker();
     clearLsRecords();
-    try { await backend?.clear(); } catch (e) { logWarn('cache wipe failed', { error: errName(e) }); }
+    const b = backend;
+    const run = (async (): Promise<void> => {
+      if (b) {
+        try { await withTimeout(Promise.resolve(b.clear()), openTimeoutMs, 'cache wipe'); }
+        catch (e) { logWarn('cache wipe failed', { error: errName(e) }); }
+      }
+      if (idbAvailable() && b?.name !== 'idb') await wipeIdbStandalone();
+    })();
+    const tracked: Promise<void> = run.finally(() => { if (wipeInFlight === tracked) wipeInFlight = null; });
+    wipeInFlight = tracked;
+    return tracked;
   },
 
-  /** Later writes become no-ops until the next ready(). */
-  halt(): void { halted = true; queued.clear(); if (!inflight) settleIdle(); },
+  /**
+   * Orphan sweep for the sign-in gate (never inside load()): deletes records of any other user, and zero-row records the
+   * marker does not point at. A record that holds rows for `user` is NEVER deleted (a recoverable orphan), nor is one whose
+   * rows cannot be counted. Works without ready(); bounded and fail-open.
+   */
+  async sweepOrphans(user: string): Promise<{ deleted: number; kept: number }> {
+    const out = { deleted: 0, kept: 0 };
+    if (!user || user === 'system') return out;
+    const m = readMarker();
+    if (m && m.user !== user) clearMarker();
+    const live = m && m.user === user ? m : null;
+    const stores: CacheBackend[] = [];
+    if (lsOrNull()) stores.push(makeBackend('localstorage'));
+    if (idbAvailable() && await idbExists()) stores.push(makeBackend('idb'));
+    for (const store of stores) {
+      try {
+        await withTimeout(store.open(), openTimeoutMs, 'sweep open');
+        for (const key of await withTimeout(store.keys(), openTimeoutMs, 'sweep list')) {
+          const rec = await withTimeout(store.get(key), openTimeoutMs, 'sweep read').catch(() => null);
+          if (!rec) continue;
+          const rows = rec.legacy ? null : rowsOf(rec.json);
+          const own = (rec.user ?? key.split('|')[0]) === user;
+          const pointedAt = !!live && keyOf(live.user, live.plant) === key;
+          if (!own || (rows === 0 && !pointedAt)) { await withTimeout(store.del(key), openTimeoutMs, 'sweep delete'); out.deleted++; }
+          else out.kept++;
+        }
+      } catch (e) { logWarn('cache orphan sweep failed', { error: errName(e), backend: store.name }); }
+      finally { if (store !== backend) store.close?.(); }
+    }
+    if (out.deleted) logInfo('cache orphan sweep', out);
+    return out;
+  },
+
+  /** Later writes become no-ops until resume(user) (ready() does NOT lift it). */
+  halt(): void { halted = true; queued.clear(); if (isIdle()) settleIdle(); },
 
   stats(): CacheStats {
     return { mode, backend: backend?.name ?? null, failed: failedCount, pending: queued.size + (inflight ? 1 : 0), lastChars, halted, seq: seqCounter };
@@ -626,6 +751,7 @@ export const CacheStore = {
    * legacy key. Not called from anywhere until T6.
    */
   async importLegacy(rawJson: string, plant: string, user: string, opts: { converted?: boolean; dirty?: boolean } = {}): Promise<{ imported: boolean; reason?: string }> {
+    if (halted) return { imported: false, reason: 'halted' };
     if (!rawJson || !plant || !user || user === 'system') return { imported: false, reason: 'bad-args' };
     if (!backend) return { imported: false, reason: 'not-ready' };
     try {
@@ -658,7 +784,7 @@ export const CacheStore = {
     backend = null; mode = 'none'; curUser = null; readyPromise = null; halted = false;
     seqCounter = 0; failedCount = 0; lastChars = 0; notifiedFail = false; persistAsked = true;
     failedKeys.clear(); peekMap.clear(); peekRows.clear(); readFailed.clear(); legacyCache = undefined;
-    queued.clear(); inflight = false; idleWaiters = []; lastPut = null; notices = [];
+    queued.clear(); inflight = false; flushing = 0; wipeInFlight = null; idleWaiters = []; lastPut = null; notices = [];
     boot = { backend: null, mode: 'none', plant: null, record: null, notices: [] };
   },
 

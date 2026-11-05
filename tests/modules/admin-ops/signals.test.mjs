@@ -113,7 +113,6 @@ test('data load ladder', () => {
   // the detail rows are labelled: all plants vs the loaded plant's sent/loaded counts
   assert.deepEqual(dl({}).detail.rows.map(r => r[0]), ['pipe.in_db', 'pipe.sent', 'pipe.loaded']);
   assert.equal(dl({}).detail.rows[0][1], 100);
-  assert.equal(dl({ client: { ...b.client, stats: { source: 'cache', raw_received: 1, rendered: 1 } } }).reasonKey, 'sig.data_cached');
   assert.equal(dl({}).reasonKey, 'sig.data_ok');
   assert.equal(dl({}).reasonArgs.ago, Date.parse('2026-10-30T11:00:00Z'));
 });
@@ -161,10 +160,10 @@ test('browser ladder', () => {
 
 test('ordering: worst first, stable on ties; threshold override', () => {
   const b = base();
-  b.client = { ...b.client, inv: { autosaveDisabled: true }, stats: { source: 'cache', raw_received: 1, rendered: 1 } };   // browser err + data_load warn
+  b.client = { ...b.client, inv: { autosaveDisabled: true } };   // browser err
   b.jobs = { ...b.jobs, summary: { ...b.jobs.summary, failed24h: 1 } };           // jobs err
   const s = buildSignals(b);
-  assert.deepEqual(s.map(x => x.id).slice(0, 3), ['jobs', 'browser', 'data_load']);
+  assert.deepEqual(s.map(x => x.id).slice(0, 2), ['jobs', 'browser']);
   const b2 = base(); b2.health = { ...b2.health, db: { ...b2.health.db, ping_ms: 100 } };
   assert.equal(sig(buildSignals(b2), 'database').severity, 'ok');
   assert.equal(sig(buildSignals(b2, { dbPingWarnMs: 50 }), 'database').severity, 'warn');
@@ -279,7 +278,6 @@ test('anchors: Data load carries a secondary nav.diagnostics fix to diag-pipe, p
   const cases = [
     withClient({ stats: { source: 'backend', raw_received: 100, rendered: 90 } }),
     withClient({ tasks: 0 }),
-    withClient({ stats: { source: 'cache', raw_received: 100, rendered: 100 } }),
   ];
   for (const c of cases) {
     const s = at(c);
@@ -327,7 +325,7 @@ test('anchors: every nav.* fix and every linkSub in a worst-case input carries a
     ...withHealth({ db: { connected: true, ping_ms: 3000 } }, { pool_size: 10, pool_available: 0, requests_waiting: 4 }),
     ...withDeep({ locks: [{ blocked_pid: 1 }], tables: [table({ needs_vacuum: true })], connections: { total: 9, long_running: [{ duration_s: 99 }] }, slow_queries: { available: true, queries: [{ mean_ms: 900 }] } }),
     ...withJobs({ failed24h: 2, missed24h: 1, warning24h: 1, longerThanUsual: [{}], scheduler: { ok: false }, maintenance: { enabled: true } }),
-    ...withClient({ tasks: 0, stats: { source: 'cache', raw_received: 100, rendered: 80 } }),
+    ...withClient({ tasks: 0, stats: { source: 'backend', raw_received: 100, rendered: 80 } }),
     sap: { ...sap, status: { ...sap.status, error: 3 }, batches: [{ status: 'held' }] },
     backendErrors: { total: 12, entries: [] }, backendWarns: { total: 40, entries: [] },
     uploadWarnings: { distribution: 1, batchId: 'b' },
@@ -341,4 +339,15 @@ test('anchors: every nav.* fix and every linkSub in a worst-case input carries a
   const logs = fixes.filter((f) => f.id === 'logs.open');
   assert.ok(logs.length >= 2);
   for (const f of logs) { assert.ok(['error', 'warn'].includes(f.args.level)); assert.equal(f.args.source, 'backend'); }
+});
+
+test('T6: the autosave-off fix is Save (client.save), not Reset client state, in the signal and the attention list', () => {
+  const b = base();
+  b.client = { ...b.client, inv: { autosaveDisabled: true } };
+  const sigs = buildSignals(b);
+  const browser = sig(sigs, 'browser');
+  assert.equal(browser.reasonKey, 'sig.browser_autosave_off');
+  assert.deepEqual(browser.fixes.map(f => [f.id, f.labelKey]), [['client.save', 'btn.save']]);
+  const attn = buildAttention(sigs, b).find(a => a.id === 'autosave');
+  assert.deepEqual([attn.fix.id, attn.fix.labelKey], ['client.save', 'btn.save']);
 });
