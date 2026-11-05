@@ -7,7 +7,6 @@ import { Store } from '../../../frontend/platform/store.mjs';
 import { Config, Toast } from '../../../frontend/platform/foundation.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { CacheStore } from '../../../frontend/platform/cache-store.mjs';
-import { makeFakeBackend } from '../helpers/cache-backend-fake.mjs';
 import { resetCacheEnv, readRecord, CACHE_USER } from '../helpers/cache-env.mjs';
 
 globalThis.window = globalThis.window || {};
@@ -193,24 +192,21 @@ function seedBoard(nOpt, { plant = 'PA' } = {}) {
 }
 
 test('S7-9: a failed cache put latches nothing: one toast, the next write retries, the inventory never says disabled', async () => {
-  const fake = makeFakeBackend({ name: 'idb' });
-  fake.ctl.quotaOnPut = 1;   // the first put aborts with a quota error
   const cap = capture();
   const priorPlant = Persistence._currentLoadedPlant;
   try {
-    resetCacheEnv({ backend: { defaultBackend: 'idb', idb: fake.backend } });
+    const lsf = resetCacheEnv();
     await CacheStore.ready(CACHE_USER);
     seedBoard(50);
+    lsf.ctl.failNext = 2;   // the marker write and the record put both hit the quota
     Persistence._saveCache();
-    await CacheStore.settled();
     assert.equal(CacheStore.stats().failed, 1);
     assert.equal(cap.toasts.filter(t => t.msg.includes('toast.cache_put_failed')).length, 1, 'one "not backed up" toast');
     assert.equal(Persistence.storageInventory().autosaveDisabled, false, 'a failed write never latches autosave off');
     Store.updateTask('o0', { PRT_01: 'X' }, 'table'); Persistence._dirtyIds.add('o0');
     Persistence._saveCache();
-    await CacheStore.settled();
     assert.equal(CacheStore.stats().failed, 1, 'no new failure: the retry went through');
-    assert.equal(JSON.parse(fake.data.get(`${CACHE_USER}|PA`).json).rows.length, 50, 'the retried write holds all 50 dirty rows');
+    assert.equal(JSON.parse(JSON.parse(lsf.map.get(`nimbus.cache.rec.${CACHE_USER}|PA`)).json).rows.length, 50, 'the retried write holds all 50 dirty rows');
     assert.equal(cap.toasts.filter(t => t.msg.includes('toast.cache_put_failed')).length, 1, 'still just the one toast');
   } finally {
     cap.restore(); resetFlags(); Store.setTasks([], 'unit-test'); Persistence._currentLoadedPlant = priorPlant;

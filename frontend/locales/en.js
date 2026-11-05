@@ -63,6 +63,8 @@ window.__NIMBUS_LOCALES.en = {
   'toast.cache_kept_offline':           '{{count}} unsaved changes are kept and will return when the server is back.',
   'toast.cache_deferred':               '{{count}} unsaved changes could not be matched to the orders that loaded; they are kept and will be tried again on the next load.',
   'toast.cache_read_failed':            'Your saved backup could not be read, so new changes are not backed up until it can be. Save to keep your work.',
+  'toast.cache_corrupt_record':         'A saved backup of your unsaved changes was damaged and could not be restored. A copy was set aside; review the schedule.',
+  'toast.cache_other_plants':           'Unsaved changes are also kept for other plants: {{plants}}. Open each plant to restore them.',
   'ui.cache_reason_stale':              'the orders were changed on the server since',
   'ui.cache_reason_missing':            'some of the orders no longer exist',
   'ui.cache_reason_unmatched':          'they could not be matched to the current orders',

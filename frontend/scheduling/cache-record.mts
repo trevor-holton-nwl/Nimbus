@@ -1,4 +1,4 @@
-// Autosave cache record (T2): a PURE, DOM-free, zero-import builder for the compact record the IndexedDB cache
+// Autosave cache record (T2): a PURE, DOM-free, zero-import builder for the compact record the localStorage cache
 // store keeps per user+plant. Only DIRTY rows are stored, projected to their edited fields; the rest of the board is
 // re-read from the server on restore. Nothing here touches persistence state, storage or the clock.
 // Plan: autosave-cache redesign, "Record = one JSON string".
@@ -179,20 +179,40 @@ export function parseCacheRecord(json: unknown): CacheRecord | null {
   }
 }
 
-/** The pre-redesign `nimbus.state.v3` blob, converted to the compact record shape. `plant` is the plant it was saved for;
- *  `dirty` is false when it held no unsaved rows (nothing to import). Null on anything unusable. Never throws. */
+/** Unsaved orders a legacy blob held (its `_dirtyIds` count); 0 when it is unparseable or clean. Never throws. */
+export function legacyDirtyCount(raw: unknown): number {
+  try {
+    const st = (typeof raw === 'string' ? JSON.parse(raw) : raw) as { _dirtyIds?: unknown } | null;
+    return st && Array.isArray(st._dirtyIds) ? st._dirtyIds.length : 0;
+  } catch { return 0; }
+}
+
+/** The pre-redesign `nimbus.state.v3` blob, converted to the compact record shape. `plant` is the plant it was saved for
+ *  (its `selectedPlant`; with none, the plant most of its unsaved rows belong to); `dropped` counts unsaved rows of OTHER plants
+ *  that a single-plant record cannot hold. `dirty` is false when it held no unsaved rows (nothing to import). Null on anything
+ *  unusable. Never throws. */
 export function convertLegacyState(raw: unknown, user: string, schemaVersion: number | string, buildId: string | null):
-  { plant: string; dirty: boolean; record: CacheRecord } | null {
+  { plant: string; dirty: boolean; dropped: number; record: CacheRecord } | null {
   try {
     const st = (typeof raw === 'string' ? JSON.parse(raw) : raw) as Record<string, unknown> | null;
     if (!st || typeof st !== 'object' || Array.isArray(st)) return null;
-    const plant = typeof st.selectedPlant === 'string' ? st.selectedPlant : '';
-    if (!plant || !user) return null;
+    if (!user) return null;
     // A blob written under another schema was always discarded by the old restore; so is it here.
     if (st._schemaVersion !== undefined && st._schemaVersion !== schemaVersion) return null;
     const dirtyIds = new Set<string>((Array.isArray(st._dirtyIds) ? st._dirtyIds : []).map(String));
     const tasks = Array.isArray(st.tasks) ? st.tasks as Row[] : [];
-    const rows = tasks.filter(t => t && dirtyIds.has(String(t.id)));
+    let rows = tasks.filter(t => t && dirtyIds.has(String(t.id)));
+    let plant = typeof st.selectedPlant === 'string' ? st.selectedPlant : '';
+    let dropped = 0;
+    if (!plant) {
+      // No plant was selected (all-plants view): file the unsaved rows under the plant most of them belong to.
+      const count = new Map<string, number>();
+      for (const t of rows) { const p = String(t.PLANT ?? ''); if (p) count.set(p, (count.get(p) ?? 0) + 1); }
+      let best = 0;
+      for (const [p, n] of count) if (n > best) { plant = p; best = n; }
+      if (plant) { const keep = rows.filter(t => String(t.PLANT ?? '') === plant); dropped = rows.length - keep.length; rows = keep; }
+    }
+    if (!plant) return null;
     const optimizer = (Array.isArray(st._optimizerDirtyIds) ? st._optimizerDirtyIds : []).map(String);
     const record = buildCacheRecord({
       user, plant, schemaVersion, buildId, savedAt: Date.now(), seq: 0, rows,
@@ -200,7 +220,7 @@ export function convertLegacyState(raw: unknown, user: string, schemaVersion: nu
       context: { lineSettings: st.lineSettings, calendars: st.calendars, blocks: st.blocks, plants: st.plants,
         plantBlocks: st.plantBlocks, userSettings: st.userSettings },
     });
-    return { plant, dirty: rows.length > 0, record };
+    return { plant, dirty: rows.length > 0, dropped, record };
   } catch {
     return null;
   }

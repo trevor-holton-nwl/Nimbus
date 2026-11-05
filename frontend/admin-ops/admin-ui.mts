@@ -3170,8 +3170,7 @@ export const AdminCockpit = {
       });
       if (!ok) return;
     }
-    // Halt first so no late autosave rewrites what is about to be cleared; the wipe is bounded (the store's own 3 s cap,
-    // 1 s here) and fails open, so a stuck IndexedDB never traps the reload.
+    // Halt first so no late autosave rewrites what is about to be cleared; the wipe is synchronous, the race is a safety net.
     Persistence.haltCacheWrites();
     const wiped = Session.clearLocalPlannerData({ keepQueuedWork: true });
     await Promise.race([wiped, new Promise<void>((res) => setTimeout(res, 1000))]);

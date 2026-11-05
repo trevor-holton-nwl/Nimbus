@@ -403,7 +403,7 @@ const NIMBUS = (function () {
         if (Store.selectedPlant) return;                 // already selected — never override
         // Unsaved work (or a cache marker that says there is some, before the boot restore has run) outranks the default plant:
         // switching now would drop the restored edits without the discard confirm.
-        if (Persistence._dirtyIds.size > 0 || Persistence._hasHeldRows() || Persistence._rememberedDirty()) return;
+        if (Persistence.blocksBootPlantSwitch()) return;
         const known = Store.knownPlants();               // already allowedPlants()-scoped
         // An explicit default plant wins over the per-browser "last-used" plant so a
         // returning user lands on their configured default rather than picking manually.

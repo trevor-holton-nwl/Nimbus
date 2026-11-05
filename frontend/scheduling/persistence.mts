@@ -32,7 +32,7 @@
 import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
 import { CacheStore } from '../platform/cache-store.mjs';
-import { buildCacheRecord, serializeCacheRecord, parseCacheRecord, fingerprintText, applyContextChanged, convertLegacyState } from './cache-record.mjs';
+import { buildCacheRecord, serializeCacheRecord, parseCacheRecord, fingerprintText, applyContextChanged, convertLegacyState, legacyDirtyCount } from './cache-record.mjs';
 import type { CacheRecord, CacheApplyContext } from './cache-record.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
 import { CalendarSync } from '../calendar/calendar-sync.mjs';
@@ -312,7 +312,8 @@ export const Persistence = {
    *  auto-exit, whose discard hands the pre-What-If sets back before the switch completes. */
   discardUnsavedForPlantSwitch(): void {
     // A deliberate discard clears the outgoing plant's cache record too; otherwise the next boot would restore it.
-    const outgoing = Persistence._currentLoadedPlant;
+    // After a failed reload nothing is "loaded": fall back to the plant a deferred restore holds, then the one last attempted.
+    const outgoing = Persistence._currentLoadedPlant ?? Persistence._cacheHoldPlant ?? Persistence._lastAttemptedPlant;
     if (outgoing) Persistence._discardCacheRecord(outgoing);
     Persistence._dirtyIds.clear();
     Persistence._forceIds.clear();
@@ -1405,6 +1406,13 @@ export const Persistence = {
       else if (n === 'older_record') Toast.show(Util.t('toast.cache_older_record'), 'warn', 15000);
       else if (n === 'dirty_no_record') Toast.show(Util.t('toast.cache_dirty_no_record'), 'warn', 15000);
       else if (n === 'read_failed') Toast.show(Util.t('toast.cache_read_failed'), 'warn', 15000);
+      else if (n === 'corrupt_record') Toast.show(Util.t('toast.cache_corrupt_record'), 'warn', 15000);
+      else if (n === 'other_dirty_plants') {
+        const u = Persistence._cacheUser() === 'system' ? undefined : Persistence._cacheUser();
+        const here = CacheStore.rememberedPlant(u);
+        const kept = CacheStore.dirtyPlants(u).filter(p => p !== here);
+        if (kept.length) Toast.show(Util.t('toast.cache_other_plants', { plants: kept.join(', ') }), 'warn', 15000);
+      }
       else ErrorLog.info('persistence', `Cache store notice: ${n}`);
     }
   },
@@ -1431,15 +1439,20 @@ export const Persistence = {
     try {
       const conv = convertLegacyState(raw, user, Config.SCHEMA_VERSION, Config.BUILD_ID);
       if (conv?.dirty) {
-        if (CacheStore.hasMarker()) {
-          ErrorLog.warn('persistence', 'Legacy cache dropped: the new cache has been in use since');
-        } else {
-          const r = await CacheStore.importLegacy(serializeCacheRecord(conv.record), conv.plant, user, { converted: true, dirty: true });
-          if (!r.imported && r.reason !== 'record-exists') lost = conv.record.rows.length;
-          ErrorLog.info('persistence', `Legacy cache converted for ${conv.plant}: ${conv.record.rows.length} unsaved rows (${r.imported ? 'imported' : r.reason})`);
-        }
+        const n = conv.record.rows.length;
+        const json = serializeCacheRecord(conv.record);
+        // Its content is in memory now: free the multi-MB blob BEFORE the put so the new record has the quota it needs.
+        CacheStore.dropLegacy();
+        // Also when a marker exists (an old-build tab across the deploy): importLegacy refuses only when THIS plant has a record.
+        const r = await CacheStore.importLegacy(json, conv.plant, user, { converted: true, dirty: true });
+        if (!r.imported) lost += n;
+        lost += conv.dropped;
+        ErrorLog.info('persistence', `Legacy cache converted for ${conv.plant}: ${n} unsaved rows (${r.imported ? 'imported' : r.reason})`);
+      } else if (!conv) {
+        // Unusable (other schema, no plant to file it under): say how many unsaved orders went with it.
+        lost = legacyDirtyCount(raw);
       }
-    } catch (e) { ErrorLog.warn('persistence', `Legacy cache conversion failed: ${(e as Error)?.message}`); }
+    } catch (e) { ErrorLog.warn('persistence', `Legacy cache conversion failed: ${(e as Error)?.message}`); lost = lost || legacyDirtyCount(raw); }
     CacheStore.dropLegacy();
     if (lost > 0) Toast.show(Util.t('toast.cache_changes_lost', { count: lost }), 'warn', 15000);
   },
@@ -1482,8 +1495,13 @@ export const Persistence = {
       if (key in c) row[key] = c[key] == null ? null : Util.parseDate(c[key] as string);
     }
     if ('scheduleSegments' in c || 'schedule_segments' in c) t.scheduleSegments = Persistence._segmentsFromRaw(c);
-    // An unsaved Unschedule: the queued row has no dates, whatever keys the record projected.
-    if (c.planning_status === 'needs_planning') { t.start_date = null; t.end_date = null; t.scheduleSegments = []; }
+    // An unsaved Unschedule: the queued row has no dates. Only when the cached row itself carries none: a needs_planning row
+    // that kept its dates keeps the cached ones.
+    if (c.planning_status === 'needs_planning') {
+      if (c.start_date == null) t.start_date = null;
+      if (c.end_date == null) t.end_date = null;
+      if (c.start_date == null && c.end_date == null) t.scheduleSegments = [];
+    }
     const issue = Persistence._reviveDerivationIssue(c.derivationIssue as { code?: string } | null | undefined);
     if (issue) t.derivationIssue = issue;
     if ('firmed' in c && firmDirty.has(String(t.id))) t.firmed = !!c.firmed;
@@ -2447,17 +2465,21 @@ export const Persistence = {
   _rememberedPlant(): string | null {
     try { const u = Persistence._cacheUser(); return CacheStore.rememberedPlant(u === 'system' ? undefined : u); } catch { return null; }
   },
-  /** True when the cache marker says the remembered plant holds unsaved edits (the boot restore may not have run yet). */
+  /** Unsaved work (or a cache marker that says there is some, before the boot restore has run) outranks the boot default-plant
+   *  one-shot: switching plant then would drop the edits without the discard confirm. */
+  blocksBootPlantSwitch(): boolean {
+    return Persistence._dirtyIds.size > 0 || Persistence._hasHeldRows() || Persistence._rememberedDirty();
+  },
+  /** True when the cache marker says some plant holds unsaved edits (the boot restore may not have run yet). */
   _rememberedDirty(): boolean {
     try { const u = Persistence._cacheUser(); return CacheStore.rememberedDirty(u === 'system' ? undefined : u); } catch { return false; }
   },
 
-  /** Leaving the page (visibilitychange->hidden is the main path, pagehide best effort): write the record now, then ask the
-   *  store to start any queued put in its own transaction instead of waiting behind an in-flight one. */
+  /** Leaving the page (visibilitychange->hidden is the main path, pagehide best effort): write the record now (the store's
+   *  writes are synchronous, so it has landed when this returns). */
   flushCache(): void {
     if (Sandbox.active) return;
     Persistence._saveCache();
-    void CacheStore.flush();
   },
 
   /** Offline boot: tell the planner their unsaved edits are safe (the record is untouched; the reconnect load() overlays it). */
@@ -2525,15 +2547,14 @@ export const Persistence = {
       const total = record.rows.length;
       const res = CacheStore.write({ user, plant, dirty: total > 0, rows: total }, serializeCacheRecord(record));
       if (!res.ok && !res.skipped) ErrorLog.warn('persistence', `Cache write failed: ${res.error ?? res.reason ?? 'unknown'}`);
-      if (res.pending) void CacheStore.settled().then(() => Persistence._raiseCacheNotices());
-      else Persistence._raiseCacheNotices();
+      Persistence._raiseCacheNotices();
     } catch (e) {
       ErrorLog.warn('persistence', `Cache save failed: ${(e as Error).message}`);
     }
   },
 
-  /** Admin/diagnostics inventory. Synchronous on purpose (cached store stats); `degraded` = the store is on the limited
-   *  localStorage fallback or the last put failed, `autosaveDisabled` is always false now (a failed write never latches). */
+  /** Admin/diagnostics inventory. Synchronous on purpose (cached store stats); `degraded` = storage is blocked or a put
+   *  has failed, `autosaveDisabled` is always false now (a failed write never latches). */
   storageInventory(): { totalBytes: number; count: number; items: Array<{ key: string; bytes: number }>; degraded: boolean; lastBytes: number; lastSavedAt: number; autosaveDisabled: boolean; mode: string; failed: number; pending: number } {
     let total = 0, count = 0;
     const items: Array<{ key: string; bytes: number }> = [];
@@ -2551,14 +2572,12 @@ export const Persistence = {
     const user = Persistence._cacheUser();
     const plant = Persistence._currentLoadedPlant;
     const rec = plant && user !== 'system' ? CacheStore.peek(plant) : null;
-    // The IndexedDB record is not a localStorage key: list it as a synthetic item (not part of the localStorage total).
-    if (st.mode === 'idb') items.push({ key: 'idb:nimbus-cache', bytes: st.lastChars * 2 });
     items.sort((a, b) => b.bytes - a.bytes);
     return {
       totalBytes:       total,
       count,
       items,
-      degraded:         st.failed > 0 || st.mode === 'fallback',
+      degraded:         st.failed > 0 || st.mode === 'none',
       lastBytes:        st.lastChars || 0,
       lastSavedAt:      rec?.savedAt || 0,
       autosaveDisabled: false,

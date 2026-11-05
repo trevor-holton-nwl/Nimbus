@@ -16,7 +16,8 @@ import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
 import { applySchedulePatches } from '../../../frontend/optimization/engine.mjs';
 import { App } from '../../../frontend/shell/application-shell.mjs';
 import { UnsavedDialog } from '../../../frontend/scheduling/unsaved-dialog.mjs';
-import { makeFakeBackend } from '../helpers/cache-backend-fake.mjs';
+import { Inspector } from '../../../frontend/scheduling/orders.mjs';
+import { ToolInventory } from '../../../frontend/master-data/tool-inventory.mjs';
 import { resetCacheEnv, readRecord, simulateReload, CACHE_USER } from '../helpers/cache-env.mjs';
 
 globalThis.NimbusComputeCore = globalThis.NimbusComputeCore || createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
@@ -286,7 +287,7 @@ test('seq mismatch: a record older than the marker is restored and one toast say
   assert.equal(f.toasts.filter(x => x.msg === 'toast.cache_older_record').length, 1);
 });
 
-test('a marker that says dirty with no record toasts once and clears the marker', async t => {
+test('a marker that says dirty with no record toasts once and withdraws its dirty claim (the plant stays remembered)', async t => {
   const f = fixture(t, 4);
   Store.updateMany([shiftDay('R0', 2)], 'table');
   Persistence._saveCache();
@@ -296,25 +297,16 @@ test('a marker that says dirty with no record toasts once and clears the marker'
   assert.equal(Persistence._dirtyIds.size, 0);
 });
 
-test('flush path: flushCache starts the queued put in its own transaction while an earlier put is still in flight', async t => {
-  const fake = makeFakeBackend({ name: 'idb' });
+test('flush path: flushCache writes the record at once (store writes are synchronous: nothing queued, nothing in flight)', async t => {
   const f = fixture(t, 4);
-  resetCacheEnv({ backend: { defaultBackend: 'idb', idb: fake.backend } });
-  await CacheStore.ready(CACHE_USER);
-  fake.ctl.hold = 1;                                  // the first put stays in flight
   Store.updateMany([shiftDay('R0', 2)], 'table');
-  Persistence._saveCache();
-  assert.equal(fake.ctl.puts.length, 1);
-  Store.updateMany([shiftDay('R1', 2)], 'table');
-  Persistence._saveCache();                           // queued behind the in-flight put
-  assert.equal(fake.ctl.puts.length, 1, 'precondition: the second write is only queued');
   Persistence.flushCache();                           // visibilitychange -> hidden
-  await tick();
-  assert.equal(fake.ctl.puts.length, 2, 'flush created its own put at once instead of waiting');
-  fake.release();
-  await CacheStore.settled();
+  assert.equal(readRecord('P').rows.length, 1, 'the record is in storage when flushCache returns');
+  Store.updateMany([shiftDay('R1', 2)], 'table');
+  Persistence.flushCache();
+  assert.equal(readRecord('P').rows.length, 2);
+  assert.equal(CacheStore.stats().pending, 0);
   assert.ok(f.toasts.every(x => x.msg !== 'toast.cache_put_failed'));
-  CacheStore._setBackendForTests();
 });
 
 test('Apply captures the context fingerprints at Apply time; a restored Apply warns only when that context has since changed', async t => {
@@ -387,7 +379,7 @@ test('storageInventory is synchronous, built from the store stats, never reports
   assert.equal(inv.autosaveDisabled, false);
   assert.equal(inv.failed, 0);
   assert.equal(inv.pending, 0);
-  assert.ok(['fallback', 'localstorage', 'idb'].includes(inv.mode));
+  assert.equal(inv.mode, 'localstorage');
   assert.ok(inv.lastBytes > 0);
   assert.ok(inv.lastSavedAt > 0);
   assert.equal(typeof inv.then, 'undefined', 'not a promise');
@@ -414,38 +406,39 @@ test('B1 a plant record the marker does not name is READ before the restore, and
 });
 
 test('B1 a record whose read FAILS is not overwritten: writes are held and the planner is told', async t => {
-  const fake = makeFakeBackend({ name: 'idb' });
   const f = fixture(t, 4);
-  resetCacheEnv({ backend: { defaultBackend: 'idb', idb: fake.backend } });
-  await CacheStore.ready(CACHE_USER);
   Store.updateMany([shiftDay('R0', 2)], 'table');
   Persistence._saveCache();
-  await CacheStore.settled();
-  const stored = JSON.stringify(fake.data.get(`${CACHE_USER}|P`));
-  fake.ctl.failGet = true;
-  await simulateReload({ backend: { defaultBackend: 'idb', idb: fake.backend } });
+  const stored = f.lsf.map.get(recKey('P'));
+  f.lsf.ctl.failGet = k => k === recKey('P');
+  await simulateReload();
   Store.setTasks([], 'test'); Persistence._currentLoadedPlant = null;
   mockServer(t, f.server);
   await Persistence.load({ plant: 'P' }); await tick();
   assert.equal(f.toasts.some(x => x.msg === 'toast.cache_read_failed'), true, 'the planner is told');
   Store.updateMany([shiftDay('R1', 2)], 'table');
   Persistence._saveCache();
-  await CacheStore.settled();
-  assert.equal(JSON.stringify(fake.data.get(`${CACHE_USER}|P`)), stored, 'the unread record is untouched');
-  CacheStore._setBackendForTests();
+  f.lsf.ctl.failGet = null;
+  assert.equal(f.lsf.map.get(recKey('P')), stored, 'the unread record is untouched');
 });
 
-test('B2 the boot default-plant one-shot is skipped while unsaved work (or a dirty marker) exists', async t => {
+test('B2 the boot default-plant one-shot is blocked while unsaved work (or a dirty marker) exists', async t => {
   const f = fixture(t, 3);
+  assert.equal(Persistence.blocksBootPlantSwitch(), false, 'nothing unsaved: the one-shot may run');
   Store.updateMany([shiftDay('R0', 2)], 'table');
   Persistence._saveCache();
   assert.equal(Persistence._rememberedDirty(), true, 'the marker says the remembered plant holds unsaved edits');
-  const src = (await import('node:fs')).readFileSync(new URL('../../../frontend/app.js', import.meta.url), 'utf8');
-  const guard = src.indexOf('Persistence._rememberedDirty()');
-  const apply = src.indexOf("Store.setSelectedPlant(dp, 'default-plant')");
-  assert.ok(guard > 0 && guard < apply, 'the guard runs before the one-shot sets the plant');
-  Persistence._dirtyIds.clear(); Persistence._saveCache();
+  assert.equal(Persistence.blocksBootPlantSwitch(), true, 'dirty ids block it');
+  Persistence._dirtyIds.clear();                       // a fresh page: the marker alone must still block it
+  assert.equal(Persistence.blocksBootPlantSwitch(), true, 'a dirty marker blocks it before the boot restore has run');
+  Persistence._saveCache();
+  Persistence._forceIds.clear(); Persistence._dirtySource.clear(); Persistence._firmDirtyIds.clear();
+  Persistence._saveCache();
   assert.equal(Persistence._rememberedDirty(), false, 'clean again');
+  assert.equal(Persistence.blocksBootPlantSwitch(), false);
+  Persistence._heldRows = [{ id: 'H' }];
+  assert.equal(Persistence.blocksBootPlantSwitch(), true, 'held rows block it');
+  Persistence._heldRows = [];
   void f;
 });
 
@@ -628,12 +621,181 @@ test('M7c legacy migration: the old blob\'s unsaved rows become the new record, 
   }
 });
 
-test('m2 / m3 source guards: a note save autosaves the adopted version; the tool deep link asks before switching plant', async () => {
-  const fs = await import('node:fs');
-  const orders = fs.readFileSync(new URL('../../../frontend/scheduling/orders.mts', import.meta.url), 'utf8');
-  const i = orders.indexOf('Persistence.adoptBaselineVersion(id, baseVersion, version);');
-  assert.ok(i > 0 && orders.slice(i, i + 400).includes('Persistence._autosave()'), 'm2: the note save writes the cache after adopting the version');
-  const ti = fs.readFileSync(new URL('../../../frontend/master-data/tool-inventory.mts', import.meta.url), 'utf8');
-  const j = ti.indexOf('openForTool(');
-  assert.ok(j > 0 && ti.slice(j, j + 900).includes('Persistence.confirmPlantSwitch(plant)'), 'm3: openForTool confirms the plant switch');
+test('m2 a note save that adopts the new version writes the cache; one that does not adopt it does not', async t => {
+  fixture(t, 3);
+  Store.updateMany([shiftDay('R0', 2)], 'table');
+  Store.tasks.R0.notes = 'hello';
+  const v = Store.tasks.R0.row_version;
+  let autosaves = 0;
+  t.mock.method(Persistence, '_autosave', () => { autosaves++; });
+  t.mock.method(Util, 'fetchTraced', async () => ({ ok: true, json: async () => ({ versions: { R0: v + 1 } }) }));
+  t.mock.method(Inspector, 'invalidateHistory', () => {});
+  assert.equal(await Inspector._sendNote('R0', 'hello', false), true);
+  assert.equal(Store.tasks.R0.row_version, v + 1, 'the new version is adopted');
+  assert.equal(autosaves, 1, 'and the cache record is rewritten with it');
+  Store.tasks.R0.notes = 'edited again meanwhile';
+  assert.equal(await Inspector._sendNote('R0', 'hello', false), true);
+  assert.equal(autosaves, 1, 'a note the planner has since changed adopts nothing and writes nothing');
+});
+
+test('m3 the tool deep link asks before switching plant over unsaved edits, and switches only on a yes', async t => {
+  fixture(t, 3);
+  Store.updateMany([shiftDay('R0', 2)], 'table');
+  assert.equal(Persistence._dirtyIds.has('R0'), true);
+  const asked = []; let answer = false;
+  t.mock.method(Modal, 'confirm', async o => { asked.push(o); return answer; });
+  const switched = [];
+  t.mock.method(Store, 'setSelectedPlant', p => { switched.push(p); });
+  await ToolInventory.openForTool('Q', 'T1');
+  assert.equal(asked.length, 1, 'the discard prompt appeared');
+  assert.deepEqual(switched, [], 'declined: no plant switch');
+  answer = true;
+  try { await ToolInventory.openForTool('Q', 'T1'); } catch { /* the grid is not mounted here */ }
+  assert.deepEqual(switched, ['Q'], 'confirmed: switched');
+});
+
+/* ------------------------------------------------ IndexedDB removal review fixes (F1-F6) */
+
+const legacyTask = (id, plant, extra = {}) => ({ id, PLANT: plant, row_version: 1, planning_status: 'scheduled', MACHINE: 'M1', RUN_TIME: 1,
+  user_scheduled: true, start_date: stamp(2, 8), end_date: stamp(2, 9), ...extra });
+const legacyBlob = (selectedPlant, tasks, dirty = tasks.map(x => x.id)) => JSON.stringify({
+  _schemaVersion: Config.SCHEMA_VERSION, _buildId: 'old', selectedPlant, _dirtyIds: dirty, _optimizerDirtyIds: [], lineSettings: {}, tasks });
+const lostToasts = f => f.toasts.filter(x => x.msg === 'toast.cache_changes_lost');
+
+test('F3a a legacy blob beside an existing marker (an old-build tab across the deploy) is still imported for a plant with no record', async t => {
+  const f = fixture(t, 3);
+  Store.updateMany([shiftDay('R0', 2)], 'table');
+  Persistence._saveCache();                                   // the new build wrote plant P: a marker exists
+  f.lsf.ls.setItem(Config.LS_KEY, legacyBlob('Q', [legacyTask('L1', 'Q'), legacyTask('L2', 'Q')]));
+  await simulateReload();
+  await Persistence._migrateLegacyCache(CACHE_USER);
+  assert.equal(f.lsf.map.has(Config.LS_KEY), false, 'the blob is removed');
+  assert.equal(lostToasts(f).length, 0, 'nothing was lost');
+  assert.deepEqual([...CacheStore.dirtyPlants()].sort(), ['P', 'Q'], 'Q joins the dirty list, P stays');
+  assert.equal(JSON.parse(CacheStore.peek('Q').json).rows.length, 2);
+});
+
+test('F3a the plant that already has a record refuses the blob and the planner is told how many orders were dropped', async t => {
+  const f = fixture(t, 3);
+  Store.updateMany([shiftDay('R0', 2)], 'table');
+  Persistence._saveCache();
+  const before = f.lsf.map.get(recKey('P'));
+  f.lsf.ls.setItem(Config.LS_KEY, legacyBlob('P', [legacyTask('L1', 'P'), legacyTask('L2', 'P'), legacyTask('L3', 'P')]));
+  await simulateReload();
+  await Persistence._migrateLegacyCache(CACHE_USER);
+  assert.equal(f.lsf.map.has(Config.LS_KEY), false);
+  assert.equal(f.lsf.map.get(recKey('P')), before, 'the record the new build wrote is untouched');
+  assert.equal(lostToasts(f).length, 1, 'one toast');
+});
+
+test('F3b a legacy blob with no selected plant files its unsaved rows under the plant they belong to', async t => {
+  const f = fixture(t, 3);
+  f.lsf.map.clear();
+  f.lsf.ls.setItem(Config.LS_KEY, legacyBlob(null, [legacyTask('L1', 'Q'), legacyTask('L2', 'Q'), legacyTask('L3', 'Z')]));
+  await simulateReload();
+  await Persistence._migrateLegacyCache(CACHE_USER);
+  assert.equal(JSON.parse(CacheStore.peek('Q').json).rows.length, 2, 'the plant most rows belong to');
+  assert.deepEqual(CacheStore.dirtyPlants(), ['Q']);
+  assert.equal(lostToasts(f).length, 1, 'the row that belongs to another plant is reported as lost');
+});
+
+test('F3 an unusable blob that held unsaved orders (no plant anywhere, or another schema) says how many were dropped', async t => {
+  const f = fixture(t, 3);
+  f.lsf.map.clear();
+  f.lsf.ls.setItem(Config.LS_KEY, legacyBlob(null, [legacyTask('L1', ''), legacyTask('L2', '')]));
+  await simulateReload();
+  await Persistence._migrateLegacyCache(CACHE_USER);
+  assert.equal(f.lsf.map.has(Config.LS_KEY), false);
+  assert.equal(lostToasts(f).length, 1);
+  f.toasts.length = 0;
+  f.lsf.ls.setItem(Config.LS_KEY, JSON.stringify({ ...JSON.parse(legacyBlob('P', [legacyTask('L1', 'P')])), _schemaVersion: -1 }));
+  await simulateReload();
+  await Persistence._migrateLegacyCache(CACHE_USER);
+  assert.equal(lostToasts(f).length, 1);
+  f.toasts.length = 0;
+  f.lsf.ls.setItem(Config.LS_KEY, legacyBlob('P', [], []));    // clean: nothing to say
+  await simulateReload();
+  await Persistence._migrateLegacyCache(CACHE_USER);
+  assert.equal(lostToasts(f).length, 0);
+});
+
+test('F3c the legacy blob is dropped BEFORE the first put, so its megabytes are free for the new record', async t => {
+  const f = fixture(t, 3);
+  f.lsf.map.clear();
+  f.lsf.ls.setItem(Config.LS_KEY, legacyBlob('P', [legacyTask('L1', 'P')]));
+  await simulateReload();
+  const realSet = f.lsf.ls.setItem;
+  const blobPresentAtPut = [];
+  f.lsf.ls.setItem = (k, v) => { if (k.startsWith(LS_RECORD_PREFIX)) blobPresentAtPut.push(f.lsf.ls.getItem(Config.LS_KEY) !== null); return realSet(k, v); };
+  await Persistence._migrateLegacyCache(CACHE_USER);
+  f.lsf.ls.setItem = realSet;
+  assert.deepEqual(blobPresentAtPut, [false], 'one put, and the blob was already gone');
+  assert.ok(CacheStore.peek('P'));
+});
+
+test('F3 when even the freed storage cannot hold the converted record the planner is told', async t => {
+  const f = fixture(t, 3);
+  f.lsf.map.clear();
+  f.lsf.ls.setItem(Config.LS_KEY, legacyBlob('P', [legacyTask('L1', 'P'), legacyTask('L2', 'P')]));
+  await simulateReload();
+  f.lsf.ctl.quotaChars = 200;
+  await Persistence._migrateLegacyCache(CACHE_USER);
+  assert.equal(f.lsf.map.has(Config.LS_KEY), false);
+  assert.equal(lostToasts(f).length, 1);
+});
+
+test('F5 a confirmed discard after a FAILED reload still deletes the record (nothing is "loaded", the last attempted plant is)', async t => {
+  const f = fixture(t, 4);
+  Store.updateMany([shiftDay('R0', 2)], 'table');
+  Persistence._saveCache();
+  assert.ok(f.lsf.map.get(recKey('P')));
+  Persistence._currentLoadedPlant = null;                      // what a failed reload leaves behind
+  Persistence._lastAttemptedPlant = 'P';
+  Persistence.discardUnsavedForPlantSwitch();
+  await tick();
+  assert.equal(f.lsf.map.get(recKey('P')), undefined, 'the discarded edits are not resurrected on the next boot');
+});
+
+test('F5 with a deferred restore held for the plant that plant is the one discarded', async t => {
+  const f = fixture(t, 4);
+  Store.updateMany([shiftDay('R0', 2)], 'table');
+  Persistence._saveCache();
+  Persistence._currentLoadedPlant = null;
+  Persistence._lastAttemptedPlant = 'ELSEWHERE';
+  Persistence._cacheHoldPlant = 'P';
+  Persistence.discardUnsavedForPlantSwitch();
+  await tick();
+  assert.equal(f.lsf.map.get(recKey('P')), undefined);
+});
+
+test('F6 a cached needs_planning row that kept its dates keeps them; one with no dates is unscheduled', () => {
+  const mk = () => Persistence._prepTask(structuredClone(serverRow(0)));
+  const kept = mk();
+  Persistence._applyCachedRow(kept, { planning_status: 'needs_planning', start_date: stamp(3, 8), end_date: stamp(3, 9) }, new Set());
+  assert.equal(kept.planning_status, 'needs_planning');
+  assert.equal(kept.start_date.getTime(), new Date(stamp(3, 8)).getTime(), 'cached dates kept');
+  assert.equal(kept.end_date.getTime(), new Date(stamp(3, 9)).getTime());
+  for (const c of [{ planning_status: 'needs_planning', start_date: null, end_date: null }, { planning_status: 'needs_planning' }]) {
+    const gone = mk();
+    Persistence._applyCachedRow(gone, c, new Set());
+    assert.equal(gone.start_date, null, JSON.stringify(c));
+    assert.equal(gone.end_date, null);
+    assert.deepEqual(gone.scheduleSegments, []);
+  }
+});
+
+test('F1 boot toasts: a second plant with kept unsaved changes is named; a damaged record is reported', async t => {
+  const f = fixture(t, 3);
+  Store.updateMany([shiftDay('R0', 2)], 'table');
+  Persistence._saveCache();                                              // plant P dirty
+  CacheStore.write({ user: CACHE_USER, plant: 'Q', dirty: true, rows: 1 }, JSON.stringify({ rows: [{ id: 'x' }] }));   // plant Q dirty, marker names Q
+  await simulateReload();
+  Persistence._raiseCacheNotices();
+  assert.equal(f.toasts.filter(x => x.msg === 'toast.cache_other_plants').length, 1, 'the other dirty plant is announced');
+  f.toasts.length = 0;
+  f.lsf.ls.setItem(recKey('Q'), '{"broken":');
+  await simulateReload();
+  Persistence._raiseCacheNotices();
+  assert.equal(f.toasts.filter(x => x.msg === 'toast.cache_corrupt_record').length, 1, 'quarantined: told once');
+  assert.equal(f.lsf.map.has(recKey('Q')), false);
 });

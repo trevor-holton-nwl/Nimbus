@@ -190,8 +190,8 @@ export const Session = (() => {
   // history, queued calendar deletes, sessionStorage) so a shared PC leaves nothing behind.
   // Keeps display preferences (nimbus.theme / nimbus.locale) and does NOT touch the session
   // blob (signOut / clearExpired own that). Also used by admin "Reset client state".
-  // The autosave cache (marker, every record key, the legacy blob) is removed synchronously; the returned promise settles when
-  // the cache store's own wipe has (IndexedDB clear on the open connection, or a fresh open before boot). It never rejects.
+  // The autosave cache (marker, every record key, the quarantine copy, the legacy blob) is removed synchronously; the returned
+  // promise is already settled by then and never rejects.
   function clearLocalPlannerData(opts: { keepQueuedWork?: boolean } = {}): Promise<void> {
     const quarantinePrefix = `${Config.LS_KEY}.quarantine.`;
     try {
@@ -231,10 +231,9 @@ export const Session = (() => {
       if (!ok) return false;
     }
     try { opts.beforeClear?.(); } catch { /* best effort */ }
-    // Stop cache writes for good (also when the caller passed no beforeClear), let an in-flight put or flush land (max 500 ms),
-    // then clear. The reload waits for the wipe (max 500 ms) so it cannot cut the clear transaction short.
+    // Stop cache writes for good (also when the caller passed no beforeClear), then clear. Every cache write is synchronous,
+    // so nothing is in flight to wait for.
     try { CacheStore.halt(); } catch { /* best effort */ }
-    await _bounded(CacheStore.settled(), SIGNOUT_WAIT_MS);
     localStorage.removeItem(KEY);
     const wiped = clearLocalPlannerData();
     try {
@@ -267,8 +266,7 @@ export const Session = (() => {
   // An expired login also wipes the local planner data exactly like Sign out does, but WITHOUT
   // the unsaved-work confirm (owner ruling 2026-10-06: the expired session's unsaved work is
   // discarded). Theme/locale are kept. Runs pre-boot (app.js gate), so no autosave/cache writer exists yet to cancel.
-  // The cache wipe works with no backend open (IndexedDB is opened just to clear it); the promise is returned for callers that
-  // want to wait, the boot gate does not.
+  // The cache wipe needs no prior ready(); the promise is returned for callers that want to wait, the boot gate does not.
   function clearExpired(): Promise<void> {
     localStorage.removeItem(KEY);
     return clearLocalPlannerData();

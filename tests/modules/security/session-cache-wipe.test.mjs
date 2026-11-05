@@ -1,10 +1,10 @@
-// T6: sign-out, 12 h expiry and admin Reset wipe the compact autosave cache (marker, records, IndexedDB), a sign-in is the
+// T6: sign-out, 12 h expiry and admin Reset wipe the compact autosave cache (marker, records, quarantine copy), a sign-in is the
 // only thing that lifts a cache halt, and another tab's sign-out halts this tab's cache writes.
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { Session } from '../../../frontend/security/session.mjs';
-import { CacheStore, MARKER_KEY, LS_RECORD_PREFIX } from '../../../frontend/platform/cache-store.mjs';
-import { makeFakeBackend, installFakeLocalStorage, installFakeIndexedDB } from '../helpers/cache-backend-fake.mjs';
+import { CacheStore, MARKER_KEY, LS_RECORD_PREFIX, QUARANTINE_KEY } from '../../../frontend/platform/cache-store.mjs';
+import { installFakeLocalStorage } from '../helpers/cache-backend-fake.mjs';
 
 globalThis.window = globalThis.window || {};
 let lsf;
@@ -19,77 +19,50 @@ beforeEach(() => {
   lsf.ls.setItem('nimbus.session', JSON.stringify({ username: 'alice', role: 'planner', loggedInAt: Date.now() }));
 });
 afterEach(() => {
-  delete globalThis.localStorage; delete globalThis.indexedDB;
+  delete globalThis.localStorage;
   globalThis.location = origLoc;
   CacheStore._setBackendForTests();
 });
 
-const seedCache = (fi) => {
-  lsf.ls.setItem(MARKER_KEY, JSON.stringify({ v: 1, plant: 'P1', seq: 3, backend: fi ? 'idb' : 'localstorage', user: 'alice', dirty: true }));
+const seedCache = () => {
+  lsf.ls.setItem(MARKER_KEY, JSON.stringify({ v: 1, plant: 'P1', seq: 3, user: 'alice', dirty: true, dirtyPlants: ['P1'] }));
   lsf.ls.setItem(LS_RECORD_PREFIX + 'alice|P1', JSON.stringify({ key: 'alice|P1', user: 'alice', plant: 'P1', seq: 3, savedAt: 1, json: '{"rows":[{}]}' }));
   lsf.ls.setItem(LS_RECORD_PREFIX + 'bob|P2', JSON.stringify({ key: 'bob|P2', user: 'bob', plant: 'P2', seq: 1, savedAt: 1, json: '{"rows":[{}]}' }));
   lsf.ls.setItem('nimbus.state.v3', '{"tasks":[]}');
-  if (fi) fi.records.set('alice|P1', { key: 'alice|P1', user: 'alice', plant: 'P1', seq: 3, savedAt: 1, json: '{"rows":[{}]}' });
 };
-const cacheKeys = () => [...lsf.map.keys()].filter(k => k === MARKER_KEY || k.startsWith(LS_RECORD_PREFIX) || k === 'nimbus.state.v3');
+const cacheKeys = () => [...lsf.map.keys()].filter(k => k.startsWith('nimbus.cache.') || k === 'nimbus.state.v3');
 
-test('sign-out leaves no marker, no record (any user) and no legacy key, and nothing in IndexedDB', async () => {
-  const fi = installFakeIndexedDB();
-  seedCache(fi);
+test('sign-out leaves no marker, no record (any user), no quarantine copy and no legacy key', async () => {
+  seedCache();
+  lsf.ls.setItem(QUARANTINE_KEY, '{"raw":"x"}');
   await CacheStore.ready('alice');
   await Session.signOut({ hasPendingWork: () => false, beforeClear: () => {} });
   assert.deepEqual(cacheKeys(), []);
-  assert.equal(fi.records.size, 0);
   assert.equal(lsf.ls.getItem('nimbus.session'), null);
   assert.deepEqual(reloads, ['reload']);
 });
 
-test('sign-out halts the cache on its own (no beforeClear), lets an in-flight put land first, and clears after it', async () => {
-  const f = makeFakeBackend();
-  const real = f.backend.put; const gates = [];
-  f.backend.put = rec => new Promise(res => gates.push(() => res(real(rec))));
-  CacheStore._setBackendForTests({ defaultBackend: 'idb', idb: f.backend });
+test('sign-out halts the cache on its own (no beforeClear) and clears; a later write is refused', async () => {
   await CacheStore.ready('alice');
-  CacheStore.write({ user: 'alice', plant: 'P1', dirty: true }, '{"rows":[{}]}');   // put in flight, uncommitted
-  const out = Session.signOut({});
-  await new Promise(r => setTimeout(r, 20));
+  CacheStore.write({ user: 'alice', plant: 'P1', dirty: true }, '{"rows":[{}]}');
+  assert.ok(lsf.ls.getItem(LS_RECORD_PREFIX + 'alice|P1'), 'the write landed synchronously, so there is nothing in flight to wait for');
+  await Session.signOut({});
   assert.equal(CacheStore.stats().halted, true);
-  assert.deepEqual(reloads, [], 'sign-out is still waiting for the put to settle');
-  gates[0]();
-  await out;
-  assert.equal(f.data.size, 0, 'the put committed, then the clear removed it');
+  assert.deepEqual(cacheKeys(), []);
   assert.deepEqual(reloads, ['reload']);
   assert.equal(CacheStore.write({ user: 'alice', plant: 'P1', dirty: true }, '{"rows":[1]}').reason, 'halted');
 });
 
-test('sign-out does not wait past 500 ms for a put that never settles', async () => {
-  const f = makeFakeBackend();
-  CacheStore._setBackendForTests({ defaultBackend: 'idb', idb: f.backend });
-  await CacheStore.ready('alice');
-  f.ctl.hangPuts = true;
-  CacheStore.write({ user: 'alice', plant: 'P1', dirty: true }, '{"rows":[{}]}');
-  const t0 = Date.now();
-  await Session.signOut({});
-  const dt = Date.now() - t0;
-  assert.ok(dt >= 400 && dt < 2500, `waited ${dt} ms`);
-  assert.deepEqual(reloads, ['reload']);
-  assert.equal(lsf.ls.getItem(MARKER_KEY), null);
-});
-
-test('12 h expiry with no backend open (before boot) clears marker, records and IndexedDB', async () => {
-  const fi = installFakeIndexedDB();
-  seedCache(fi);
+test('12 h expiry with no store open (before boot) clears marker and records', async () => {
+  seedCache();
   assert.equal(CacheStore.stats().mode, 'none');
   await Session.clearExpired();
   assert.deepEqual(cacheKeys(), []);
-  assert.equal(fi.records.size, 0);
-  assert.ok(fi.ctl.dbs.every(d => d.closed));
   assert.equal(lsf.ls.getItem('nimbus.session'), null);
 });
 
-test('a ready() racing the expiry wipe waits for it, so a fast sign-in is never wiped afterwards', async () => {
-  const fi = installFakeIndexedDB();
-  seedCache(fi);
+test('a ready() right behind the expiry wipe is not wiped afterwards (the wipe is synchronous)', async () => {
+  seedCache();
   const wipe = Session.clearExpired();
   await CacheStore.ready('alice');
   await wipe;
@@ -97,25 +70,23 @@ test('a ready() racing the expiry wipe waits for it, so a fast sign-in is never 
 });
 
 test('admin Reset (clearLocalPlannerData with keepQueuedWork) wipes the cache but keeps queued calendar deletes', async () => {
-  const fi = installFakeIndexedDB();
-  seedCache(fi);
+  seedCache();
   lsf.ls.setItem('nimbus.calendar.pendingDeletes', '{"a":1}');
   await CacheStore.ready('alice');
   await Session.clearLocalPlannerData({ keepQueuedWork: true });
   assert.deepEqual(cacheKeys(), []);
-  assert.equal(fi.records.size, 0);
   assert.equal(lsf.ls.getItem('nimbus.calendar.pendingDeletes'), '{"a":1}');
 });
 
 test('clearLocalPlannerData removes the cache keys synchronously (before its promise settles)', () => {
-  seedCache(null);
+  seedCache();
   const p = Session.clearLocalPlannerData();
   assert.deepEqual(cacheKeys(), []);
   return p;
 });
 
 test('only signIn lifts a cache halt; it also sweeps other users\' orphans but keeps the signing-in user\'s rows', async () => {
-  seedCache(null);
+  seedCache();
   await CacheStore.ready('alice');
   CacheStore.halt();
   await CacheStore.ready('alice');
