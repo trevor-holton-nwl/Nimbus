@@ -1396,7 +1396,7 @@ export const SetupAdmin = (() => {
         </div>
         <div class="setup-vd-notes" data-setup-vd-notes></div>
         <div class="setup-vd-massfill" data-setup-vd-massfill></div>
-        <div data-setup-vd-rows></div>
+        <div class="setup-vd-rows" data-setup-vd-rows></div>
       </div>
       <div class="setup-action-bar">
         <span data-setup-vd-dirty-count aria-live="polite"></span>
@@ -1484,6 +1484,7 @@ export const SetupAdmin = (() => {
          <input type="text" id="setup-vd-massfill-input" class="input setup-vd-minutes" inputmode="numeric" data-setup-vd-massfill-input value="${Util.escapeHtml(previousFill)}" aria-label="${Util.escapeHtml(Util.t('ui.setup_vd_massfill_aria'))}">
          <button type="button" class="btn btn-ghost sm" data-setup-vd-massfill-apply ${state.matching.length ? '' : 'disabled'}>${Util.escapeHtml(Util.t('btn.setup_vd_massfill_apply'))}</button>`
       : '';
+    const keepScroll = rowsMount.scrollTop || 0;
     if (!state.all.length) rowsMount.innerHTML = state.fetchState === 'loading' ? '' : emptyState(Util.t('ui.setup_vd_no_values'));
     else if (!state.matching.length) rowsMount.innerHTML = emptyState(Util.t('ui.no_matches'));
     else {
@@ -1504,6 +1505,7 @@ export const SetupAdmin = (() => {
           <th>${Util.escapeHtml(Util.t('ui.setup_vd_col_value'))}</th><th>${Util.escapeHtml(Util.t('ui.setup_vd_col_source'))}</th><th class="setup-num">${Util.escapeHtml(Util.t('ui.setup_vd_col_minutes'))}</th>
         </tr></thead><tbody>${bodyRows}</tbody></table>${more > 0 ? `<p class="setup-vd-more" role="status">${Util.escapeHtml(Util.t('ui.setup_vd_more', { count: more }))}</p>` : ''}`;
     }
+    if (keepScroll) rowsMount.scrollTop = keepScroll;
     paintValueDefaultNotes();
     refreshValueDefaultBar();
   }
